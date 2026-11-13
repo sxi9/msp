@@ -195,8 +195,18 @@ uname
 or `cmd` on Windows. The agent writes it to a private temp file and runs that file. Use this
 when you need pipes, variables or several steps.
 
-**Presets** fill the console with common tasks: Uptime, Disk usage, Top processes, Reboot on
-Linux; System info, Drives, Top processes, Reboot on Windows.
+**Presets** fill the console (mode, shell, body or argv, and the timeout) with a saved task.
+The dropdown lists the server's preset library for the device's platform: out of the box
+the builtin set (Uptime, Disk usage, Top processes, Reboot on Linux; System info, Drives,
+Top processes, Reboot on Windows). To run your own library, copy the template
+`deploy/presets.example.json` (updates, service restarts, logs, Defender scan, temp cleanup,
+and more) next to the server, edit it and set `MSP_PRESETS=/path/to/presets.json` (Docker:
+mount it at `/data/presets.json`, see the compose file). Edits apply live on the server, no
+restart: save the file and reload the dashboard in the browser (F5; the library is fetched
+once per sign-in, so switching pages is not enough). An invalid file is refused when the server starts (it
+prints which preset is wrong and exits); an invalid edit while the server runs is ignored
+with a warning in the server log and the last good set stays in the dropdown. Only `exec`
+and `script` presets exist; lock, ping and message stay in the Actions row.
 
 **Timeout**: 1 to 3600 s (default 60). On timeout the agent kills the whole process group and
 reports `timeout` with exit code -1.

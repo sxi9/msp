@@ -9,7 +9,8 @@
 //
 // Environment (flags of the same name override): MSP_DB (./msp.db), MSP_LISTEN
 // (:8080), MSP_BASE_URL, MSP_TLS_CERT + MSP_TLS_KEY, MSP_SECURE_COOKIES (0/1),
-// MSP_TRUST_PROXY (0/1), MSP_AGENT_DIR, MSP_RETENTION_DAYS (7).
+// MSP_TRUST_PROXY (0/1), MSP_AGENT_DIR, MSP_RETENTION_DAYS (7), MSP_PRESETS (JSON
+// command preset library; "" = the builtin set).
 //
 // Exit codes: 0 ok, 1 runtime error, 2 bad arguments.
 package main
@@ -58,7 +59,9 @@ commands:
   version
 
 env: MSP_DB MSP_LISTEN MSP_BASE_URL MSP_TLS_CERT MSP_TLS_KEY MSP_SECURE_COOKIES
-     MSP_TRUST_PROXY MSP_AGENT_DIR MSP_RETENTION_DAYS
+     MSP_TRUST_PROXY MSP_AGENT_DIR MSP_RETENTION_DAYS MSP_PRESETS
+     (MSP_PRESETS: JSON command preset library, see deploy/presets.example.json;
+      unset = the builtin set; re-read whenever the file changes)
 `)
 }
 
@@ -154,6 +157,7 @@ func cmdServe(args []string, stderr io.Writer, log *slog.Logger) int {
 	trustProxy := fs.Bool("trust-proxy", envBool("MSP_TRUST_PROXY"), "honour the first X-Forwarded-For (MSP_TRUST_PROXY)")
 	agentDir := fs.String("agent-dir", envStr("MSP_AGENT_DIR", ""), "directory served at /dl/ (MSP_AGENT_DIR)")
 	retention := fs.Int("retention-days", envInt("MSP_RETENTION_DAYS", def.RetentionDays), "heartbeat retention in days (MSP_RETENTION_DAYS)")
+	presets := fs.String("presets", envStr("MSP_PRESETS", ""), "JSON command preset library, empty = builtin set (MSP_PRESETS)")
 	if err := fs.Parse(args); err != nil {
 		return exitUsage
 	}
@@ -169,6 +173,14 @@ func cmdServe(args []string, stderr io.Writer, log *slog.Logger) int {
 		fmt.Fprintln(stderr, "msp-server serve: --retention-days must be >= 1")
 		return exitUsage
 	}
+	// A bad presets file is refused before anything else starts; at runtime a
+	// bad rewrite only logs a warning and the last good set stays in service.
+	if *presets != "" {
+		if _, err := server.LoadPresets(*presets); err != nil {
+			fmt.Fprintf(stderr, "msp-server serve: %v\n", err)
+			return exitRuntime
+		}
+	}
 
 	cfg := def
 	cfg.Listen = *listen
@@ -179,6 +191,7 @@ func cmdServe(args []string, stderr io.Writer, log *slog.Logger) int {
 	cfg.TrustProxy = *trustProxy
 	cfg.AgentDir = *agentDir
 	cfg.RetentionDays = *retention
+	cfg.PresetsPath = *presets
 	cfg.Version = version
 
 	st, ok := openStore(*db, stderr)

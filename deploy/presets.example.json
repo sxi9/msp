@@ -1,0 +1,26 @@
+{
+  "linux": [
+    {"label": "Uptime", "kind": "exec", "argv": ["uptime"]},
+    {"label": "Disk usage", "kind": "script", "shell": "sh", "body": "df -h\n"},
+    {"label": "Top processes", "kind": "script", "shell": "sh", "body": "ps aux --sort=-%cpu | head -20\n"},
+    {"label": "Updates available", "kind": "script", "shell": "bash", "body": "apt-get update -qq && apt list --upgradable 2>/dev/null\n", "timeout_s": 300},
+    {"label": "Install all updates", "kind": "script", "shell": "bash", "body": "DEBIAN_FRONTEND=noninteractive apt-get upgrade -y\n", "timeout_s": 1800},
+    {"label": "Restart a service", "kind": "exec", "argv": ["systemctl", "restart", "cups"]},
+    {"label": "Failed services", "kind": "exec", "argv": ["systemctl", "--failed", "--no-pager"]},
+    {"label": "Last 50 log lines", "kind": "exec", "argv": ["journalctl", "-n", "50", "--no-pager"]},
+    {"label": "Logged-in users", "kind": "exec", "argv": ["who"]},
+    {"label": "Reboot", "kind": "exec", "argv": ["systemctl", "reboot"]}
+  ],
+  "windows": [
+    {"label": "System info", "kind": "script", "shell": "powershell", "body": "Get-ComputerInfo | Select-Object OsName,OsVersion,OsUptime\n"},
+    {"label": "Drives", "kind": "script", "shell": "powershell", "body": "Get-PSDrive -PSProvider FileSystem\n"},
+    {"label": "Top processes", "kind": "script", "shell": "powershell", "body": "Get-Process | Sort-Object CPU -Descending | Select-Object -First 20\n"},
+    {"label": "Pending Windows updates", "kind": "script", "shell": "powershell", "body": "(New-Object -ComObject Microsoft.Update.Session).CreateUpdateSearcher().Search('IsInstalled=0').Updates | Select-Object Title\n", "timeout_s": 600},
+    {"label": "Restart Print Spooler", "kind": "script", "shell": "powershell", "body": "Restart-Service Spooler -Force; Get-Service Spooler\n"},
+    {"label": "Flush DNS", "kind": "exec", "argv": ["ipconfig", "/flushdns"]},
+    {"label": "Group Policy update", "kind": "exec", "argv": ["gpupdate", "/force"], "timeout_s": 300},
+    {"label": "Defender quick scan", "kind": "script", "shell": "powershell", "body": "Start-MpScan -ScanType QuickScan\n", "timeout_s": 1800},
+    {"label": "Clear temp files", "kind": "script", "shell": "cmd", "body": "del /q /s %TEMP%\\*\r\n"},
+    {"label": "Reboot", "kind": "exec", "argv": ["shutdown", "/r", "/t", "0"]}
+  ]
+}

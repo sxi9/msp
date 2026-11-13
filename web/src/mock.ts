@@ -1,7 +1,7 @@
 // In-memory stand-in for the server, active when location.search has mock=1
 // (add &role=viewer|operator to try a weaker role). Lets the dashboard be
 // developed and demoed without a backend. Nothing here ships to the server.
-import type { Alert, AuditEntry, Command, Device, EnrollmentToken, NewCommand, Org, User } from './types.ts';
+import type { Alert, AuditEntry, Command, Device, EnrollmentToken, NewCommand, Org, Preset, User } from './types.ts';
 
 interface Reply { status: number; body: unknown }
 
@@ -51,6 +51,21 @@ const audit: AuditEntry[] = [
   { id: 2, at: iso(899.5e3), actor_type: 'device', actor_id: 1, actor_label: 'device:1', org_id: 1, action: 'command.finished', target_type: 'command', target_id: 1, ip: '10.0.1.1', detail: { status: 'done', exit_code: 0 } },
   { id: 1, at: iso(900e3), actor_type: 'user', actor_id: 1, actor_label: me.email, org_id: 1, action: 'command.queued', target_type: 'command', target_id: 1, ip: '127.0.0.1', detail: { kind: 'exec', argv: ['uname', '-a'] } },
 ];
+// The server's builtin preset library (internal/server/presets.go), as GET /api/v1/presets serves it.
+const presets: { linux: Preset[]; windows: Preset[] } = {
+  linux: [
+    { label: 'Uptime', kind: 'exec', argv: ['uptime'], timeout_s: 60 },
+    { label: 'Disk usage', kind: 'script', shell: 'sh', body: 'df -h\n', timeout_s: 60 },
+    { label: 'Top processes', kind: 'script', shell: 'sh', body: 'ps aux --sort=-%cpu | head -20\n', timeout_s: 60 },
+    { label: 'Reboot', kind: 'exec', argv: ['systemctl', 'reboot'], timeout_s: 60 },
+  ],
+  windows: [
+    { label: 'System info', kind: 'script', shell: 'powershell', body: 'Get-ComputerInfo | Select-Object OsName,OsUptime\n', timeout_s: 60 },
+    { label: 'Drives', kind: 'script', shell: 'powershell', body: 'Get-PSDrive -PSProvider FileSystem\n', timeout_s: 60 },
+    { label: 'Top processes', kind: 'script', shell: 'powershell', body: 'Get-Process | Sort-Object CPU -Descending | Select-Object -First 20\n', timeout_s: 60 },
+    { label: 'Reboot', kind: 'exec', argv: ['shutdown', '/r', '/t', '0'], timeout_s: 60 },
+  ],
+};
 let nextId = 100;
 const log = (action: string, target_type: string, target_id: number | null, org_id: number | null, detail: Record<string, unknown> = {}) =>
   audit.unshift({ id: nextId++, at: iso(0), actor_type: 'user', actor_id: me.id, actor_label: me.email, org_id, action, target_type, target_id, ip: '127.0.0.1', detail });
@@ -191,6 +206,7 @@ function route(method: string, path: string, body: unknown): Reply {
     if (d.status !== 'offline') setTimeout(() => finish(c), 400);
     return ok({ command: c }, 201);
   }
+  if (p === '/api/v1/presets') return ok({ presets, source: 'builtin', path: '' });
   if ((x = m(/^\/api\/v1\/commands\/(\d+)$/))) {
     const c = commands.find((c) => c.id === Number(x![1]));
     return c ? ok({ command: c }) : err(404, 'not_found');

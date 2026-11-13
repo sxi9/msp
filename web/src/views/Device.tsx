@@ -4,28 +4,14 @@ import { usePoll } from '../hooks.ts';
 import { navigate } from '../router.ts';
 import { ago, duration, gb, pct, uptime, when } from '../lib/format.ts';
 import { argvPreview, parseArgv } from '../lib/argv.ts';
-import { COMMAND_DONE, canOperate, isAdmin, type Command, type Device as DeviceT, type NewCommand, type User } from '../types.ts';
+import { loadPresets, presetFill, presetsFor } from '../lib/presets.ts';
+import { COMMAND_DONE, canOperate, isAdmin, type Command, type Device as DeviceT, type NewCommand, type Preset, type User } from '../types.ts';
 import { StatusDot } from '../components/StatusDot.tsx';
 import { Sparkline } from '../components/Sparkline.tsx';
 import { CopyButton } from '../components/CopyBlock.tsx';
 import { ConfirmButton } from '../components/Confirm.tsx';
 import { Battery, PLATFORM_SHORT } from '../components/DeviceTable.tsx';
 
-interface Preset { label: string; cmd: Omit<NewCommand, 'timeout_s'> }
-const PRESETS: Record<'linux' | 'windows', Preset[]> = {
-  linux: [
-    { label: 'Uptime', cmd: { kind: 'exec', argv: ['uptime'] } },
-    { label: 'Disk usage', cmd: { kind: 'script', shell: 'sh', body: 'df -h\n' } },
-    { label: 'Top processes', cmd: { kind: 'script', shell: 'sh', body: 'ps aux --sort=-%cpu | head -20\n' } },
-    { label: 'Reboot', cmd: { kind: 'exec', argv: ['systemctl', 'reboot'] } },
-  ],
-  windows: [
-    { label: 'System info', cmd: { kind: 'script', shell: 'powershell', body: 'Get-ComputerInfo | Select-Object OsName,OsUptime\n' } },
-    { label: 'Drives', cmd: { kind: 'script', shell: 'powershell', body: 'Get-PSDrive -PSProvider FileSystem\n' } },
-    { label: 'Top processes', cmd: { kind: 'script', shell: 'powershell', body: 'Get-Process | Sort-Object CPU -Descending | Select-Object -First 20\n' } },
-    { label: 'Reboot', cmd: { kind: 'exec', argv: ['shutdown', '/r', '/t', '0'] } },
-  ],
-};
 const SHELLS: Record<string, string[]> = { linux: ['sh', 'bash'], windows: ['powershell', 'cmd'] };
 
 /** Readable labels for the protocol's facts keys; unknown keys show as-is. */
@@ -199,12 +185,22 @@ function Console({ device, onQueue }: { device: DeviceT; onQueue: (c: NewCommand
   const timeout = parseTimeout(timeoutText);
   const [busy, setBusy] = useState(false);
   const argv = parseArgv(text);
+  // The preset library comes from GET /api/v1/presets (builtin set or the MSP_PRESETS
+  // file), fetched once per app session; null while loading, [] when the fetch failed.
+  const [presets, setPresets] = useState<Preset[] | null>(null);
+  useEffect(() => {
+    let alive = true;
+    loadPresets(api.presets).then((lib) => { if (alive) setPresets(presetsFor(lib, platform)); });
+    return () => { alive = false; };
+  }, [platform]);
   const usePreset = (i: number) => {
-    const p = PRESETS[platform][i];
+    const p = presets?.[i];
     if (!p) return;
-    setMode(p.cmd.kind as 'exec' | 'script');
-    if (p.cmd.kind === 'exec') setText((p.cmd.argv ?? []).join('\n'));
-    else { setText(p.cmd.body ?? ''); setShell(p.cmd.shell ?? shells[0]); }
+    const f = presetFill(p);
+    setMode(f.mode);
+    setText(f.text);
+    if (f.mode === 'script') setShell(shells.includes(f.shell) ? f.shell : shells[0]);
+    setTimeoutText(f.timeoutText);
   };
   const run = async (e: Event) => {
     e.preventDefault();
@@ -225,9 +221,9 @@ function Console({ device, onQueue }: { device: DeviceT; onQueue: (c: NewCommand
         {mode === 'script' && (
           <select value={shell} onChange={(e) => setShell(e.currentTarget.value)}>{shells.map((s) => <option key={s} value={s}>{s}</option>)}</select>
         )}
-        <select value={-1} onChange={(e) => { usePreset(Number(e.currentTarget.value)); e.currentTarget.value = '-1'; }}>
+        <select value={-1} disabled={!presets || presets.length === 0} title={presets === null ? 'Loading presets' : presets.length === 0 ? 'No presets for this platform' : 'Fill the console from the preset library'} onChange={(e) => { usePreset(Number(e.currentTarget.value)); e.currentTarget.value = '-1'; }}>
           <option value={-1}>Presets…</option>
-          {PRESETS[platform].map((p, i) => <option key={p.label} value={i}>{p.label}</option>)}
+          {(presets ?? []).map((p, i) => <option key={p.label} value={i}>{p.label}</option>)}
         </select>
         <label>Timeout s<input type="number" min={1} max={3600} placeholder="60" value={timeoutText} onInput={(e) => setTimeoutText(e.currentTarget.value)} onBlur={() => setTimeoutText(String(timeout))} /></label>
       </div>

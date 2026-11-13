@@ -2,6 +2,7 @@ import { render } from 'preact';
 import { useEffect, useState } from 'preact/hooks';
 import './styles.css';
 import { api } from './api.ts';
+import { resetPresets } from './lib/presets.ts';
 import { navigate, useRoute, type Route } from './router.ts';
 import type { User } from './types.ts';
 import { Layout } from './components/Layout.tsx';
@@ -42,7 +43,7 @@ function App() {
   if (user === undefined) return <div class="center muted">Loading…</div>;
   if (user === null) return <div class="center"><a href="#/login">Sign in</a></div>;
   const logout = async () => {
-    try { await api.logout(); } finally { setUser(null); navigate('#/login'); }
+    try { await api.logout(); } finally { resetPresets(); setUser(null); navigate('#/login'); }
   };
   return <Layout user={user} route={route} onLogout={logout}>{page(route, user)}</Layout>;
 }

@@ -48,6 +48,20 @@ Real installs use the one-liners shown next to each enrollment token in the dash
 (`install.sh`, `install.ps1`, the APK), served from `MSP_AGENT_DIR` at `/dl/`.
 Production runs behind TLS: see `docs/OPS.md`.
 
+Server settings are environment variables (a flag of the same name overrides each; the
+full table is in `docs/OPS.md` section 1):
+
+| variable | default | meaning |
+|---|---|---|
+| `MSP_DB` | `./msp.db` | SQLite file |
+| `MSP_LISTEN` | `:8080` | listen address |
+| `MSP_BASE_URL` | `""` | public URL printed into install one-liners |
+| `MSP_TLS_CERT` / `MSP_TLS_KEY` | unset | serve TLS directly when both are set |
+| `MSP_SECURE_COOKIES` / `MSP_TRUST_PROXY` | `0` | behind your own TLS proxy: `1` and `1` |
+| `MSP_AGENT_DIR` | `""` | directory served at `/dl/` |
+| `MSP_RETENTION_DAYS` | `7` | heartbeat retention |
+| `MSP_PRESETS` | `""` | JSON command preset library for the device console (template: `deploy/presets.example.json`); unset = builtin set; edits apply live on the server (reload the dashboard to see them) |
+
 ## Make targets
 
 | target          | what it does                                                                 |

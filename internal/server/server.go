@@ -24,6 +24,7 @@ type Config struct {
 	TLSCert       string // PEM certificate path; TLS is served when TLSCert and TLSKey are both set
 	TLSKey        string
 	AgentDir      string        // directory served at /dl/ ("" = disabled)
+	PresetsPath   string        // JSON command preset library replacing the builtin set ("" = builtin); re-read when its mtime changes
 	SecureCookies bool          // force the Secure flag on the session cookie (behind a TLS proxy)
 	TrustProxy    bool          // honour the first X-Forwarded-For address
 	Version       string        // reported by /api/agent/v1/ping
@@ -58,6 +59,7 @@ type Server struct {
 	notifier    *notifier
 	loginLimit  *rateLimiter
 	enrollLimit *rateLimiter
+	presets     *presetLibrary
 
 	// shutdown is closed when Run starts shutting the listener down so that
 	// every parked sync long-poll answers at once (http.Server.Shutdown does
@@ -107,6 +109,7 @@ func New(st *store.Store, cfg Config, log *slog.Logger) *Server {
 		notifier:    newNotifier(),
 		loginLimit:  newRateLimiter(10),
 		enrollLimit: newRateLimiter(enrollPerMinute),
+		presets:     newPresetLibrary(cfg.PresetsPath, log),
 		shutdown:    make(chan struct{}),
 	}
 }
@@ -153,8 +156,12 @@ func (s *Server) Handler() http.Handler {
 }
 
 // Run serves until ctx is done, starting the background jobs alongside, then
-// shuts the listener down gracefully (10 s).
+// shuts the listener down gracefully (10 s). A configured presets file that
+// does not load is a startup error: nothing is served.
 func (s *Server) Run(ctx context.Context) error {
+	if err := s.presets.load(); err != nil {
+		return err
+	}
 	srv := &http.Server{
 		Addr:              s.cfg.Listen,
 		Handler:           s.Handler(),

@@ -343,6 +343,48 @@ COMMAND = {"id":7,"device_id":42,"org_id":1,"created_by":1,"created_by_email":"a
 - `POST /api/v1/devices/{id}/revoke` (admin) -> `204` (`token_hash` NULL; audit `device.revoked`).
 - `DELETE /api/v1/devices/{id}` (admin) -> `204` (cascade; audit `device.deleted`).
 
+### Presets
+
+- `GET /api/v1/presets` (any role) ->
+  `{"presets":{"linux":[PRESET...],"windows":[PRESET...]},"source":"builtin"|"file","path":"<MSP_PRESETS or empty>"}`
+
+```
+PRESET = {"label":"Disk usage","kind":"script","shell":"sh","body":"df -h\n","timeout_s":60}
+       | {"label":"Uptime","kind":"exec","argv":["uptime"],"timeout_s":60}
+```
+
+The library behind the device console's "Presets…" dropdown. Entries are returned in file
+order with only the keys of their kind (`argv` for exec; `shell` + `body` for script) and
+`timeout_s` always filled in. Both arrays are always present (`[]` when empty).
+
+`source` is `builtin` (the set compiled into `internal/server/presets.go`: Uptime, Disk
+usage, Top processes, Reboot; System info, Drives, Top processes, Reboot) unless `MSP_PRESETS`
+names a file, which replaces the builtin set entirely. File format (template
+`deploy/presets.example.json`):
+
+```json
+{"linux":[PRESET...],"windows":[PRESET...]}
+```
+
+- `label`: 1..60 characters, unique within its platform.
+- `kind`: `exec` or `script` only (lock, ping and message are actions, never presets).
+- `argv` (exec only): `len >= 1`, each element <= 4096 bytes, as `Command.Validate`, and
+  each element a single trimmed non-empty line (no newline or carriage return, no leading or
+  trailing whitespace): the console shows argv one element per line and sends it back that
+  way, so an element that cannot survive that round trip is refused by the loader.
+- `shell` (script only): `sh|bash` under `linux`, `powershell|cmd` under `windows`.
+- `body` (script only): non-empty, <= 262144 bytes; a body without a trailing newline gets
+  one appended by the loader.
+- `timeout_s`: optional, 1..3600; omitted = 60. `0` is an error (unlike the command API).
+- Unknown keys anywhere are an error (`DisallowUnknownFields`); a platform key may be
+  omitted (then that platform has no presets).
+
+Loading: at startup an unreadable or invalid file makes `msp-server serve` exit 1 with
+`presets file <path>: <platform>[<index>] "<label>": <problem>`. At runtime every GET
+re-reads the file when its mtime or size changed; an invalid rewrite is logged once as
+`WARN presets reload failed, keeping the last good set` with the same detail and the last
+good set keeps being served.
+
 ### Alerts, audit, users
 
 - `GET /api/v1/alerts?state=open|all&org_id=` -> `{"alerts":[{"id":9,"org_id":1,"org_name":"...","device_id":42,"hostname":"ws-01","type":"offline","severity":"high","message":"no sync for 6m","opened_at":"...","resolved_at":null,"acknowledged_by":null,"acknowledged_at":null}]}` (default open; limit 500).
@@ -399,7 +441,8 @@ token); `msp-server version`.
 Env (flags of the same name override): `MSP_DB` (`./msp.db`), `MSP_LISTEN` (`:8080`),
 `MSP_BASE_URL` (`""`), `MSP_TLS_CERT` + `MSP_TLS_KEY` (serve TLS when both set),
 `MSP_SECURE_COOKIES` (0/1), `MSP_TRUST_PROXY` (0/1: honour the first `X-Forwarded-For`),
-`MSP_AGENT_DIR` (`""`), `MSP_RETENTION_DAYS` (7).
+`MSP_AGENT_DIR` (`""`), `MSP_RETENTION_DAYS` (7), `MSP_PRESETS` (`""`: JSON command preset
+library, section 6 "Presets"; `--presets`).
 
 **Agent** (`cmd/msp-agent`):
 `msp-agent enroll --server URL --token et_... [--config PATH] [--ca-file PEM] [--interval 30] [--insecure-http]`

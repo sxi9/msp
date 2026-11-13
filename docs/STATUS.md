@@ -42,6 +42,7 @@ Last update: 2026-11-13 (fix pass after review). Server, Linux agent and dashboa
 | Remote lock, managed devices only, audited | All agents, Server, Dashboard | `WORKING` (queue, delivery, audit, role and tenant checks) / `NOT VERIFIED` (the lock itself: needs a real Ubuntu desktop, Windows PC or Android phone; on the headless build host it reports failed, see known issues) |
 | Ping and message commands | All agents | `WORKING` |
 | Command history with output, exit code, status | Server, Dashboard | `WORKING` |
+| Command preset library (file-based) | Server, Dashboard | `WORKING` (`TestPresets*` loader, endpoint, mtime reload and last-good fallback; `web/src/lib/presets.test.ts`; live check with `MSP_PRESETS=deploy/presets.example.json`: file served, "Failed services" picked and run from the dashboard, edit picked up without restart, screenshots 14, 15) |
 | Lost-command sweeper | Server | `WORKING` (`TestMarkLostCommands`, `TestLostCommands`) |
 | Alerts: offline, disk_full, memory_high, battery_low | Server, Dashboard | `WORKING` |
 | Alert acknowledge and auto-resolve | Server, Dashboard | `WORKING` |

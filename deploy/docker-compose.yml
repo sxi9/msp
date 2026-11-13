@@ -27,6 +27,10 @@ services:
       - "8080:8080"
     volumes:
       - ./data:/data
+      # Command preset library (the "Presets…" dropdown of the device console). Copy
+      # presets.example.json to deploy/presets.json, edit it, mount it and set MSP_PRESETS
+      # below; edits are picked up live, no restart needed (docs/OPS.md section 1).
+      # - ./presets.json:/data/presets.json:ro
     environment:
       # Absolute URL technicians and agents use to reach the server; printed into the
       # install one-liners next to every enrollment token.
@@ -37,6 +41,8 @@ services:
       # for rate limits and the audit log. Never 1 when :8080 is reachable directly.
       MSP_TRUST_PROXY: ${MSP_TRUST_PROXY:-0}
       MSP_RETENTION_DAYS: ${MSP_RETENTION_DAYS:-7}
+      # Uncomment together with the presets.json volume above.
+      # MSP_PRESETS: /data/presets.json
 
   # Automatic HTTPS with Let's Encrypt. Requires a public DNS name pointing at this host and
   # ports 80 + 443 reachable from the internet (HTTP-01 challenge). With Caddy in front set

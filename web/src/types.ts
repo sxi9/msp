@@ -50,6 +50,12 @@ export interface Command {
 /** Body of POST /api/v1/devices/{id}/commands; only the keys of the kind are sent. */
 export interface NewCommand { kind: CommandKind; argv?: string[]; shell?: string; body?: string; text?: string; timeout_s: number }
 
+/** One entry of GET /api/v1/presets: argv for exec, shell + body for script; timeout_s always filled in. */
+export interface Preset { label: string; kind: 'exec' | 'script'; argv?: string[]; shell?: string; body?: string; timeout_s: number }
+
+/** Body of GET /api/v1/presets: the builtin set or the MSP_PRESETS file, in file order. */
+export interface PresetLibrary { presets: { linux: Preset[]; windows: Preset[] }; source: 'builtin' | 'file'; path: string }
+
 export interface Alert {
   id: number; org_id: number; org_name: string; device_id: number; hostname: string; type: string;
   severity: Severity; message: string; opened_at: string; resolved_at: string | null;

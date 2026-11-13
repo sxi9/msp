@@ -44,6 +44,7 @@ func registerDashboard(s *Server, mux *http.ServeMux) {
 	with(RoleOperator, "POST /api/v1/devices/{id}/commands", s.handleCreateCommand)
 	get("/api/v1/devices/{id}/commands", s.handleListCommands)
 	get("/api/v1/commands/{id}", s.handleGetCommand)
+	get("/api/v1/presets", s.handleListPresets)
 
 	// Alerts, audit, users.
 	get("/api/v1/alerts", s.handleListAlerts)

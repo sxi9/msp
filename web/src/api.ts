@@ -2,7 +2,7 @@
 // ?mock=1 in the URL every call is answered in-memory by mock.ts instead.
 import type {
   Alert, AuditEntry, Command, Device, DeviceDetail, EnrollmentToken, Heartbeat, NewCommand, Org,
-  Summary, TokenCreated, User,
+  PresetLibrary, Summary, TokenCreated, User,
 } from './types.ts';
 import { mockRequest } from './mock.ts';
 
@@ -79,6 +79,7 @@ export const api = {
   createCommand: (deviceId: number, c: NewCommand) => request<{ command: Command }>('POST', `/api/v1/devices/${deviceId}/commands`, c),
   listCommands: (deviceId: number, limit = 50) => request<{ commands: Command[] }>('GET', `/api/v1/devices/${deviceId}/commands?limit=${limit}`),
   getCommand: (id: number) => request<{ command: Command }>('GET', `/api/v1/commands/${id}`),
+  presets: () => request<PresetLibrary>('GET', '/api/v1/presets'),
   revokeDevice: (id: number) => request<void>('POST', `/api/v1/devices/${id}/revoke`),
   deleteDevice: (id: number) => request<void>('DELETE', `/api/v1/devices/${id}`),
   listAlerts: (state: 'open' | 'all', org_id?: number) => request<{ alerts: Alert[] }>('GET', `/api/v1/alerts${qs({ state, org_id })}`),

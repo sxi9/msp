@@ -18,6 +18,7 @@ environment variables; a flag of the same name overrides the variable.
 | `MSP_TRUST_PROXY`    | `0`          | `1` honours the first `X-Forwarded-For` hop (only behind your own proxy) |
 | `MSP_AGENT_DIR`      | `""`         | directory served at `/dl/` (agent binaries, `SHA256SUMS`, installers)    |
 | `MSP_RETENTION_DAYS` | `7`          | heartbeat samples older than this are pruned hourly                      |
+| `MSP_PRESETS`        | `""`         | JSON command preset library for the device console; unset = the builtin set (see below) |
 
 Bootstrap (first admin, first org, first enrollment token), then serve:
 
@@ -195,6 +196,24 @@ are recorded in `schema_migrations`. Downgrades are not supported: restore the b
 before the upgrade instead. Agents keep working across server upgrades as long as
 `docs/PROTOCOL.md` does not change; agents are not self-updating in phase 1, re-run the
 installer to update them.
+
+**Command presets.** The "Presets…" dropdown of the device console is a library the server
+serves at `GET /api/v1/presets`. Without `MSP_PRESETS` it is the builtin set (four entries
+per platform, compiled into `internal/server/presets.go`). To run your own, copy
+`deploy/presets.example.json` (ten entries per platform: updates, services, logs, Defender
+scan, temp cleanup, ...) somewhere the server can read it, edit it and point `MSP_PRESETS`
+(or `--presets`) at it; the file then replaces the builtin set entirely. Format and rules are
+in `docs/PROTOCOL.md` section 6 ("Presets"): one `linux` and one `windows` list, each entry
+`label` (unique per platform) + `kind` `exec` (`argv`) or `script` (`shell`, `body`) +
+optional `timeout_s` (1..3600, default 60); unknown keys are refused. Edit the file in place
+at any time: the server re-reads it when its mtime changes, on the next `GET /api/v1/presets`,
+with no restart; the dashboard fetches the library once per sign-in, so a technician sees
+the new list after a browser reload (F5) or a fresh login, not by merely switching pages. A file that does not load at start makes `msp-server serve` exit with a
+message naming the file, the platform, the preset and the problem; a bad edit while running
+logs a `WARN presets reload failed, keeping the last good set` line with the same detail
+and the previous set stays in service until the file is fixed. With Docker, mount the file
+(`./presets.json:/data/presets.json:ro`) and set `MSP_PRESETS=/data/presets.json`; the
+compose file carries the commented lines.
 
 ## 8. Logs, retention, firewall
 

@@ -51,6 +51,7 @@ P1 = first build. P2 = next. P3 = after that.
 - P1 Device list: online/offline, OS, last seen, filters
 - P1 Device page: live metrics, inventory, software, command history, Lock button
 - P1 Run command / saved script on one device or a group
+- P1 Command preset library: server-served dropdown, editable JSON file (`MSP_PRESETS`) with live reload, builtin fallback
 - P1 Alerts page: acknowledge, resolve
 - P1 Audit log view
 - P2 Browser terminal for remote shell

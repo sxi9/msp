@@ -62,8 +62,9 @@ test or a screenshot in `docs/screenshots/`. Unticked items are not done.
 - [x] Device page: metrics, inventory, software, command history, Run command, Lock (screenshots 05–07). Not verified: software list, not in phase 1
 - [x] Alerts page with acknowledge / resolve (screenshots 08, 11, 12: open then acked; resolve is automatic when the device syncs again, `TestOfflineAlertOpensAndResolves`)
 - [x] Audit log page (screenshot 09)
-- [x] Phone width: no horizontal scroll (scrollWidth 400 at a 400 px viewport on all 13 pages)
-- [x] Screenshots of every page in docs/screenshots/ (13 pages × desktop and phone, see its README)
+- [x] Command preset library: file loads, endpoint serves it, dashboard uses it, live reload (live run with `MSP_PRESETS=deploy/presets.example.json`: `GET /api/v1/presets` returned `source: file` with the 10 Linux + 10 Windows entries; picking "Failed services" filled argv and timeout and ran on the agent, screenshots 14, 15; an edit to the file showed up on the next request without restart, a broken file kept the last good set and was logged; `TestPresets*`, `web/src/lib/presets.test.ts`)
+- [x] Phone width: no horizontal scroll (scrollWidth 400 at a 400 px viewport on all 15 pages)
+- [x] Screenshots of every page in docs/screenshots/ (15 pages × desktop and phone, see its README)
 
 ## Docs
 - [x] README: run, enroll, deploy (the Quickstart commands are the ones the live run used and they worked; deploy points to docs/OPS.md)
