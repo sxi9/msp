@@ -259,7 +259,7 @@ ShellSession}` (the last three belong to `shell`); `Command.Validate()` checks t
 | `lock`    | linux, windows, android | none                           | locks the interactive session(s)                   |
 | `ping`    | linux, windows, android | none                           | exit 0, stdout `pong`                              |
 | `message` | linux, windows, android | `text` (non-empty, <= 4096 bytes) | shows the text to the logged-in user            |
-| `shell`   | linux, windows          | `shell` (optional), `cols`/`rows` (optional), `timeout_s` = max duration | opens a PTY/ConPTY and relays it over a WebSocket (section 7) |
+| `shell`   | linux, windows          | `shell` (optional), `cols`/`rows` (optional), `timeout_s` = max duration | opens a PTY/ConPTY and relays it over a WebSocket (section 6, "Remote shell") |
 
 Common rules:
 

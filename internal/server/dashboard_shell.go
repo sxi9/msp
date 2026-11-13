@@ -181,6 +181,19 @@ func (s *Server) handleBrowserShell(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "not_found", "")
 		return
 	}
+	// Reject a reconnect to a shell that has already closed. Without a live
+	// session in memory, getOrCreate would build a brand-new session for the
+	// finished command; its teardown would then overwrite the flushed
+	// shell_sessions row (empty transcript, zeroed bytes, a new close reason) and
+	// write a duplicate shell.closed audit, destroying the retained transcript.
+	// A non-null closed_at on the row is the authoritative "already ended" signal;
+	// a legitimate first connect has no row yet (it is created on attach).
+	if s.shells().session(id) == nil {
+		if sess, serr := s.st.GetShellSession(ctx, id); serr == nil && sess.ClosedAt != nil {
+			writeError(w, http.StatusConflict, "shell_closed", "the shell session has already ended")
+			return
+		}
+	}
 	t, ok := s.shells().consumeTicket(id, ticketVal, s.now())
 	if !ok {
 		writeError(w, http.StatusForbidden, "forbidden", "invalid or expired ticket")

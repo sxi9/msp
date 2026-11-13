@@ -216,12 +216,20 @@ func (ss *shellSession) forwardToAgent(typ websocket.MessageType, data []byte) b
 }
 
 // supervise enforces the four server-side deadlines until the session closes.
-// The deadlines are wall-clock durations measured from when the relay started
-// (which is within milliseconds of the POST, so the agent-connect deadline still
-// honours "within 60 s of the POST"); the ticket's 60 s window, by contrast, is
-// measured on the store clock so the tests can drive it with clock.advance.
+// The idle / max-duration / shutdown deadlines are wall-clock durations measured
+// from when the relay started; the agent-connect deadline, by contrast, is
+// anchored to the POST (RS1 section B: "within 60 s of the POST"), so a browser
+// that connects late — the ticket stays valid for up to 60 s after the POST —
+// does not win a fresh 60 s. The remaining window is agentConnectTTL minus the
+// store-clock time already elapsed since postTime, floored at 0. The ticket's
+// 60 s window is likewise measured on the store clock so the tests can drive it
+// with clock.advance.
 func (ss *shellSession) supervise() {
-	agentTimer := time.NewTimer(ss.mgr.agentConnectTTL)
+	agentConnectLeft := ss.mgr.agentConnectTTL - ss.srv.now().Sub(ss.postTime)
+	if agentConnectLeft < 0 {
+		agentConnectLeft = 0
+	}
+	agentTimer := time.NewTimer(agentConnectLeft)
 	idleTimer := time.NewTimer(ss.mgr.idleTimeout)
 	maxTimer := time.NewTimer(ss.maxDur)
 	defer agentTimer.Stop()
