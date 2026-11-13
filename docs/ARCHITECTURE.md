@@ -142,6 +142,23 @@ client, so MFA, command signing and IP allowlisting are phase-2 preconditions fo
 ## Reserved for later phases (names kept stable)
 
 Phase 2: remote shell over a WebSocket relay, Postgres store, command ack, token rotation,
-MFA, per-org alert thresholds with email/webhooks, agent self-update. Phase 3: remote desktop
-through a self-hosted branded RustDesk relay (D4); `devices.rustdesk_id` is already a nullable
-TEXT column so no migration is needed then; Android device-owner mode.
+MFA, per-org alert thresholds with email/webhooks, agent self-update. Phase 3: Android
+device-owner mode; remote desktop phase B (the branded RustDesk client,
+`docs/RUSTDESK-BRANDING.md`).
+
+## Remote desktop (RD1, D4 phase A)
+
+Built on top of the pieces above without a new transport: `hbbs`/`hbbr`
+(`rustdesk/rustdesk-server:1.1.16`, host networking) run next to the server in the compose
+file; the server knows them as `Config.RustdeskHost`/`RustdeskKey` (both or neither) and
+tells every agent in the `rustdesk` block of the enroll and sync responses; the desktop
+agent keeps them in `agent.json`, reports `facts.rustdesk_id` (read with `rustdesk --get-id`
+from the official client installed by the installers' `--with-rustdesk`) and offers
+`msp-agent rustdesk setup`, which writes the client's relay options and permanent password
+(never sent to the server); the store keeps the id in the reserved `devices.rustdesk_id`
+column (no migration); the dashboard's device page shows the id and a Connect button that
+POSTs `/api/v1/devices/{id}/remote-desktop` (audit `device.remote_desktop_opened`) and
+opens the returned `rustdesk://connect/<id>` in the technician's own client. The screen
+session runs client-to-client through hbbs/hbbr; the MSP server is never in that path.
+Package rules are unchanged: `internal/agent` shells out to the RustDesk binary and imports
+nothing new.

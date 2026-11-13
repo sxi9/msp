@@ -51,7 +51,8 @@ type EnrollmentToken struct {
 
 // Device is an enrolled endpoint. Status is computed by StatusOf at read
 // time; Revoked means token_hash IS NULL; CanRunCommands gates the free-form
-// exec/script console (desktop platform and not revoked).
+// exec/script console (desktop platform and not revoked); RustdeskID is the
+// id the agent last reported in its facts (nil when unknown, RD1).
 type Device struct {
 	ID              int64      `json:"id"`
 	OrgID           int64      `json:"org_id"`
@@ -76,6 +77,7 @@ type Device struct {
 	UptimeS         *int64     `json:"uptime_s"`
 	OpenAlerts      int        `json:"open_alerts"`
 	CanRunCommands  bool       `json:"can_run_commands"`
+	RustdeskID      *string    `json:"rustdesk_id"`
 	FactsJSON       string     `json:"-"`
 	LastMetricsJSON string     `json:"-"`
 }
@@ -170,7 +172,9 @@ type Summary struct {
 }
 
 // UpsertDeviceParams is the enrollment payload as the server has validated it.
-// FactsJSON is the marshalled protocol.Facts ("{}" when empty).
+// FactsJSON is the marshalled protocol.Facts ("{}" when empty); RustdeskID is
+// facts.rustdesk_id, "" when the agent did not report one (a re-enrollment
+// without it keeps the stored id).
 type UpsertDeviceParams struct {
 	OrgID        int64
 	DeviceUID    string
@@ -181,6 +185,7 @@ type UpsertDeviceParams struct {
 	AgentVersion string
 	IntervalS    int
 	FactsJSON    string
+	RustdeskID   string
 }
 
 // CreateCommandParams is a validated command to queue. Argv for exec, Shell

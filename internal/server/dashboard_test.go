@@ -71,7 +71,7 @@ var dashDeviceKeys = []string{
 	"agent_version", "arch", "battery_charging", "battery_pct", "can_run_commands", "cpu_pct",
 	"device_uid", "disk_used_pct", "enrolled_at", "hostname", "id", "interval_s", "last_ip",
 	"last_seen_at", "mem_used_pct", "open_alerts", "org_id", "org_name", "os_version", "platform",
-	"revoked", "status", "uptime_s",
+	"revoked", "rustdesk_id", "status", "uptime_s",
 }
 
 func TestDashboardAuthAndRoles(t *testing.T) {

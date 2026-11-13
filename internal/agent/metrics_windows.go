@@ -118,6 +118,7 @@ func (c *collector) Facts() protocol.Facts {
 	if ms, err := memoryStatus(); err == nil {
 		f.MemTotalMB = int64(ms.TotalPhys / (1 << 20))
 	}
+	f.RustdeskID = rustdeskID(context.Background())
 	return f
 }
 

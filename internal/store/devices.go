@@ -20,14 +20,15 @@ SELECT d.id, d.org_id, o.name, d.device_uid, d.hostname, d.platform, d.arch, d.o
        d.agent_version, d.interval_s, d.enrolled_at, d.last_seen_at, d.last_ip,
        d.token_hash IS NULL, d.facts_json, d.last_metrics_json,
        d.cpu_pct, d.mem_used_pct, d.disk_used_pct, d.battery_pct, d.battery_charging, d.uptime_s,
-       (SELECT COUNT(*) FROM alerts a WHERE a.device_id = d.id AND a.resolved_at IS NULL)
+       (SELECT COUNT(*) FROM alerts a WHERE a.device_id = d.id AND a.resolved_at IS NULL),
+       d.rustdesk_id
   FROM devices d JOIN orgs o ON o.id = d.org_id`
 
 func (s *Store) scanDevice(row interface{ Scan(...any) error }) (Device, error) {
 	var (
 		d                                      Device
 		enrolled                               string
-		lastSeen                               sql.NullString
+		lastSeen, rustdesk                     sql.NullString
 		revoked                                int
 		cpu, mem, disk                         sql.NullFloat64
 		battery, batteryCharging, uptime, open sql.NullInt64
@@ -35,9 +36,13 @@ func (s *Store) scanDevice(row interface{ Scan(...any) error }) (Device, error) 
 	err := row.Scan(&d.ID, &d.OrgID, &d.OrgName, &d.DeviceUID, &d.Hostname, &d.Platform, &d.Arch, &d.OSVersion,
 		&d.AgentVersion, &d.IntervalS, &enrolled, &lastSeen, &d.LastIP,
 		&revoked, &d.FactsJSON, &d.LastMetricsJSON,
-		&cpu, &mem, &disk, &battery, &batteryCharging, &uptime, &open)
+		&cpu, &mem, &disk, &battery, &batteryCharging, &uptime, &open, &rustdesk)
 	if err != nil {
 		return Device{}, err
+	}
+	if rustdesk.Valid && rustdesk.String != "" {
+		id := rustdesk.String
+		d.RustdeskID = &id
 	}
 	if d.EnrolledAt, err = parseTime(enrolled); err != nil {
 		return Device{}, err
@@ -116,17 +121,22 @@ func (s *Store) UpsertDevice(ctx context.Context, p UpsertDeviceParams) (Device,
 	hash := HashToken(plain)
 	interval := protocol.ClampInterval(p.IntervalS, p.Platform)
 	var id int64
+	var rustdesk *string
+	if p.RustdeskID != "" {
+		rustdesk = &p.RustdeskID
+	}
 	err := s.db.QueryRowContext(ctx,
 		`INSERT INTO devices (org_id, device_uid, hostname, platform, arch, os_version, agent_version,
-		                      token_hash, interval_s, enrolled_at, facts_json)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		                      token_hash, interval_s, enrolled_at, facts_json, rustdesk_id)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT (org_id, device_uid) DO UPDATE SET
 		     hostname = excluded.hostname, arch = excluded.arch, os_version = excluded.os_version,
 		     agent_version = excluded.agent_version, interval_s = excluded.interval_s,
-		     facts_json = excluded.facts_json, token_hash = excluded.token_hash
+		     facts_json = excluded.facts_json, token_hash = excluded.token_hash,
+		     rustdesk_id = COALESCE(excluded.rustdesk_id, devices.rustdesk_id)
 		 RETURNING id`,
 		p.OrgID, p.DeviceUID, p.Hostname, p.Platform, p.Arch, p.OSVersion, p.AgentVersion,
-		hash, interval, fmtTime(s.Now()), facts).Scan(&id)
+		hash, interval, fmtTime(s.Now()), facts, ptrStringArg(rustdesk)).Scan(&id)
 	if err != nil {
 		return Device{}, "", fmt.Errorf("store: upsert device: %w", err)
 	}
@@ -239,7 +249,7 @@ func (s *Store) RecordSync(ctx context.Context, deviceID int64, ip string, req p
 	if v, _, ok := protocol.DiskUsedPct(m.Disks); ok {
 		diskPct = &v
 	}
-	var factsJSON *string
+	var factsJSON, rustdeskID *string
 	if req.Facts != nil {
 		b, err := json.Marshal(req.Facts)
 		if err != nil {
@@ -247,6 +257,10 @@ func (s *Store) RecordSync(ctx context.Context, deviceID int64, ip string, req p
 		}
 		str := string(b)
 		factsJSON = &str
+		if req.Facts.RustdeskID != "" {
+			id := req.Facts.RustdeskID
+			rustdeskID = &id
+		}
 	}
 
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -272,12 +286,12 @@ func (s *Store) RecordSync(ctx context.Context, deviceID int64, ip string, req p
 		`UPDATE devices SET last_seen_at = ?, last_ip = ?, agent_version = ?, interval_s = ?,
 		        last_metrics_json = ?, cpu_pct = ?, mem_used_pct = ?, disk_used_pct = ?,
 		        battery_pct = ?, battery_charging = ?, uptime_s = ?,
-		        facts_json = COALESCE(?, facts_json)
+		        facts_json = COALESCE(?, facts_json), rustdesk_id = COALESCE(?, rustdesk_id)
 		  WHERE id = ?`,
 		fmtTime(now), ip, req.AgentVersion, interval,
 		string(metricsJSON), ptrFloatArg(m.CPUPct), ptrFloatArg(memPct), ptrFloatArg(diskPct),
 		ptrIntArg(m.BatteryPct), ptrBoolArg(m.BatteryCharging), req.UptimeS,
-		factsJSON, deviceID)
+		ptrStringArg(factsJSON), ptrStringArg(rustdeskID), deviceID)
 	if err != nil {
 		return fmt.Errorf("store: record sync: %w", err)
 	}

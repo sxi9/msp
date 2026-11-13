@@ -21,12 +21,25 @@
 
 .PARAMETER InsecureHttp
     Allow a plain http:// server URL that is not loopback (lab use only).
+
+.PARAMETER WithRustDesk
+    Also install the official RustDesk client (rustdesk-<version>-x86_64.exe, published
+    by the MSP at <Server>/dl/ and listed in SHA256SUMS) silently, register its service
+    and run `msp-agent.exe rustdesk setup`, which points it at the MSP's own relay only
+    and sets a random permanent password (printed once, kept in
+    %ProgramData%\msp-agent\rustdesk-password with a SYSTEM + Administrators DACL that
+    the agent sets itself; never sent to the server).
+
+.PARAMETER RustDeskVersion
+    Release of the client package to fetch from <Server>/dl/ (default 1.5.3).
 #>
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)][string]$Server,
     [Parameter(Mandatory = $true)][string]$Token,
-    [switch]$InsecureHttp
+    [switch]$InsecureHttp,
+    [switch]$WithRustDesk,
+    [string]$RustDeskVersion = '1.5.3'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -105,7 +118,8 @@ if ($existing -and $existing.Status -ne 'Stopped') {
 Move-Item -Force -Path $download -Destination $exe
 
 # The directory will hold agent.json with the device token: SYSTEM and
-# Administrators only. Best effort; a failure here does not stop the install.
+# Administrators only. Best effort here; msp-agent.exe install (Save) and
+# rustdesk setup apply the same DACL themselves and fail when they cannot.
 try {
     & icacls $dir /inheritance:r /grant:r 'SYSTEM:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' | Out-Null
 } catch {
@@ -127,3 +141,50 @@ if ($LASTEXITCODE -ne 0) {
 Get-Service -Name 'msp-agent' | Format-Table -AutoSize Name, Status, StartType
 Write-Host 'enrolled; device appears on the Fleet page within 30 s'
 Write-Host 'logs: Event Viewer > Windows Logs > Application, source msp-agent'
+
+# --- optional: RustDesk client for remote desktop (RD1) ----------------------
+if ($WithRustDesk) {
+    $rdFile = "rustdesk-$RustDeskVersion-x86_64.exe"
+    $rdPath = Join-Path $dir $rdFile
+    Write-Host "downloading $Server/dl/$rdFile"
+    try {
+        Invoke-WebRequest -UseBasicParsing -Uri "$Server/dl/$rdFile" -OutFile $rdPath
+    } catch {
+        Remove-Item -Force -ErrorAction SilentlyContinue $rdPath
+        Write-Host "install.ps1: $rdFile is not published at $Server/dl/; the agent is installed, RustDesk is not." -ForegroundColor Red
+        Write-Host "  To publish it (on the MSP server, docs/OPS.md 'Remote desktop'):"
+        Write-Host "    download $rdFile from https://github.com/rustdesk/rustdesk/releases/download/$RustDeskVersion/$rdFile"
+        Write-Host "    copy it into MSP_AGENT_DIR and run: scripts/build-agents.sh --sums-only"
+        Write-Host "  then re-run this installer with -WithRustDesk, or install RustDesk by hand and run: msp-agent.exe rustdesk setup"
+        exit 1
+    }
+    Write-Host "verifying checksum of $rdFile"
+    $rdLine = Get-Content $sums | Where-Object { $_ -match "\s\*?$([regex]::Escape($rdFile))\s*$" } | Select-Object -First 1
+    if (-not $rdLine) {
+        Remove-Item -Force -ErrorAction SilentlyContinue $rdPath
+        Fail "$rdFile is not listed in SHA256SUMS; on the server run scripts/build-agents.sh --sums-only after copying it into MSP_AGENT_DIR"
+    }
+    $rdExpected = ($rdLine.Trim() -split '\s+')[0].ToLowerInvariant()
+    $rdActual = (Get-FileHash -Algorithm SHA256 -Path $rdPath).Hash.ToLowerInvariant()
+    if ($rdExpected -ne $rdActual) {
+        Remove-Item -Force -ErrorAction SilentlyContinue $rdPath
+        Fail "checksum mismatch for $rdFile (expected $rdExpected, got $rdActual); refusing to install"
+    }
+    # Documented unattended sequence from the RustDesk client-deployment page:
+    # rustdesk.exe --silent-install, then --install-service; the password and the
+    # relay are set by msp-agent rustdesk setup (--password, RustDesk2.toml).
+    Write-Host 'installing RustDesk silently'
+    $p = Start-Process -FilePath $rdPath -ArgumentList '--silent-install' -Wait -PassThru
+    if ($p.ExitCode -ne 0) { Fail "RustDesk silent install failed with exit code $($p.ExitCode)" }
+    $rdExe = Join-Path $env:ProgramFiles 'RustDesk\rustdesk.exe'
+    for ($i = 0; $i -lt 30 -and -not (Test-Path $rdExe); $i++) { Start-Sleep -Seconds 1 }
+    if (-not (Test-Path $rdExe)) { Fail "RustDesk did not appear at $rdExe after the silent install" }
+    $p = Start-Process -FilePath $rdExe -ArgumentList '--install-service' -Wait -PassThru
+    if ($p.ExitCode -ne 0) { Write-Warning "rustdesk.exe --install-service exited $($p.ExitCode); continuing" }
+    Remove-Item -Force -ErrorAction SilentlyContinue $rdPath
+    Write-Host 'configuring RustDesk for the MSP relay'
+    & $exe rustdesk setup
+    if ($LASTEXITCODE -ne 0) { Fail "msp-agent.exe rustdesk setup failed with exit code $LASTEXITCODE" }
+    # The agent sent its facts before RustDesk existed; a restart sends the id now.
+    Restart-Service -Name 'msp-agent' -ErrorAction SilentlyContinue
+}

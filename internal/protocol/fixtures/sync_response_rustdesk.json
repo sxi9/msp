@@ -1,0 +1,8 @@
+{
+  "poll_interval_s": 30,
+  "commands": [],
+  "rustdesk": {
+    "host": "rmm.example.com",
+    "key": "OeVuKk5nlHiXp+7qsR6CbcHBGxhU4PJkNbvoX3P5X0k="
+  }
+}

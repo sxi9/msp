@@ -22,11 +22,15 @@ const dev = (id: number, org_id: number, hostname: string, platform: Device['pla
   last_ip: status === 'pending' ? '' : `10.0.${org_id}.${id}`, revoked: false,
   cpu_pct: status === 'pending' ? null : 12.5, mem_used_pct: status === 'pending' ? null : 50.8, disk_used_pct: status === 'pending' ? null : 42.3,
   battery_pct: null, battery_charging: null, uptime_s: status === 'pending' ? null : 86400 * 3 + 4000, open_alerts: 0,
-  can_run_commands: platform !== 'android', ...extra,
+  can_run_commands: platform !== 'android', rustdesk_id: null, ...extra,
 });
+// The mock relay; add &rustdesk=0 to the URL to see the "not configured" card.
+const rustdesk = new URLSearchParams(location.search).get('rustdesk') === '0'
+  ? { enabled: false, host: '', key: '' }
+  : { enabled: true, host: 'rmm.example.com', key: 'OeVuKk5nlHiXp+7qsR6CbcHBGxhU4PJkNbvoX3P5X0k=' };
 const devices: Device[] = [
-  dev(1, 1, 'ws-reception-01', 'linux', 'online'),
-  dev(2, 1, 'ws-xray', 'windows', 'online', { disk_used_pct: 93.1, open_alerts: 1 }),
+  dev(1, 1, 'ws-reception-01', 'linux', 'online', { rustdesk_id: '123456789' }),
+  dev(2, 1, 'ws-xray', 'windows', 'online', { disk_used_pct: 93.1, open_alerts: 1, rustdesk_id: '987654321' }),
   dev(3, 1, 'Pixel 8', 'android', 'online', { battery_pct: 12, battery_charging: false, open_alerts: 1 }),
   dev(4, 1, 'ws-backoffice', 'linux', 'offline', { open_alerts: 1 }),
   dev(5, 2, 'LAPTOP-7Q2', 'windows', 'online', { cpu_pct: 71 }),
@@ -179,6 +183,15 @@ function route(method: string, path: string, body: unknown): Reply {
       disk_used_pct: (d.disk_used_pct ?? 40) - (n - i) * 0.01, battery_pct: d.battery_pct === null ? null : Math.max(5, d.battery_pct + (n - i) * 0.3), uptime_s: 86400 * 3 + i * 60,
     }));
     return ok({ heartbeats: hb });
+  }
+  if (p === '/api/v1/rustdesk') return ok(rustdesk);
+  if ((x = m(/^\/api\/v1\/devices\/(\d+)\/remote-desktop$/))) {
+    const r = needRole('operator'); if (r) return r;
+    const d = devices.find((d) => d.id === Number(x![1])); if (!d || d.revoked) return err(404, 'not_found');
+    if (!rustdesk.enabled) return err(409, 'rustdesk_disabled', 'set MSP_RUSTDESK_HOST and MSP_RUSTDESK_KEY on the server');
+    if (!d.rustdesk_id) return err(409, 'no_rustdesk_id', 'the agent has not reported a RustDesk id');
+    log('device.remote_desktop_opened', 'device', d.id, d.org_id, { hostname: d.hostname, rustdesk_id: d.rustdesk_id, host: rustdesk.host });
+    return ok({ url: `rustdesk://connect/${d.rustdesk_id}`, rustdesk_id: d.rustdesk_id, host: rustdesk.host, key: rustdesk.key });
   }
   if ((x = m(/^\/api\/v1\/devices\/(\d+)\/revoke$/))) {
     const r = needRole('admin'); if (r) return r;

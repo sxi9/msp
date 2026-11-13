@@ -40,6 +40,11 @@ func registerDashboard(s *Server, mux *http.ServeMux) {
 	with(RoleAdmin, "POST /api/v1/devices/{id}/revoke", s.handleRevokeDevice)
 	with(RoleAdmin, "DELETE /api/v1/devices/{id}", s.handleDeleteDevice)
 
+	// Remote desktop (RD1): relay settings for the dashboard and the Connect
+	// button's session opener.
+	get("/api/v1/rustdesk", s.handleRustdeskInfo)
+	with(RoleOperator, "POST /api/v1/devices/{id}/remote-desktop", s.handleRemoteDesktop)
+
 	// Commands.
 	with(RoleOperator, "POST /api/v1/devices/{id}/commands", s.handleCreateCommand)
 	get("/api/v1/devices/{id}/commands", s.handleListCommands)

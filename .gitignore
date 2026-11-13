@@ -8,6 +8,9 @@
 *.db-shm
 data/
 
+# RustDesk relay state: the private key lives here (deploy/rustdesk-data/id_ed25519)
+rustdesk-data/
+
 # dashboard: dependencies and the esbuild bundle (index.html stays committed)
 web/node_modules/
 web/dist/app.js

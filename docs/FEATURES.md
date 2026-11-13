@@ -15,7 +15,8 @@ P1 = first build. P2 = next. P3 = after that.
 - P2 Software deployment, file transfer
 - P2 Service and process watchlists, event log forwarding
 - P2 Agent self-update
-- P3 Remote desktop via our RustDesk build, silent install, Connect button
+- RD1 (built) Remote desktop phase A: official RustDesk client installed by the installer (`--with-rustdesk`), pointed at our relay by `msp-agent rustdesk setup`, id reported in facts
+- P3 Remote desktop phase B: our branded RustDesk build with the relay compiled in (`docs/RUSTDESK-BRANDING.md`)
 - P3 macOS agent
 
 ## Android agent
@@ -26,7 +27,7 @@ P1 = first build. P2 = next. P3 = after that.
 - P1 Safe command set only: ping, show message, request inventory, lock (device admin)
 - P2 Location reporting with consent
 - P2 Device-owner mode: wipe, app push, kiosk
-- P3 Remote screen via our RustDesk build (MediaProjection consent, accessibility control)
+- P3 Remote screen via our RustDesk build (MediaProjection consent, accessibility control); phase A: the official app by hand, not offered from the dashboard
 - P3 iOS agent
 
 ## Server core and API
@@ -42,7 +43,8 @@ P1 = first build. P2 = next. P3 = after that.
 - P2 Postgres option, API keys, webhooks
 - P2 Email, SMS, Slack notifications, escalation, maintenance windows
 - P2 Two-factor auth, device token rotation
-- P3 RustDesk hbbs/hbbr in compose, device RustDesk ID registry, session audit
+- RD1 (built) RustDesk hbbs/hbbr in compose, `MSP_RUSTDESK_HOST`/`KEY`, device RustDesk id registry (`devices.rustdesk_id`), `GET /api/v1/rustdesk`, `POST /devices/{id}/remote-desktop`, audit `device.remote_desktop_opened`
+- P3 Session length / recording audit for remote desktop
 - P3 Single sign-on, mutual TLS
 
 ## Technician dashboard
@@ -58,7 +60,7 @@ P1 = first build. P2 = next. P3 = after that.
 - P2 Script library, scheduled automations, policy groups
 - P2 Reports: uptime, disk trends, patch compliance, exports
 - P2 Client portal with limited self-service view
-- P3 Remote desktop Connect button
+- RD1 (built) Remote desktop card on the device page: id, Copy, Connect button (opens `rustdesk://connect/<id>`), not-configured / not-reported states
 - P3 White-label branding per client, custom dashboards
 
 ## Monitoring beyond agents

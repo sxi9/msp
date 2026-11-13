@@ -9,6 +9,8 @@ ride on the heartbeat channel.
 - `docs/ARCHITECTURE.md` is the component overview and the package dependency rules.
 - `docs/PLAN.md`, `docs/WORKPACKAGES.md`, `docs/DECISIONS.md` are the build plan.
 - `docs/OPS.md` and `docs/SECURITY.md` cover deployment and the threat model.
+- `docs/GUIDE.md` is the technician's guide; `docs/RUSTDESK-BRANDING.md` the not-yet-built
+  branded RustDesk client (remote desktop phase B).
 
 ## Quickstart (Linux, one machine)
 
@@ -61,6 +63,7 @@ full table is in `docs/OPS.md` section 1):
 | `MSP_AGENT_DIR` | `""` | directory served at `/dl/` |
 | `MSP_RETENTION_DAYS` | `7` | heartbeat retention |
 | `MSP_PRESETS` | `""` | JSON command preset library for the device console (template: `deploy/presets.example.json`); unset = builtin set; edits apply live on the server (reload the dashboard to see them) |
+| `MSP_RUSTDESK_HOST` / `MSP_RUSTDESK_KEY` | `""` | remote desktop: your self-hosted RustDesk relay (bare hostname or IP; hbbs/hbbr in the compose profile `rustdesk`) and its public key (`id_ed25519.pub`); both or neither (`docs/OPS.md` section 10) |
 
 ## Make targets
 
@@ -70,7 +73,7 @@ full table is in `docs/OPS.md` section 1):
 | `test`          | `go vet ./...` and `go test ./...` including the in-process e2e              |
 | `race`          | race detector on server, agent and e2e packages                              |
 | `web`           | `npm ci`, tests, typecheck, esbuild bundle, then rebuild the server          |
-| `agents`        | cross-compile matrix into `dist/` + `SHA256SUMS` + install scripts           |
+| `agents`        | cross-compile matrix into `dist/` + `SHA256SUMS` + install scripts (`scripts/build-agents.sh --sums-only` re-sums `MSP_AGENT_DIR` after dropping the RustDesk client installers in) |
 | `android`       | debug APK (lab only, never published) via the system Gradle (`ANDROID_HOME` defaults to /opt/android-sdk)|
 | `android-release` | the publishable signed APK; needs `MSP_ANDROID_KEYSTORE` (docs/OPS.md section 3) |
 | `android-test`  | JVM protocol tests against `internal/protocol/fixtures`                      |

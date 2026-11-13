@@ -59,7 +59,7 @@ func validateEnroll(req protocol.EnrollRequest) error {
 	case len(req.AgentVersion) > maxEnrollField:
 		return errors.New("agent_version too long")
 	}
-	return nil
+	return req.Facts.Validate()
 }
 
 // handleEnroll is POST /api/agent/v1/enroll (no auth, rate limited).
@@ -118,6 +118,7 @@ func (s *Server) handleEnroll(w http.ResponseWriter, r *http.Request) {
 		AgentVersion: req.AgentVersion,
 		IntervalS:    interval,
 		FactsJSON:    string(facts),
+		RustdeskID:   req.Facts.RustdeskID,
 	})
 	if err != nil {
 		s.log.Error("upsert device", "err", err)
@@ -146,6 +147,7 @@ func (s *Server) handleEnroll(w http.ResponseWriter, r *http.Request) {
 		DeviceID:      dev.ID,
 		DeviceToken:   plain,
 		PollIntervalS: dev.IntervalS,
+		Rustdesk:      s.rustdeskInfo(),
 	})
 }
 
@@ -157,6 +159,12 @@ func (s *Server) handleSync(w http.ResponseWriter, r *http.Request, dev store.De
 	if err := readJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
+	}
+	if req.Facts != nil {
+		if err := req.Facts.Validate(); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+			return
+		}
 	}
 	interval := protocol.ClampInterval(req.IntervalS, dev.Platform)
 	req.IntervalS = interval
@@ -214,7 +222,7 @@ func (s *Server) handleSync(w http.ResponseWriter, r *http.Request, dev store.De
 	} else if more {
 		poll = 5
 	}
-	writeJSON(w, http.StatusOK, protocol.SyncResponse{PollIntervalS: poll, Commands: cmds})
+	writeJSON(w, http.StatusOK, protocol.SyncResponse{PollIntervalS: poll, Commands: cmds, Rustdesk: s.rustdeskInfo()})
 }
 
 // handleResult is POST /api/agent/v1/commands/{id}/result.

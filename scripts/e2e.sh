@@ -7,7 +7,10 @@
 # the dashboard JSON API with curl + jq exactly as a technician's browser would:
 # device online, uname -a round trip (latency printed), shell-metacharacter
 # injection check, script kind, timeout, android refusal, CSRF and role checks,
-# audit trail, dashboard shell, and the offline flip with its alert.
+# audit trail, dashboard shell, remote desktop (RD1: the relay is configured on the
+# server and a stub `rustdesk` binary on the agent's PATH answers --get-id, so the
+# real agent reports the id and the Connect endpoint answers the rustdesk:// URL),
+# and the offline flip with its alert.
 #
 # Every step prints PASS/FAIL. Exit code 0 and the final line "E2E OK" are the
 # verdict; on failure both logs are printed. Requires curl and jq.
@@ -105,6 +108,9 @@ step "make build" make -C "$R" build
 
 # --- bootstrap via CLI ------------------------------------------------------
 export MSP_DB=$T/msp.db MSP_LISTEN=127.0.0.1:$P MSP_BASE_URL=$B MSP_AGENT_DIR=$R/dist
+# Remote desktop (RD1): a relay is configured so agents learn it and Connect works.
+export MSP_RUSTDESK_HOST=rmm.example.com MSP_RUSTDESK_KEY=OeVuKk5nlHiXp+7qsR6CbcHBGxhU4PJkNbvoX3P5X0k=
+RD_ID=123456789
 
 bootstrap() {
 	echo "$ADMIN_PASS" | "$R/bin/msp-server" user add --email "$ADMIN_EMAIL" --role admin --password-stdin >/dev/null &&
@@ -131,9 +137,16 @@ step "server answers ping" wait_ping
 step "healthz ok" sh -c "curl -sf $B/healthz | jq -e '.ok==true' >/dev/null"
 
 # --- agent ------------------------------------------------------------------
+# A stub RustDesk client on the agent's PATH: the real agent runs `rustdesk --get-id`
+# when it collects facts, so the device reports the id without RustDesk being installed.
+mkdir -p "$T/stub"
+printf '#!/bin/sh\ncase "$1" in --get-id) echo %s ;; *) exit 2 ;; esac\n' "$RD_ID" >"$T/stub/rustdesk"
+chmod 0755 "$T/stub/rustdesk"
 # Loopback host => plain http is allowed without --insecure-http.
-step "agent enroll" "$R/bin/msp-agent" enroll --server "$B" --token "$ET" --config "$T/agent.json" --interval 2
-"$R/bin/msp-agent" run --config "$T/agent.json" >"$T/agent.log" 2>&1 &
+step "agent enroll" env PATH="$T/stub:$PATH" "$R/bin/msp-agent" enroll --server "$B" --token "$ET" --config "$T/agent.json" --interval 2
+step "agent config holds the relay from the enroll response" \
+	sh -c "grep -q '\"rustdesk_host\": \"rmm.example.com\"' '$T/agent.json' && grep -q '\"rustdesk_key\": \"$MSP_RUSTDESK_KEY\"' '$T/agent.json'"
+PATH="$T/stub:$PATH" "$R/bin/msp-agent" run --config "$T/agent.json" >"$T/agent.log" 2>&1 &
 AGT=$!
 
 # --- login ------------------------------------------------------------------
@@ -241,6 +254,27 @@ audit_check() {
 		echo "$a" | jq -e '[.entries[]|select(.action=="user.login" and .actor_type=="user")]|length>=2' >/dev/null
 }
 step "audit trail (user vs device actors)" audit_check
+
+# --- remote desktop (RD1) ---------------------------------------------------
+step "rustdesk info is enabled with host and key" \
+	sh -c "curl -sf -b $T/jar $B/api/v1/rustdesk | jq -e --arg h \"\$MSP_RUSTDESK_HOST\" --arg k \"\$MSP_RUSTDESK_KEY\" '.enabled==true and .host==\$h and .key==\$k' >/dev/null"
+step "device reports rustdesk_id from the stub client" \
+	sh -c "curl -sf -b $T/jar $B/api/v1/devices/$DEV | jq -e --arg id $RD_ID '.device.rustdesk_id==\$id and .facts.rustdesk_id==\$id' >/dev/null"
+remote_desktop() {
+	api_post -X POST "$B/api/v1/devices/$DEV/remote-desktop" |
+		jq -e --arg id "$RD_ID" --arg h "$MSP_RUSTDESK_HOST" '.url=="rustdesk://connect/"+$id and .rustdesk_id==$id and .host==$h and (.key|length>0)' >/dev/null
+}
+step "remote desktop answers rustdesk://connect/<id> (200)" remote_desktop
+step "remote desktop on the android device is 409 no_rustdesk_id" \
+	sh -c "curl -s -b $T/jar -H '$H' -X POST $B/api/v1/devices/$AID/remote-desktop | jq -e '.error==\"no_rustdesk_id\"' >/dev/null"
+step "viewer cannot open remote desktop (403)" \
+	test "$(http_code -b "$T/jar-viewer" -H "$H" -X POST "$B/api/v1/devices/$DEV/remote-desktop")" = 403
+step "remote desktop without CSRF header is 403" \
+	test "$(http_code -b "$T/jar" -X POST "$B/api/v1/devices/$DEV/remote-desktop")" = 403
+step "remote desktop on an unknown device is 404" \
+	test "$(http_code -b "$T/jar" -H "$H" -X POST "$B/api/v1/devices/999999/remote-desktop")" = 404
+step "audit has exactly one device.remote_desktop_opened by the admin" \
+	sh -c "curl -sf -b $T/jar '$B/api/v1/audit?limit=200' | jq -e --arg id $RD_ID --argjson d $DEV '[.entries[]|select(.action==\"device.remote_desktop_opened\")]|length==1 and (.[0].actor_type==\"user\" and .[0].actor_label==\"$ADMIN_EMAIL\" and .[0].target_id==\$d and .[0].detail.rustdesk_id==\$id and .[0].ip==\"127.0.0.1\")' >/dev/null"
 
 # --- dashboard shell served -------------------------------------------------
 step "dashboard shell served" sh -c "curl -sf $B/ | grep -q app.js"

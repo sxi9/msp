@@ -13,10 +13,18 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+
+	"github.com/sxi9/msp/internal/protocol"
 )
 
 // Config is the on-disk agent configuration (agent.json). Secrets live here,
-// so Save writes it 0600 inside a 0700 directory.
+// so Save writes it 0600 inside a 0700 directory (on Windows, where those
+// bits mean nothing, with a DACL for SYSTEM and Administrators only, see
+// restrictToPrivileged). RustdeskHost and RustdeskKey are the MSP's own
+// RustDesk relay as the server last reported it (RD1); `msp-agent rustdesk
+// setup` points the local RustDesk client at them. Path is where the file
+// was loaded from (not stored) so the sync loop can save relay changes in
+// place.
 type Config struct {
 	ServerURL    string `json:"server_url"`
 	DeviceToken  string `json:"device_token"`
@@ -24,6 +32,9 @@ type Config struct {
 	IntervalS    int    `json:"interval_s"`
 	CAFile       string `json:"ca_file,omitempty"`
 	InsecureHTTP bool   `json:"insecure_http,omitempty"`
+	RustdeskHost string `json:"rustdesk_host,omitempty"`
+	RustdeskKey  string `json:"rustdesk_key,omitempty"`
+	Path         string `json:"-"`
 }
 
 // DefaultPath is where the service reads its configuration:
@@ -50,7 +61,24 @@ func Load(path string) (Config, error) {
 	if err := json.Unmarshal(b, &c); err != nil {
 		return c, fmt.Errorf("parse %s: %w", path, err)
 	}
+	c.Path = path
 	return c, nil
+}
+
+// setRustdesk stores the relay the server reported and reports whether the
+// config changed (nil means the server has no relay: the stored values are
+// kept, they do the local client no harm and may come back). A block that
+// fails protocol.Rustdesk.Validate (a host with a port or shell/TOML
+// metacharacters, a key that is not one base64 line) is never stored: the
+// values end up verbatim in RustDesk2.toml, and the server refuses to start
+// with such values, so one here means a broken or hostile server.
+func (c *Config) setRustdesk(r *protocol.Rustdesk) bool {
+	if r == nil || (r.Host == c.RustdeskHost && r.Key == c.RustdeskKey) || r.Validate() != nil {
+		return false
+	}
+	c.RustdeskHost = r.Host
+	c.RustdeskKey = r.Key
+	return true
 }
 
 // Validate reports whether the config holds what Run needs.
@@ -68,10 +96,15 @@ func (c Config) Validate() error {
 }
 
 // Save writes the config atomically: MkdirAll 0700, temp file in the same
-// directory, chmod 0600, rename over the target.
+// directory, chmod 0600, rename over the target; on Windows the directory
+// and the file additionally get a SYSTEM + Administrators DACL (an error
+// when that cannot be applied: the file holds the device token).
 func Save(path string, c Config) error {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	if err := restrictToPrivileged(dir, true); err != nil {
 		return err
 	}
 	b, err := json.MarshalIndent(c, "", "  ")
@@ -110,5 +143,8 @@ func Save(path string, c Config) error {
 	}
 	// Rename keeps the temp file's mode; chmod again in case the umask or a
 	// pre-existing target changed it.
-	return os.Chmod(path, 0o600)
+	if err := os.Chmod(path, 0o600); err != nil {
+		return err
+	}
+	return restrictToPrivileged(path, false)
 }

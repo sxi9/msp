@@ -93,6 +93,7 @@ func (c *collector) Facts() protocol.Facts {
 	f.Manufacturer = readSysString(filepath.Join(dmiDir, "sys_vendor"))
 	f.Model = readSysString(filepath.Join(dmiDir, "product_name"))
 	f.Serial = readSysString(filepath.Join(dmiDir, "product_serial"))
+	f.RustdeskID = rustdeskID(context.Background())
 	return f
 }
 

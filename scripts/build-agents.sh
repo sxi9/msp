@@ -14,12 +14,41 @@
 # carries the MSP's own signature. The debug APK (cleartext allowed, debuggable,
 # signed with the public Android debug key) is never copied into dist/.
 #
+# Remote desktop (RD1): the official RustDesk client installers
+# (rustdesk-<version>-x86_64.deb, rustdesk-<version>-aarch64.deb,
+# rustdesk-<version>-x86_64.exe from https://github.com/rustdesk/rustdesk/releases)
+# are NOT downloaded by this script, ever: the MSP fetches them, drops them into
+# MSP_AGENT_DIR and runs `scripts/build-agents.sh --sums-only`, which only
+# regenerates SHA256SUMS over that directory (no compile, no copy) so the
+# installers' --with-rustdesk / -WithRustDesk can verify them. A plain run
+# copies dist/ over MSP_AGENT_DIR and then also re-sums the whole directory,
+# so installers already there stay listed.
+#
 # CGO is never needed: every binary is static. VERSION defaults to the VERSION
 # file; the Makefile exports its own value.
 set -euo pipefail
 
 R=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$R"
+
+# sums_over DIR: rewrite DIR/SHA256SUMS over every regular file in DIR
+# (SHA256SUMS itself excluded; subdirectories ignored).
+sums_over() {
+	(cd "$1" && rm -f SHA256SUMS && find . -maxdepth 1 -type f ! -name SHA256SUMS -printf '%P\n' | LC_ALL=C sort | xargs -r sha256sum -- > SHA256SUMS)
+	echo "wrote $1/SHA256SUMS ($(wc -l <"$1/SHA256SUMS") files)"
+}
+
+if [ "${1:-}" = "--sums-only" ]; then
+	DIR=${MSP_AGENT_DIR:-dist}
+	[ -d "$DIR" ] || { echo "build-agents.sh --sums-only: $DIR does not exist (set MSP_AGENT_DIR or run a full build first)" >&2; exit 2; }
+	sums_over "$DIR"
+	ls -l "$DIR"
+	exit 0
+fi
+if [ $# -gt 0 ]; then
+	echo "usage: scripts/build-agents.sh [--sums-only]" >&2
+	exit 2
+fi
 
 VERSION=${VERSION:-$(cat VERSION)}
 LDFLAGS="-s -w -X main.version=$VERSION"
@@ -74,12 +103,15 @@ else
 fi
 
 # SHA256SUMS must not list a stale copy of itself.
-(cd dist && rm -f SHA256SUMS && sha256sum -- * > SHA256SUMS)
+sums_over dist
 
 if [ -n "${MSP_AGENT_DIR:-}" ]; then
 	mkdir -p "$MSP_AGENT_DIR"
 	cp -r dist/. "$MSP_AGENT_DIR"/
 	echo "copied dist/ -> $MSP_AGENT_DIR"
+	# Files the MSP keeps there beyond dist/ (the RustDesk client installers)
+	# must stay listed, so the sums are rebuilt over the whole directory.
+	sums_over "$MSP_AGENT_DIR"
 fi
 
 echo "dist/:"

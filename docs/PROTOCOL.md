@@ -67,9 +67,16 @@ Request (fixtures `enroll_linux.json`, `enroll_android.json`):
 - Android: `hostname` = `Settings.Global "device_name"` or `Build.MODEL`; `os_version`
   `"Android 14 (34)"`; `facts.kernel = System.getProperty("os.version")`,
   `cpu_model = Build.HARDWARE`, `serial = ""`.
-- `facts` is always an object (every key present, empty strings allowed).
+- `facts` is always an object (every key present, empty strings allowed), with one optional
+  key **(RD1)**: `rustdesk_id`, the id of the locally installed RustDesk client, 1..32 ASCII
+  digits, omitted when RustDesk is not installed (`400 invalid_request`, detail
+  `facts.rustdesk_id must be 1..32 digits`, otherwise). The server stores it in
+  `devices.rustdesk_id`; an enrollment without it keeps a previously stored id.
 
-Response `201 {"device_id":42,"device_token":"dt_...","poll_interval_s":30}`
+Response `201 {"device_id":42,"device_token":"dt_...","poll_interval_s":30}`, plus
+`"rustdesk":{"host":"rmm.example.com","key":"<id_ed25519.pub line>"}` **(RD1)** when the
+server has a relay configured (`MSP_RUSTDESK_HOST` + `MSP_RUSTDESK_KEY`); the key is
+omitted entirely when it has none. The desktop agent stores host and key in its config.
 
 Errors: `400 {"error":"invalid_request","detail":"..."}`;
 `401 {"error":"invalid_enrollment_token"}` (unknown, expired, revoked, uses >= max_uses).
@@ -93,7 +100,8 @@ Request (fixtures `sync_linux.json`, `sync_android.json`):
 - `battery_pct` / `battery_charging` are absent when there is no battery.
 - Android sends one disk `{"mount":"/data",...}`.
 - `facts` is present only on the first sync after start and every 120th sync (the server
-  replaces `facts_json` when present).
+  replaces `facts_json` when present, and `devices.rustdesk_id` when the facts carry
+  `rustdesk_id`; invalid `rustdesk_id` -> `400 invalid_request`, fixture `sync_rustdesk.json`).
 - `interval_s` = the agent's configured interval (desktop 30, android 60, e2e 2); clamped 1..3600.
 - `wait_s` = how long the server may hold the request; the server clamps it to 0..25.
   Android sends 0.
@@ -125,6 +133,10 @@ Response `200` (fixtures `sync_response.json`, `sync_response_android.json`):
 - `commands` is `[]` (never `null`).
 - Each command carries only the keys of its kind: `argv` for exec; `shell` + `body` for
   script; `text` for message; nothing but `id`, `kind`, `timeout_s` for lock and ping.
+- `rustdesk` **(RD1)**: `{"host":"...","key":"..."}` when the server has a relay configured
+  (fixture `sync_response_rustdesk.json`), absent otherwise. Agents update their stored
+  relay when it is present and differs (the desktop agent rewrites its config file);
+  an absent key leaves the stored relay untouched. Android ignores it.
 
 Agent loop (desktop): sync -> for each command spawn a goroutine (max 2 concurrent per
 device) that executes and POSTs the result -> if the response contained commands sync again
@@ -304,8 +316,11 @@ DEVICE = {"id":42,"org_id":1,"org_name":"Acme Dental","device_uid":"f2c1...","ho
           "platform":"linux","arch":"amd64","os_version":"Ubuntu 24.04.1 LTS","agent_version":"0.1.0",
           "interval_s":30,"status":"online","enrolled_at":"...","last_seen_at":"...","last_ip":"10.0.0.12",
           "revoked":false,"cpu_pct":12.5,"mem_used_pct":50.8,"disk_used_pct":42.3,"battery_pct":null,
-          "battery_charging":null,"uptime_s":86400,"open_alerts":0,"can_run_commands":true}
+          "battery_charging":null,"uptime_s":86400,"open_alerts":0,"can_run_commands":true,
+          "rustdesk_id":null}
 ```
+
+`rustdesk_id` **(RD1)** is the id the agent last reported in its facts, `null` until then.
 
 `can_run_commands` is true when the device is a desktop platform (`linux|windows`) and not
 revoked: it gates the free-form exec/script console. **(A1)** The built-in kinds lock, ping and
@@ -342,6 +357,25 @@ COMMAND = {"id":7,"device_id":42,"org_id":1,"created_by":1,"created_by_email":"a
 
 - `POST /api/v1/devices/{id}/revoke` (admin) -> `204` (`token_hash` NULL; audit `device.revoked`).
 - `DELETE /api/v1/devices/{id}` (admin) -> `204` (cascade; audit `device.deleted`).
+
+### Remote desktop (RD1)
+
+- `GET /api/v1/rustdesk` (any role) -> `{"enabled":true,"host":"rmm.example.com","key":"<id_ed25519.pub line>"}`;
+  `{"enabled":false,"host":"","key":""}` when the server has no relay. The dashboard's
+  Remote desktop card and the technician's own client setup read it.
+- `POST /api/v1/devices/{id}/remote-desktop` (admin|operator; CSRF header; empty body) ->
+  `200 {"url":"rustdesk://connect/123456789","rustdesk_id":"123456789","host":"rmm.example.com","key":"..."}`.
+  `url` is the RustDesk URL scheme for a remote-control session (`rustdesk://connect/<id>`,
+  from the client source: `get_uri_prefix()` + the `connect` authority); the dashboard
+  navigates to it so the technician's installed client opens the session.
+  Errors: `404 {"error":"not_found"}` when the device is unknown or revoked (same scope
+  rule as lock: staff accounts see every org, so there is no per-technician org set;
+  nothing else is distinguishable);
+  `409 {"error":"rustdesk_disabled"}` when the server has no relay configured;
+  `409 {"error":"no_rustdesk_id"}` when the agent has not reported an id; `403 forbidden`
+  for viewer. A `200` writes audit `device.remote_desktop_opened` (actor the user, target the
+  device, org, client IP, detail `hostname`, `platform`, `rustdesk_id`, `host`); refused
+  requests write nothing.
 
 ### Presets
 
@@ -412,8 +446,8 @@ good set keeps being served.
 `user.login`, `user.login_failed`, `user.created`, `user.disabled`, `user.password_changed`
 (actor the user, or `system` with detail `via: cli`), `user.password_change_failed`, `org.created`,
 `token.created`, `token.revoked`, `device.enrolled`, `device.revoked`, `device.deleted`,
-`device.lock_requested` **(A1)**, `command.queued`, `command.finished`, `command.lost`,
-`alert.ack`.
+`device.lock_requested` **(A1)**, `device.remote_desktop_opened` **(RD1)**, `command.queued`,
+`command.finished`, `command.lost`, `alert.ack`.
 
 ## 8. Alert thresholds
 
@@ -442,7 +476,11 @@ Env (flags of the same name override): `MSP_DB` (`./msp.db`), `MSP_LISTEN` (`:80
 `MSP_BASE_URL` (`""`), `MSP_TLS_CERT` + `MSP_TLS_KEY` (serve TLS when both set),
 `MSP_SECURE_COOKIES` (0/1), `MSP_TRUST_PROXY` (0/1: honour the first `X-Forwarded-For`),
 `MSP_AGENT_DIR` (`""`), `MSP_RETENTION_DAYS` (7), `MSP_PRESETS` (`""`: JSON command preset
-library, section 6 "Presets"; `--presets`).
+library, section 6 "Presets"; `--presets`), `MSP_RUSTDESK_HOST` + `MSP_RUSTDESK_KEY` (`""`;
+`--rustdesk-host` / `--rustdesk-key`: the self-hosted RustDesk relay as a bare hostname or IP
+(no port: 21116/21117 are implied) and its public key, one base64 line; both enable remote
+desktop, neither disables it, one alone makes `serve` exit 2 with "must be set together", a
+malformed value exits 2 with the reason).
 
 **Agent** (`cmd/msp-agent`):
 `msp-agent enroll --server URL --token et_... [--config PATH] [--ca-file PEM] [--interval 30] [--insecure-http]`
@@ -451,10 +489,19 @@ under the Windows SCM it runs as the service);
 `msp-agent install --server URL --token et_... [--ca-file] [--interval] [--insecure-http]`
 (enroll + write config + register and start the systemd unit / Windows service;
 root/Administrator); `msp-agent uninstall`; `msp-agent status` (prints config path, device id,
-server); `msp-agent version`.
-Config file JSON `{"server_url","device_token","device_id","interval_s","ca_file","insecure_http"}`
-at `/etc/msp-agent/agent.json` (Linux) or `%ProgramData%\msp-agent\agent.json` (Windows),
-dir 0700 file 0600. Exit codes: 0 ok, 1 runtime error, 2 bad arguments/config.
+server, relay host when known); `msp-agent rustdesk setup [--password-stdin]
+[--config-string S] [--config PATH]` **(RD1)** (root/Administrator: points the installed
+RustDesk client at the relay from the config, sets the permanent password with
+`rustdesk --password`, generated 16 characters unless one line of at least 8 is piped in
+with `--password-stdin`, prints it once and writes it 0600 (Windows: SYSTEM + Administrators
+DACL) to `rustdesk-password` next to the config, restarts the client service, prints the id
+from `rustdesk --get-id`; exit 2 when the config has no relay or a malformed one, or no
+client is installed);
+`msp-agent rustdesk id` (prints the local id, exit 1 when none); `msp-agent version`.
+Config file JSON `{"server_url","device_token","device_id","interval_s","ca_file","insecure_http","rustdesk_host","rustdesk_key"}`
+(the last two optional, written when the server reports a relay) at `/etc/msp-agent/agent.json`
+(Linux) or `%ProgramData%\msp-agent\agent.json` (Windows), dir 0700 file 0600. Exit codes:
+0 ok, 1 runtime error, 2 bad arguments/config.
 
 ## 10. Fixtures
 
@@ -466,6 +513,8 @@ dir 0700 file 0600. Exit codes: 0 ok, 1 runtime error, 2 bad arguments/config.
 | `sync_android.json`           | SyncRequest       | cpu_pct null, one `/data` disk, battery 87 / false, wait_s 0, no facts |
 | `sync_response.json`          | SyncResponse      | poll 30; exec `uname -a` (60 s) + script sh `df -h\nuptime\n` (120 s) |
 | `sync_response_android.json`  | SyncResponse      | poll 60; lock, ping, message (A1 kinds)                    |
+| `sync_rustdesk.json`          | SyncRequest       | like `sync_linux.json` with `facts.rustdesk_id` (RD1)      |
+| `sync_response_rustdesk.json` | SyncResponse      | poll 30, no commands, `rustdesk` host + key (RD1)          |
 | `command_result.json`         | CommandResult     | exit 0, RFC3339 UTC times                                  |
 | `error.json`                  | ErrorResponse     | `invalid_device_token`, no detail                          |
 

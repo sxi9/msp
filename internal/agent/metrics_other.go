@@ -24,9 +24,10 @@ func (c *collector) Metrics(ctx context.Context) (protocol.Metrics, error) {
 // count and the local IPs.
 func (c *collector) Facts() protocol.Facts {
 	return protocol.Facts{
-		Kernel:   runtime.GOOS,
-		CPUCount: runtime.NumCPU(),
-		IPs:      localIPs(),
+		Kernel:     runtime.GOOS,
+		CPUCount:   runtime.NumCPU(),
+		IPs:        localIPs(),
+		RustdeskID: rustdeskID(context.Background()),
 	}
 }
 

@@ -21,17 +21,19 @@ Phase 1 features (built and verified on Linux; Windows and Android runtime need 
 | Users | Roles `viewer` (see), `operator` (act), `admin` (manage users, clients, delete devices) |
 | Enrollment | Per-client tokens with label, max uses, expiry and revoke; install one-liners per OS |
 | Fleet | Every device with online/offline/pending, OS, agent version, last seen, CPU, memory, disk, battery, open alerts; filter by client, status, hostname |
-| Device page | Status, metrics, facts (CPU model, memory, kernel, model, serial), disks, command console, command history, Lock, Ping, Message, Revoke, Delete |
+| Device page | Status, metrics, facts (CPU model, memory, kernel, model, serial), disks, command console, command history, Lock, Ping, Message, Remote desktop (Connect), Revoke, Delete |
 | Remote commands | `exec` (argv, no shell), `script` (sh/bash on Linux, PowerShell/cmd on Windows), presets, timeout, output capped at 64 KiB |
 | Remote lock | Built-in command; only for devices enrolled under your server; operator or admin; audited twice |
+| Remote desktop | Official RustDesk client on the device, your own relay (hbbs/hbbr) next to the server, Connect button on the device page, every connection audited (section 8) |
 | Alerts | `offline`, `disk_full` (≥ 90 %), `memory_high` (≥ 95 %), `battery_low` (≤ 15 %, not charging); acknowledge; auto-resolve |
 | Audit | Every login, token, enrollment, command, lock, alert ack and user change, with actor and IP; never pruned |
 | Ops | Docker compose, Caddy TLS example, systemd unit, Windows service, Android foreground service, health endpoint |
 
-Later phases (planned, not built): interactive remote shell in the browser, remote desktop
-through a self-hosted branded RustDesk relay, patching, software deployment, notifications
-by email/SMS/Slack, reports, Android device-owner mode (wipe, kiosk, app push), macOS/iOS
-agents, ticketing. See `docs/FEATURES.md` and `docs/STATUS.md`.
+Later phases (planned, not built): interactive remote shell in the browser, the branded
+RustDesk client with the relay compiled in (`docs/RUSTDESK-BRANDING.md`), patching,
+software deployment, notifications by email/SMS/Slack, reports, Android device-owner mode
+(wipe, kiosk, app push), macOS/iOS agents, ticketing. See `docs/FEATURES.md` and
+`docs/STATUS.md`.
 
 ## 2. How it fits together
 
@@ -101,6 +103,7 @@ Direct TLS without a proxy: set `MSP_TLS_CERT` and `MSP_TLS_KEY` to a PEM pair a
 | `MSP_RETENTION_DAYS` | `7` | heartbeat samples older than this are pruned |
 | `MSP_SECURE_COOKIES` | `0` | `1` behind TLS |
 | `MSP_TRUST_PROXY` | `0` | `1` only when a proxy you control is the only way in |
+| `MSP_RUSTDESK_HOST` / `MSP_RUSTDESK_KEY` | empty | your RustDesk relay and its public key; both or neither (section 8) |
 
 Health check: `GET /healthz` returns `{"ok":true}`.
 
@@ -246,7 +249,70 @@ The **Actions** row on every device page:
 - **Send message**: shows a text to the logged-in user (desktop notification on Linux via
   `notify-send`, `msg.exe` on Windows, a high-priority notification on Android).
 
-## 8. Alerts
+## 8. Remote desktop
+
+The **Remote desktop** card on every device page connects you to the device's screen
+through the official RustDesk client, using a RustDesk relay that **you** host next to the
+MSP server (decision D4, phase A). The public RustDesk network is never used: the device's
+client is pointed at your relay only, and your own client is too. Nothing of the screen
+session passes through the MSP server; it only knows each device's RustDesk id and writes
+the audit row.
+
+**What the Connect button does.** It asks the server to open a session
+(`POST /api/v1/devices/{id}/remote-desktop`): the server checks that you are an operator or
+admin, that the device is enrolled on this server and not revoked (every operator and admin
+of the MSP can reach every client's devices; logins are not scoped per client), that the
+relay is configured and that the device has reported an id; writes the audit row
+`device.remote_desktop_opened` with your user, the device and your IP; and answers the link
+`rustdesk://connect/<id>`. The page then opens that link, which your RustDesk client turns
+into a connection to the device, where you enter the device's permanent password. The same
+link is shown under the button, and the id has a Copy button in case you prefer to type it
+into the client yourself. Viewers see the id but have no Connect button. The id is what
+the agent on the device reported, nothing more: before you type the device's permanent
+password, check that the id in your RustDesk client's connection dialog is the one shown on
+the device page and the one printed when the device was set up.
+
+**First-time setup, once per MSP** (`docs/OPS.md` section 10): start the `hbbs`/`hbbr`
+services in the compose file (`docker compose ... --profile rustdesk up -d`; a plain `up -d`
+leaves them off), read `deploy/rustdesk-data/id_ed25519.pub`, set `MSP_RUSTDESK_HOST` (your
+bare public hostname, no port) and `MSP_RUSTDESK_KEY` (that line) on the server,
+open the relay ports on its firewall (21115/tcp, 21116/tcp+udp, 21117/tcp), and publish the
+official client packages at `/dl/`. Until then the card says remote desktop is not
+configured.
+
+**First-time setup, once per device.** Run the installer with `--with-rustdesk` (Linux) or
+`-WithRustDesk` (Windows): it installs the RustDesk client from `/dl/`, points it at your
+relay, sets a random permanent password and prints it once, together with the id. For an
+already enrolled machine, install RustDesk and run `msp-agent rustdesk setup` as
+root/Administrator (pipe your own password in with `--password-stdin` if you want to choose
+it; it is never taken from the command line). The password is also kept in
+`rustdesk-password` next to the agent config: readable by root on Linux and, on Windows, by
+SYSTEM and Administrators only, a restriction the agent applies itself whether the machine
+was set up by the installer or by hand. It is never sent to the server, so write it into
+your password manager when you set the machine up. The id appears on the device page after the
+agent's next facts sync (the installer restarts the agent to send it at once; otherwise
+within the hour).
+
+**First-time setup, once per technician.** Install the official RustDesk client on your own
+PC and in Settings > Network set ID server and Relay server to your `MSP_RUSTDESK_HOST` and
+Key to your `MSP_RUSTDESK_KEY` (both are shown on the card). Keep it installed: the Connect
+button only works when the client is registered for `rustdesk://` links on your PC.
+
+**Android.** Phase A covers Linux and Windows devices. On Android the official RustDesk app
+can be installed and pointed at the same relay by hand; screen sharing there always requires
+the person holding the phone to accept the MediaProjection consent dialog, and control
+requires the accessibility service to be enabled in the phone's settings. The MSP agent
+does not install or configure it, and the Android agent reports no RustDesk id, so the
+Connect button is not offered for phones.
+
+**What is audited.** Every press of Connect that gets a link: `device.remote_desktop_opened`
+with actor (your user), device, client and your IP, in the Audit page like any other action.
+A refused attempt (viewer, unknown device, relay off, no id) writes nothing. The length of
+the session and what happened on screen are not recorded by the MSP server in phase A: the
+RustDesk clients keep their own connection logs, and session recording is a RustDesk client
+setting.
+
+## 9. Alerts
 
 Alerts are evaluated by the server on every sync and by a sweeper every 15 s. No separate
 monitoring process.
@@ -263,7 +329,7 @@ There is one open alert per device and type. **Alerts** page: Open or All, filte
 (`DiskPct`, `MemPct`, `BatteryPct` in `internal/server`). Email, SMS and Slack notifications
 are phase 2.
 
-## 9. Users, roles, audit
+## 10. Users, roles, audit
 
 - **Users** (admin only): add technicians with email, password (10+ characters) and role;
   disable them when they leave. Sessions are cookies; the dashboard sends a CSRF header on
@@ -274,7 +340,7 @@ are phase 2.
 - **Audit** page: every action with time, actor (user email, `device:<id>` or `system`),
   action name, client and device, and the client IP. Append-only, never pruned.
 
-## 10. Housekeeping
+## 11. Housekeeping
 
 - **Token hygiene**: one token per rollout, short expiry, revoke after use. The server keeps
   only a hash and the first 10 characters.
@@ -288,7 +354,7 @@ are phase 2.
 - **Firewall**: agents need outbound HTTPS to the server only. The server needs 443 inbound
   (80 + 443 with Caddy). Restrict the dashboard to your own addresses at the proxy.
 
-## 11. Troubleshooting
+## 12. Troubleshooting
 
 | Symptom | Check |
 |---|---|
@@ -300,8 +366,12 @@ are phase 2.
 | Lock reports "device admin not granted" on Android | Open the app and tap **Grant device admin** |
 | Installer refuses to install | `SHA256SUMS` in `/dl/` does not match the binaries; rebuild with `make agents` |
 | Dashboard says "bundle not built" | Run `make web` (needs Node 22) and restart the server |
+| Remote desktop card says "not configured" | `MSP_RUSTDESK_HOST` and `MSP_RUSTDESK_KEY` are unset on the server (both are required, `docs/OPS.md` section 10) |
+| Remote desktop card says "not reported" | RustDesk is not installed on the device, or `msp-agent rustdesk setup` was not run, or the agent has not sent facts since: restart `msp-agent` |
+| Connect does nothing on your PC | Your own RustDesk client is not installed or not registered for `rustdesk://` links; open it and enter the id by hand (Copy button) |
+| Your client says the id is unknown / cannot connect | Your client and the device must use the same ID server, relay and key; check Settings > Network on both; relay ports open on the server host? |
 
-## 12. Where to look in the repository
+## 13. Where to look in the repository
 
 | Path | What |
 |---|---|
@@ -309,7 +379,8 @@ are phase 2.
 | `cmd/msp-agent`, `internal/agent` | desktop agent, command runner, service install |
 | `android/` | Android agent app |
 | `web/` | dashboard (Preact + TypeScript) |
-| `deploy/` | Dockerfile, docker-compose, Caddyfile example, systemd unit, installers |
+| `deploy/` | Dockerfile, docker-compose (server + RustDesk hbbs/hbbr), Caddyfile example, systemd unit, installers |
 | `scripts/e2e.sh` | end-to-end proof with real binaries |
 | `docs/screenshots/`, `docs/diagrams/` | labelled screenshots and diagrams |
 | `docs/STATUS.md`, `docs/CHECKLIST.md` | what is verified and what is not |
+| `docs/RUSTDESK-BRANDING.md` | phase B: building a branded RustDesk client with the relay compiled in (not done) |

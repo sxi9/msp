@@ -8,11 +8,13 @@ package server
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"sync"
 	"time"
 
+	"github.com/sxi9/msp/internal/protocol"
 	"github.com/sxi9/msp/internal/store"
 )
 
@@ -25,6 +27,8 @@ type Config struct {
 	TLSKey        string
 	AgentDir      string        // directory served at /dl/ ("" = disabled)
 	PresetsPath   string        // JSON command preset library replacing the builtin set ("" = builtin); re-read when its mtime changes
+	RustdeskHost  string        // self-hosted RustDesk ID/relay server, bare hostname or IP (RD1); enabled only together with RustdeskKey
+	RustdeskKey   string        // the relay's public key (content of id_ed25519.pub)
 	SecureCookies bool          // force the Secure flag on the session cookie (behind a TLS proxy)
 	TrustProxy    bool          // honour the first X-Forwarded-For address
 	Version       string        // reported by /api/agent/v1/ping
@@ -155,10 +159,45 @@ func (s *Server) Handler() http.Handler {
 	return h
 }
 
+// ValidateRustdesk reports an invalid RustDesk configuration: a host without
+// a key or a key without a host, a host that is not a bare hostname or IP
+// (a port, scheme or anything that would need quoting in the agents'
+// RustDesk2.toml), or a key that is not one base64 line. Both empty means
+// remote desktop is disabled; both set and well-formed enables it (RD1).
+func (c Config) ValidateRustdesk() error {
+	if (c.RustdeskHost == "") != (c.RustdeskKey == "") {
+		return errors.New("MSP_RUSTDESK_HOST and MSP_RUSTDESK_KEY must be set together (both to enable remote desktop, neither to disable it)")
+	}
+	if c.RustdeskHost == "" {
+		return nil
+	}
+	if err := (protocol.Rustdesk{Host: c.RustdeskHost, Key: c.RustdeskKey}).Validate(); err != nil {
+		return fmt.Errorf("MSP_RUSTDESK_HOST / MSP_RUSTDESK_KEY: %w", err)
+	}
+	return nil
+}
+
+// rustdeskEnabled reports whether a relay is configured.
+func (s *Server) rustdeskEnabled() bool {
+	return s.cfg.RustdeskHost != "" && s.cfg.RustdeskKey != ""
+}
+
+// rustdeskInfo is the relay block for agent responses: nil when disabled.
+func (s *Server) rustdeskInfo() *protocol.Rustdesk {
+	if !s.rustdeskEnabled() {
+		return nil
+	}
+	return &protocol.Rustdesk{Host: s.cfg.RustdeskHost, Key: s.cfg.RustdeskKey}
+}
+
 // Run serves until ctx is done, starting the background jobs alongside, then
 // shuts the listener down gracefully (10 s). A configured presets file that
-// does not load is a startup error: nothing is served.
+// does not load, or a half-configured RustDesk relay, is a startup error:
+// nothing is served.
 func (s *Server) Run(ctx context.Context) error {
+	if err := s.cfg.ValidateRustdesk(); err != nil {
+		return err
+	}
 	if err := s.presets.load(); err != nil {
 		return err
 	}

@@ -19,6 +19,8 @@ environment variables; a flag of the same name overrides the variable.
 | `MSP_AGENT_DIR`      | `""`         | directory served at `/dl/` (agent binaries, `SHA256SUMS`, installers)    |
 | `MSP_RETENTION_DAYS` | `7`          | heartbeat samples older than this are pruned hourly                      |
 | `MSP_PRESETS`        | `""`         | JSON command preset library for the device console; unset = the builtin set (see below) |
+| `MSP_RUSTDESK_HOST`  | `""`         | self-hosted RustDesk ID/relay server as clients reach it, bare hostname or IP (section 10) |
+| `MSP_RUSTDESK_KEY`   | `""`         | that server's public key (content of `id_ed25519.pub`); set with `MSP_RUSTDESK_HOST` or not at all: the server refuses to start with only one |
 
 Bootstrap (first admin, first org, first enrollment token), then serve:
 
@@ -228,11 +230,184 @@ compose file carries the commented lines.
   run `VACUUM` after large deletions if needed.
 - Firewall: agents need **outbound** HTTPS (443, or whatever port the server listens on)
   to the server only; nothing is opened inbound at client sites. The server needs 443 (or
-  80 + 443 with Caddy) inbound and nothing else. Restrict the dashboard to the MSP's own
-  addresses at the proxy if you can; phase 1 has no built-in IP allowlist.
+  80 + 443 with Caddy) inbound and nothing else, plus the RustDesk relay ports of section 10
+  when remote desktop is on. Restrict the dashboard to the MSP's own addresses at the proxy
+  if you can; phase 1 has no built-in IP allowlist.
 
 ## 9. Health
 
 `GET /healthz` returns `200 {"ok":true}` when the database answers; the Docker image uses it
 as the container health check. `GET /api/agent/v1/ping` is the unauthenticated reachability
 check agents and installers use.
+
+## 10. Remote desktop (RustDesk)
+
+Decision D4, phase A (feature RD1): the official RustDesk client on the endpoints and on
+the technicians' PCs, talking only through a RustDesk ID/relay server (`hbbs`/`hbbr`) that
+you host next to the MSP server. The MSP server stores each device's RustDesk id, shows it
+on the device page with a **Connect** button, and audits every connection; the screen
+session itself runs between the two RustDesk clients through your relay and never touches
+the MSP server. Phase B (a branded client with the relay compiled in) is documented in
+`docs/RUSTDESK-BRANDING.md` and not built. Facts below are from the RustDesk documentation
+and source as checked on 2026-11-13 (`docs/RUSTDESK-BRANDING.md` lists the sources).
+
+### 10a. The relay: hbbs + hbbr in compose
+
+`deploy/docker-compose.yml` carries two services, both from the image
+`rustdesk/rustdesk-server:1.1.16` (the latest release, 2026-07-20; pin
+`1.1.16-amd64` on an x86_64-only host), with `network_mode: "host"` as in the official
+compose example and `restart: unless-stopped`, **both in the compose profile `rustdesk`**:
+a plain `docker compose ... up -d` (section 3, README) never starts them and nothing
+listens on the RustDesk ports until you pass `--profile rustdesk`. With host networking
+there is no port mapping to leave out, so the profile is the opt-in; keep passing it to
+every later `up`/`restart` once you use remote desktop, or the two containers are left
+alone (compose does not stop them either).
+
+- `hbbs`, command `["hbbs", "-r", "<MSP_RUSTDESK_HOST>"]`: the ID/rendezvous server. `-r`
+  names the relay the clients are told to use (hbbr on the same host, port 21117), so it
+  takes the bare hostname. The value is passed as one argument whatever it contains, and
+  when the variable is unset hbbs gets `-r ""` and advertises no default relay (the clients
+  that `msp-agent rustdesk setup` configures carry `relay-server` themselves) rather than a
+  placeholder hostname.
+- `hbbr`, command `hbbr`: the relay.
+
+Both bind-mount `./rustdesk-data` (next to the compose file, git-ignored) at `/root`. On
+its first start `hbbs` generates an Ed25519 key pair there: `id_ed25519` (private: keep it,
+back it up, never publish it) and `id_ed25519.pub` (public: one base64 line that every
+client must know). To use a key of your own instead, pass `-k <key>` to both commands or set
+`KEY` in their environment.
+
+```sh
+MSP_RUSTDESK_HOST=rmm.example.com docker compose -f deploy/docker-compose.yml --profile rustdesk up -d
+cat deploy/rustdesk-data/id_ed25519.pub        # -> OeVuKk5nlHiXp+7qsR6CbcHBGxhU4PJkNbvoX3P5X0k=
+```
+
+Put both values in the `.env` file next to the compose file (or the server's environment):
+
+```
+MSP_RUSTDESK_HOST=rmm.example.com
+MSP_RUSTDESK_KEY=OeVuKk5nlHiXp+7qsR6CbcHBGxhU4PJkNbvoX3P5X0k=
+```
+
+and `docker compose ... --profile rustdesk up -d` again. The host is the **bare** public DNS
+name or IP as RustDesk clients reach it: no port, no scheme. hbbs is reached on 21116 and
+hbbr on 21117, the defaults of both the server and the client, and the same string is
+written as ID server and as relay server into every client, so a `:port` would point the
+relay at the ID-server port. The key is the one base64 line of `id_ed25519.pub` (or the
+`-k` value you gave both servers). With a bare binary the same two variables (or
+`--rustdesk-host` / `--rustdesk-key`) go on `msp-server serve`. Both or neither: with only
+one the server exits with "MSP_RUSTDESK_HOST and MSP_RUSTDESK_KEY must be set together",
+and with a host that is not a bare hostname/IP or a key that is not one base64 line it
+exits with the reason (the values go verbatim into the agents' `RustDesk2.toml`, so nothing
+that would need quoting there is accepted; the agents refuse such values too).
+`GET /api/v1/rustdesk` answers `{"enabled":true,...}` once it is on, and every agent learns
+the host and key in its next sync response (no reinstall).
+
+**Firewall** (inbound, on the relay host; host networking means the host firewall is what
+opens them):
+
+| port | proto | service | needed for |
+|---|---|---|---|
+| 21115 | tcp | hbbs | NAT type test |
+| 21116 | tcp **and** udp | hbbs | ID registration, rendezvous, hole punching |
+| 21117 | tcp | hbbr | relayed sessions |
+| 21118 | tcp | hbbs | web client only; keep closed otherwise |
+| 21119 | tcp | hbbr | web client only; keep closed otherwise |
+| 21114 | tcp | hbbs | Pro web console only (not used) |
+
+The official UFW example is `ufw allow 21114:21119/tcp` and `ufw allow 21116/udp`; with the
+web client unused, `21115:21117/tcp` plus `21116/udp` is enough. Endpoints and technician
+PCs need **outbound** access to those ports only.
+
+### 10b. Publishing the client installers at /dl/
+
+The agent installers can install the official RustDesk client, but the MSP server never
+downloads it and `scripts/build-agents.sh` never does either: you fetch the release assets
+once and publish them yourself. Current client release: **1.5.3** (2026-11-09); the assets the
+installers look for are `rustdesk-1.5.3-x86_64.deb` (Linux amd64),
+`rustdesk-1.5.3-aarch64.deb` (Linux arm64) and `rustdesk-1.5.3-x86_64.exe` (Windows), from
+`https://github.com/rustdesk/rustdesk/releases/download/1.5.3/<asset>` (the always-current
+page is `https://github.com/rustdesk/rustdesk/releases/latest`; an `.msi` also exists but the
+installers use the `.exe`, whose `--silent-install` is the documented unattended path).
+
+```sh
+cd "$MSP_AGENT_DIR"     # the directory served at /dl/ (/agents in the Docker image, see section 3)
+curl -fsSLO https://github.com/rustdesk/rustdesk/releases/download/1.5.3/rustdesk-1.5.3-x86_64.deb
+curl -fsSLO https://github.com/rustdesk/rustdesk/releases/download/1.5.3/rustdesk-1.5.3-x86_64.exe
+cd - && MSP_AGENT_DIR=... scripts/build-agents.sh --sums-only     # rewrites SHA256SUMS over the whole directory
+```
+
+`--sums-only` compiles nothing and copies nothing; it only regenerates `SHA256SUMS` so the
+installers can verify the packages (they refuse an unlisted or mismatching file). A full
+`make agents` run with `MSP_AGENT_DIR` set also re-sums the directory, so the packages stay
+listed across agent upgrades. To publish a newer client, drop in the new assets and run the
+installers with `RUSTDESK_VERSION=<v>` (Linux) / `-RustDeskVersion <v>` (Windows).
+
+### 10c. Installing the client on endpoints
+
+- Linux: `install.sh ... --with-rustdesk` downloads the `.deb` from `/dl/`, verifies it,
+  installs it (`apt-get install -y ./file.deb`, or `dpkg -i`), then runs
+  `msp-agent rustdesk setup` and restarts the agent so the id is reported at once.
+- Windows: `install.ps1 ... -WithRustDesk` downloads the `.exe`, verifies it, runs
+  `rustdesk.exe --silent-install` and `rustdesk.exe --install-service` (the documented
+  unattended sequence), then `msp-agent.exe rustdesk setup` and restarts the agent service.
+- Already enrolled machines: install RustDesk any way you like (or re-run the installer with
+  the flag) and run `msp-agent rustdesk setup` as root/Administrator.
+
+`msp-agent rustdesk setup [--password-stdin] [--config-string S]` does, in order: read the
+relay host and key from `agent.json` (refuses when the server has not reported one yet, and
+when the stored host is not a bare hostname/IP or the key not one base64 line); find the
+client (`rustdesk` on PATH or `/usr/bin/rustdesk`; `%ProgramFiles%\RustDesk\rustdesk.exe`;
+override with `MSP_RUSTDESK_BIN`); write the `[options]` block of `RustDesk2.toml`
+(`custom-rendezvous-server`, `relay-server`, `key`) into the service account's RustDesk
+config directory (`/root/.config/rustdesk`; on Windows the LocalService profile and the
+invoking user's `%APPDATA%\RustDesk\config`), keeping other keys; set the permanent password
+with the documented `rustdesk --password <pw>` (a random 16-character one, or the line piped
+in with `--password-stdin`: there is no `--password P` flag, so the password never sits on
+msp-agent's own command line); restart the RustDesk service (`systemctl restart rustdesk` /
+the `RustDesk` Windows service, best effort); read the id with `rustdesk --get-id`; and write
+the password to `rustdesk-password` next to `agent.json`, 0600 on Linux and, on Windows where
+mode bits mean nothing, with a DACL for SYSTEM and Administrators only that the agent sets
+on the directory and the file itself (also from `msp-agent install`; the installer's `icacls`
+is only a belt and braces). The one unavoidable exposure is `rustdesk --password <pw>`, the
+only documented way to set it: the password is on that process's command line for the
+seconds it runs, so run setup on a machine nobody else is logged into
+(`docs/SECURITY.md` section 8). The password is printed once and **never sent to the MSP
+server**; a technician on the box can read it from that file. If you prefer
+the fully documented configuration path, export the config string from any configured
+client's Settings > Network and pass it with `--config-string`: it is applied with
+`rustdesk --config <string>` instead of the TOML write. `msp-agent rustdesk id` prints the
+local id.
+
+The id reaches the server with the agent's facts (at enrollment, the first sync after a
+start and every 120th sync), so after a manual setup restart the agent (`systemctl restart
+msp-agent` / `Restart-Service msp-agent`) or wait up to an hour.
+
+What is verified here and what is not: the CLI flags (`--get-id`, `--password`, `--config`,
+`--silent-install`, `--install-service`) and `systemctl restart rustdesk` are from the
+official client-deployment page; the `RustDesk2.toml` key names other than
+`custom-rendezvous-server` and the per-OS config directories are the conventional ones and
+could not be confirmed from primary documentation, so the first install on a real Linux
+desktop and a real Windows PC is a manual test (`docs/STATUS.md`). If the relay does not
+take, use `--config-string`.
+
+### 10d. The technician's own PC
+
+Install the same official client on each technician's PC, open Settings > Network and set
+**ID server** and **Relay server** to `MSP_RUSTDESK_HOST` and **Key** to `MSP_RUSTDESK_KEY`
+(the device page shows the relay; `GET /api/v1/rustdesk` returns both). Keep the client
+running: the **Connect** button opens `rustdesk://connect/<id>`, which the client registers
+as a URL scheme at install time and turns into a session to that id; the client asks for the
+device's permanent password (from the installer output or `rustdesk-password` on the
+device). If the link does nothing, the client is not installed or not registered for the
+scheme: start it and enter the id by hand (the page shows it with a Copy button). The
+technician's client must use the **same** host and key, or the id is unknown to it.
+
+### 10e. Disabling and rotating
+
+Unset both variables to turn the feature off: the card on every device page says it is not
+configured, `POST .../remote-desktop` answers `409 rustdesk_disabled`, and the agents keep
+their last known relay (harmless). To rotate the key, stop `hbbs`, delete `id_ed25519*`,
+start it, put the new `.pub` line into `MSP_RUSTDESK_KEY`, restart the server, and re-run
+`msp-agent rustdesk setup` on every endpoint and the client settings on every technician PC
+(the agents receive the new key in their next sync but only `setup` applies it to RustDesk).

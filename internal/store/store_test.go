@@ -1036,7 +1036,7 @@ func TestDeviceJSONShape(t *testing.T) {
 	}
 	want := []string{"id", "org_id", "org_name", "device_uid", "hostname", "platform", "arch", "os_version", "agent_version",
 		"interval_s", "status", "enrolled_at", "last_seen_at", "last_ip", "revoked", "cpu_pct", "mem_used_pct", "disk_used_pct",
-		"battery_pct", "battery_charging", "uptime_s", "open_alerts", "can_run_commands"}
+		"battery_pct", "battery_charging", "uptime_s", "open_alerts", "can_run_commands", "rustdesk_id"}
 	var got []string
 	for k := range m {
 		got = append(got, k)
@@ -1046,7 +1046,7 @@ func TestDeviceJSONShape(t *testing.T) {
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("DEVICE keys = %v\nwant %v", got, want)
 	}
-	if m["cpu_pct"] != nil || m["battery_pct"] != nil || m["status"] != "online" || m["uptime_s"] != float64(5) {
+	if m["cpu_pct"] != nil || m["battery_pct"] != nil || m["status"] != "online" || m["uptime_s"] != float64(5) || m["rustdesk_id"] != nil {
 		t.Fatalf("DEVICE values: %s", b)
 	}
 	if ts, _ := m["last_seen_at"].(string); ts != "2026-11-13T10:00:00Z" {
@@ -1054,5 +1054,56 @@ func TestDeviceJSONShape(t *testing.T) {
 	}
 	if strings.Contains(string(b), "facts_json") || strings.Contains(string(b), "last_metrics_json") {
 		t.Fatalf("raw JSON columns leaked: %s", b)
+	}
+}
+
+func TestRustdeskIDStoredFromFacts(t *testing.T) {
+	s, _ := openTest(t)
+	ctx := context.Background()
+	org, _, dev, _ := fixture(t, s)
+	if dev.RustdeskID != nil {
+		t.Fatalf("fresh device must have no rustdesk id: %v", *dev.RustdeskID)
+	}
+	// A sync without facts, and one with facts but no id, leave it unknown.
+	if err := s.RecordSync(ctx, dev.ID, "10.0.0.12", protocol.SyncRequest{IntervalS: 30}, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RecordSync(ctx, dev.ID, "10.0.0.12", protocol.SyncRequest{IntervalS: 30, Facts: &protocol.Facts{Kernel: "6.8"}}, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if d, _ := s.GetDevice(ctx, dev.ID); d.RustdeskID != nil {
+		t.Fatalf("rustdesk id after syncs without one: %v", *d.RustdeskID)
+	}
+	// A sync whose facts carry the id stores it; a later sync without facts keeps it.
+	if err := s.RecordSync(ctx, dev.ID, "10.0.0.12", protocol.SyncRequest{IntervalS: 30, Facts: &protocol.Facts{Kernel: "6.8", RustdeskID: "123456789"}}, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RecordSync(ctx, dev.ID, "10.0.0.12", protocol.SyncRequest{IntervalS: 30}, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	d, _ := s.GetDevice(ctx, dev.ID)
+	if d.RustdeskID == nil || *d.RustdeskID != "123456789" {
+		t.Fatalf("rustdesk id = %v", d.RustdeskID)
+	}
+	// Re-enrollment without an id keeps the stored one; with an id replaces it.
+	if _, _, err := s.UpsertDevice(ctx, UpsertDeviceParams{OrgID: org.ID, DeviceUID: dev.DeviceUID, Hostname: dev.Hostname, Platform: dev.Platform}); err != nil {
+		t.Fatal(err)
+	}
+	if d, _ = s.GetDevice(ctx, dev.ID); d.RustdeskID == nil || *d.RustdeskID != "123456789" {
+		t.Fatalf("rustdesk id after re-enroll without id = %v", d.RustdeskID)
+	}
+	if _, _, err := s.UpsertDevice(ctx, UpsertDeviceParams{OrgID: org.ID, DeviceUID: dev.DeviceUID, Hostname: dev.Hostname, Platform: dev.Platform, RustdeskID: "987654321"}); err != nil {
+		t.Fatal(err)
+	}
+	if d, _ = s.GetDevice(ctx, dev.ID); d.RustdeskID == nil || *d.RustdeskID != "987654321" {
+		t.Fatalf("rustdesk id after re-enroll with id = %v", d.RustdeskID)
+	}
+	// Enrolling a new device with an id stores it at once.
+	d2, _, err := s.UpsertDevice(ctx, UpsertDeviceParams{OrgID: org.ID, DeviceUID: "uid-rd", Hostname: "ws-rd", Platform: protocol.PlatformWindows, RustdeskID: "111222333"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d2.RustdeskID == nil || *d2.RustdeskID != "111222333" {
+		t.Fatalf("new device rustdesk id = %v", d2.RustdeskID)
 	}
 }

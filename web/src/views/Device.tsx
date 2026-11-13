@@ -1,11 +1,12 @@
 import { useEffect, useState } from 'preact/hooks';
-import { api, errorText } from '../api.ts';
+import { ApiError, api, errorText } from '../api.ts';
 import { usePoll } from '../hooks.ts';
 import { navigate } from '../router.ts';
 import { ago, duration, gb, pct, uptime, when } from '../lib/format.ts';
 import { argvPreview, parseArgv } from '../lib/argv.ts';
 import { loadPresets, presetFill, presetsFor } from '../lib/presets.ts';
-import { COMMAND_DONE, canOperate, isAdmin, type Command, type Device as DeviceT, type NewCommand, type Preset, type User } from '../types.ts';
+import { notReportedHint, remoteDesktopError, technicianHint } from '../lib/rustdesk.ts';
+import { COMMAND_DONE, canOperate, isAdmin, type Command, type Device as DeviceT, type NewCommand, type Preset, type RemoteDesktopOpened, type RustdeskInfo, type User } from '../types.ts';
 import { StatusDot } from '../components/StatusDot.tsx';
 import { Sparkline } from '../components/Sparkline.tsx';
 import { CopyButton } from '../components/CopyBlock.tsx';
@@ -17,7 +18,7 @@ const SHELLS: Record<string, string[]> = { linux: ['sh', 'bash'], windows: ['pow
 /** Readable labels for the protocol's facts keys; unknown keys show as-is. */
 const FACT_LABELS: Record<string, string> = {
   kernel: 'Kernel', cpu_model: 'CPU', cpu_count: 'CPUs', mem_total_mb: 'Memory',
-  manufacturer: 'Manufacturer', model: 'Model', serial: 'Serial', ips: 'IPs',
+  manufacturer: 'Manufacturer', model: 'Model', serial: 'Serial', ips: 'IPs', rustdesk_id: 'RustDesk id',
 };
 
 /** One facts value as text: arrays joined, empty strings and nulls as an em dash, memory in MB. */
@@ -140,6 +141,7 @@ export function Device({ id, user }: { id: number; user: User }) {
       </div>
 
       {builtins && <BuiltIns device={d} onQueue={queue} />}
+      {!d.revoked && <RemoteDesktop device={d} operator={operator} />}
       {operator && d.can_run_commands && <Console device={d} onQueue={queue} />}
       {error && <p class="error">{error}</p>}
       {tracked && <CommandResult command={tracked} />}
@@ -170,6 +172,66 @@ function BuiltIns({ device, onQueue }: { device: DeviceT; onQueue: (c: NewComman
           <button type="submit" class="btn btn-sm" disabled={!text.trim()}>Send message</button>
         </form>
       </div>
+    </div>
+  );
+}
+
+/**
+ * Remote desktop through the MSP's own RustDesk relay (RD1). The server says
+ * whether a relay is configured (GET /api/v1/rustdesk, fetched once per card);
+ * the device carries the RustDesk id its agent reported. Connect POSTs
+ * /remote-desktop (audited server side) and then navigates to the returned
+ * rustdesk://connect/<id> URL, which the technician's own RustDesk client
+ * handles; the same URL is also shown as a real link, and the id can be copied
+ * for a manual connection.
+ */
+function RemoteDesktop({ device, operator }: { device: DeviceT; operator: boolean }) {
+  const info = usePoll<RustdeskInfo>(() => api.rustdesk(), [], 0);
+  const [opened, setOpened] = useState<RemoteDesktopOpened | null>(null);
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+  useEffect(() => { setOpened(null); setError(''); }, [device.id]);
+  const connect = async () => {
+    setBusy(true);
+    setError('');
+    try {
+      const r = await api.remoteDesktop(device.id);
+      setOpened(r);
+      // The browser hands rustdesk:// to the registered client; the page stays.
+      window.location.href = r.url;
+    } catch (e) {
+      setError(e instanceof ApiError ? remoteDesktopError(e.code, e.detail) : errorText(e));
+    } finally { setBusy(false); }
+  };
+  if (info.error) return <div class="card rustdesk"><h2>Remote desktop</h2><p class="error">{info.error}</p></div>;
+  if (!info.data) return <div class="card rustdesk"><h2>Remote desktop</h2><p class="muted">Loading…</p></div>;
+  if (!info.data.enabled) {
+    return (
+      <div class="card rustdesk">
+        <h2>Remote desktop</h2>
+        <p class="muted">Remote desktop is not configured on this server. Set <code>MSP_RUSTDESK_HOST</code> and <code>MSP_RUSTDESK_KEY</code> to the self-hosted RustDesk relay: see <a href="https://github.com/sxi9/msp/blob/main/docs/OPS.md#10-remote-desktop-rustdesk" target="_blank" rel="noreferrer">docs/OPS.md, Remote desktop (RustDesk)</a>.</p>
+      </div>
+    );
+  }
+  const id = device.rustdesk_id;
+  return (
+    <div class="card rustdesk">
+      <h2>Remote desktop</h2>
+      <dl class="kv">
+        <dt>RustDesk id</dt>
+        <dd>{id ? <><code>{id}</code> <CopyButton text={id} /></> : <span class="muted">{notReportedHint(device.platform)}</span>}</dd>
+        <dt>Relay</dt><dd><code>{info.data.host}</code></dd>
+      </dl>
+      {operator && id && (
+        <div class="form-row">
+          <button type="button" class="btn btn-primary" disabled={busy} onClick={connect}>Connect</button>
+          {opened && <a href={opened.url}>Open <code>{opened.url}</code> in RustDesk</a>}
+        </div>
+      )}
+      {!operator && <p class="muted">Viewers can see the id; connecting needs the operator role.</p>}
+      {error && <p class="error">{error}</p>}
+      {opened && <p class="muted">If nothing opened, the RustDesk client on this PC is not installed or not registered for <code>rustdesk://</code> links: start it, enter id <code>{opened.rustdesk_id}</code> and the device's permanent password. The session is audited as <code>device.remote_desktop_opened</code>.</p>}
+      <p class="muted">{technicianHint(info.data.host)}</p>
     </div>
   );
 }

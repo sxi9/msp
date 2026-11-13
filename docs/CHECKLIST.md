@@ -69,3 +69,25 @@ test or a screenshot in `docs/screenshots/`. Unticked items are not done.
 ## Docs
 - [x] README: run, enroll, deploy (the Quickstart commands are the ones the live run used and they worked; deploy points to docs/OPS.md)
 - [x] CI workflow: go build/test, gradle assembleDebug (`.github/workflows/ci.yml` runs the same commands that passed here). Not verified: an actual GitHub Actions run
+
+## RD1: remote desktop through our own RustDesk relay (added 2026-11-13, D4 phase A)
+
+Verified in the same container with: `CGO_ENABLED=0 go build ./...`, `go vet ./...`, `CGO_ENABLED=0 go test ./... -count=1`
+(agent, e2e, protocol, server, store ok), `GOOS=windows GOARCH=amd64 go build ./...` + `GOOS=windows go vet`, `make web`
+(20 web unit tests, tsc, esbuild, server rebuild), `scripts/e2e.sh` ("E2E OK", now with the RustDesk steps),
+`docker compose -f deploy/docker-compose.yml config`, `bash -n` / `sh -n` on the scripts, `gradle :app:testDebugUnitTest`
+(12 JVM tests, fixtures unchanged for Android), and a live run for screenshot 16.
+
+- [x] Compose: `hbbs` + `hbbr` from `rustdesk/rustdesk-server:1.1.16`, host networking, `./rustdesk-data:/root`, `-r <host>` (`docker compose config` validates). Not verified: running them (no Docker daemon here)
+- [x] Server: `MSP_RUSTDESK_HOST` + `MSP_RUSTDESK_KEY` / `--rustdesk-host` / `--rustdesk-key`, both or neither (`TestConfigValidateRustdesk`; `msp-server serve --rustdesk-host x` exits 2 with the message)
+- [x] `GET /api/v1/rustdesk` and the `rustdesk` block in enroll/sync responses, omitted when disabled (`TestRustdeskInfoAndAgentResponses`; e2e "rustdesk info is enabled", "agent config holds the relay from the enroll response")
+- [x] `facts.rustdesk_id` (digits, <= 32) validated, stored on enroll and sync, exposed as `rustdesk_id` in DEVICE JSON (`TestRustdeskIDFromFacts`, `TestRustdeskIDStoredFromFacts`; e2e "device reports rustdesk_id from the stub client" with the real agent and a stub `rustdesk --get-id` on its PATH)
+- [x] `POST /api/v1/devices/{id}/remote-desktop`: operator+, CSRF, 404 unknown/revoked, 409 `rustdesk_disabled`, 409 `no_rustdesk_id`, 200 with `rustdesk://connect/<id>`, audit `device.remote_desktop_opened` with user, device and IP (`TestRemoteDesktop`; e2e steps "remote desktop answers rustdesk://connect/<id> (200)" through "audit has exactly one device.remote_desktop_opened")
+- [x] Agent: relay kept in `agent.json`, saved only on change (`TestRunSavesRustdeskRelayFromSync`); `rustdesk_id` via `--get-id` with `RustDesk.toml` fallback (`TestRustdeskIDFromCLIAndTOML`)
+- [x] Agent: `msp-agent rustdesk setup` against a stub client: RustDesk2.toml `[options]` merge, `--password`, restart hook, `--get-id`, `rustdesk-password` 0600, `--config-string` path, error paths (`TestRustdeskSetup`, `TestMergeRustdeskOptions`)
+- [ ] Agent: `rustdesk setup` against the real RustDesk client on Ubuntu and Windows — Not verified: the conventional RustDesk2.toml keys/paths cannot be exercised here (docs/STATUS.md manual test 3 and 4)
+- [x] Installers: `--with-rustdesk` / `-WithRustDesk` download from `/dl/`, verify against SHA256SUMS, install silently, run setup, restart the agent; absent asset prints how to publish it (`bash -n`, `sh -n`; the messages reviewed). Not verified: a real install
+- [x] `scripts/build-agents.sh --sums-only` regenerates SHA256SUMS over `MSP_AGENT_DIR` without building or downloading (exercised on a scratch directory; `sha256sum -c` passes)
+- [x] Dashboard: Remote desktop card (id + Copy, Connect, fallback link, viewer without button, not-configured, not-reported), `?mock=1` and `?mock=1&rustdesk=0` (`web/src/lib/rustdesk.test.ts`; typecheck; screenshot 16)
+- [ ] An actual screen session from a technician PC — Not verified: RustDesk cannot run in the build container (docs/STATUS.md manual test 5)
+- [x] Docs: OPS section 10, GUIDE section 8, SECURITY section 8, PROTOCOL (fields, endpoints, audit action, fixtures, CLI), DECISIONS D4 phases, RUSTDESK-BRANDING.md, FEATURES, STATUS, README, ARCHITECTURE

@@ -99,6 +99,7 @@ func Enroll(ctx context.Context, serverURL, token, caFile string, insecureHTTP b
 	cfg.DeviceToken = resp.DeviceToken
 	cfg.DeviceID = resp.DeviceID
 	cfg.ServerURL = client.base
+	cfg.setRustdesk(resp.Rustdesk)
 	return cfg, nil
 }
 
@@ -172,6 +173,20 @@ func Run(ctx context.Context, cfg Config, version string, log *slog.Logger) erro
 		}
 		backoff = backoffMin
 		syncs++
+
+		// The relay the server reports is kept in the config file so
+		// `msp-agent rustdesk setup` works without a re-enrollment; written
+		// only when it changed.
+		if r := resp.Rustdesk; r != nil && r.Validate() != nil {
+			log.Warn("ignoring a malformed rustdesk relay from the server", "err", r.Validate())
+		} else if cfg.setRustdesk(r) {
+			log.Info("rustdesk relay updated by the server", "host", cfg.RustdeskHost)
+			if cfg.Path != "" {
+				if err := Save(cfg.Path, cfg); err != nil {
+					log.Warn("saving the rustdesk relay to the config failed", "path", cfg.Path, "err", err)
+				}
+			}
+		}
 
 		for _, cmd := range resp.Commands {
 			wg.Add(1)
@@ -248,6 +263,9 @@ func Status(cfgPath string) (string, error) {
 	}
 	if cfg.InsecureHTTP {
 		s += "insecure http: yes\n"
+	}
+	if cfg.RustdeskHost != "" {
+		s += fmt.Sprintf("rustdesk:  %s\n", cfg.RustdeskHost)
 	}
 	if cfg.DeviceToken == "" {
 		s += "enrolled:  no\n"

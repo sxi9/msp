@@ -330,6 +330,13 @@ func ptrBoolArg(p *bool) any {
 	return boolInt(*p)
 }
 
+func ptrStringArg(p *string) any {
+	if p == nil {
+		return nil
+	}
+	return *p
+}
+
 // isUniqueViolation reports whether err is a UNIQUE / PRIMARY KEY constraint
 // failure from SQLite.
 func isUniqueViolation(err error) bool {

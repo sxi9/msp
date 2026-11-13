@@ -32,7 +32,15 @@ export interface Device {
   cpu_pct: number | null; mem_used_pct: number | null; disk_used_pct: number | null;
   battery_pct: number | null; battery_charging: boolean | null; uptime_s: number | null;
   open_alerts: number; can_run_commands: boolean;
+  /** RustDesk id the agent last reported in its facts; null until the RustDesk client is installed (RD1). */
+  rustdesk_id: string | null;
 }
+
+/** Body of GET /api/v1/rustdesk: the self-hosted relay, enabled only when the server has host and key. */
+export interface RustdeskInfo { enabled: boolean; host: string; key: string }
+
+/** Body of POST /api/v1/devices/{id}/remote-desktop: the rustdesk://connect URL plus what the technician's own client needs. */
+export interface RemoteDesktopOpened { url: string; rustdesk_id: string; host: string; key: string }
 
 export interface Heartbeat {
   at: string; cpu_pct: number | null; mem_used_pct: number | null; disk_used_pct: number | null;

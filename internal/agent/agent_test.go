@@ -238,6 +238,10 @@ func TestEnrollWritesConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if back.Path != path {
+		t.Fatalf("Load must record the path, got %q", back.Path)
+	}
+	back.Path = ""
 	if back != cfg {
 		t.Fatalf("round trip: %+v != %+v", back, cfg)
 	}

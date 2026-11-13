@@ -52,6 +52,8 @@ func TestFixturesRoundTrip(t *testing.T) {
 		{"sync_android.json", &SyncRequest{}},
 		{"sync_response.json", &SyncResponse{}},
 		{"sync_response_android.json", &SyncResponse{}},
+		{"sync_rustdesk.json", &SyncRequest{}},
+		{"sync_response_rustdesk.json", &SyncResponse{}},
 		{"command_result.json", &CommandResult{}},
 		{"error.json", &ErrorResponse{}},
 	}
@@ -135,6 +137,22 @@ func TestFixtureSemantics(t *testing.T) {
 				t.Errorf("kind %s must be supported on %s", c.Kind, p)
 			}
 		}
+	}
+
+	// RD1: a sync whose facts carry the RustDesk id, and a response that
+	// tells the agent which relay to use. The plain fixtures carry neither.
+	var srd SyncRequest
+	roundTrip(t, "sync_rustdesk.json", &srd)
+	if srd.Facts == nil || srd.Facts.RustdeskID != "123456789" || !ValidRustdeskID(srd.Facts.RustdeskID) || srd.Facts.Validate() != nil {
+		t.Fatalf("sync_rustdesk facts: %+v", srd.Facts)
+	}
+	if sl.Facts.RustdeskID != "" || sr.Rustdesk != nil || sra.Rustdesk != nil {
+		t.Fatal("plain fixtures must not carry rustdesk fields")
+	}
+	var srr SyncResponse
+	roundTrip(t, "sync_response_rustdesk.json", &srr)
+	if srr.Rustdesk == nil || srr.Rustdesk.Host != "rmm.example.com" || srr.Rustdesk.Key == "" || len(srr.Commands) != 0 {
+		t.Fatalf("sync_response_rustdesk: %+v", srr)
 	}
 
 	var res CommandResult
@@ -296,5 +314,77 @@ func TestCommandJSONShape(t *testing.T) {
 		if string(out) != want {
 			t.Errorf("marshal %+v\n got %s\nwant %s", c, out, want)
 		}
+	}
+}
+
+func TestRustdesk(t *testing.T) {
+	for _, ok := range []string{"1", "123456789", strings.Repeat("9", MaxRustdeskIDLen)} {
+		if !ValidRustdeskID(ok) {
+			t.Errorf("ValidRustdeskID(%q) must be true", ok)
+		}
+		if err := (Facts{RustdeskID: ok}).Validate(); err != nil {
+			t.Errorf("Facts{%q}.Validate: %v", ok, err)
+		}
+	}
+	for _, bad := range []string{"", "12a", "-1", "1 2", "１２", strings.Repeat("9", MaxRustdeskIDLen+1), "123456789?password=x"} {
+		if ValidRustdeskID(bad) {
+			t.Errorf("ValidRustdeskID(%q) must be false", bad)
+		}
+	}
+	if err := (Facts{}).Validate(); err != nil {
+		t.Fatalf("empty rustdesk_id is allowed: %v", err)
+	}
+	if err := (Facts{RustdeskID: "x"}).Validate(); err == nil || !strings.Contains(err.Error(), "rustdesk_id") {
+		t.Fatalf("Facts{x}.Validate = %v", err)
+	}
+	if got := RustdeskConnectURL("123456789"); got != "rustdesk://connect/123456789" {
+		t.Fatalf("RustdeskConnectURL = %q", got)
+	}
+
+	// Relay host: a bare hostname or IP; key: one base64 line. Anything that
+	// would need quoting in RustDesk2.toml or splits on the hbbs command
+	// line is refused on the server and on the agent.
+	for _, ok := range []string{"rmm.example.com", "RMM.Example.COM", "rmm", "10.0.0.1", "2001:db8::1", "a-b.c1", strings.Repeat("a", 63) + ".example"} {
+		if !ValidRustdeskHost(ok) {
+			t.Errorf("ValidRustdeskHost(%q) must be true", ok)
+		}
+	}
+	for _, bad := range []string{"", "rmm.example.com:21116", "10.0.0.1:21116", "x.example -k evil", "https://rmm.example.com", "rmm.example.com/", "-a.example", "a-.example", "a..b", "x.example'\nkey = 'other'", "rmm.example.com\n", strings.Repeat("a", 64) + ".example", strings.Repeat("a.", 127) + "aaaa"} {
+		if ValidRustdeskHost(bad) {
+			t.Errorf("ValidRustdeskHost(%q) must be false", bad)
+		}
+	}
+	for _, ok := range []string{"OeVuKk5nlHiXp+7qsR6CbcHBGxhU4PJkNbvoX3P5X0k=", "KEY=", "k", "abc-_", strings.Repeat("A", MaxRustdeskKeyLen)} {
+		if !ValidRustdeskKey(ok) {
+			t.Errorf("ValidRustdeskKey(%q) must be true", ok)
+		}
+	}
+	for _, bad := range []string{"", "KEY=\n", "KE Y=", "KEY='x'", "KEY=\"", "ключ", strings.Repeat("A", MaxRustdeskKeyLen+1)} {
+		if ValidRustdeskKey(bad) {
+			t.Errorf("ValidRustdeskKey(%q) must be false", bad)
+		}
+	}
+	if err := (Rustdesk{Host: "rmm.example.com", Key: "KEY="}).Validate(); err != nil {
+		t.Fatalf("valid relay: %v", err)
+	}
+	if err := (Rustdesk{Host: "rmm.example.com:21116", Key: "KEY="}).Validate(); err == nil || !strings.Contains(err.Error(), "port") {
+		t.Fatalf("host with port: %v", err)
+	}
+	if err := (Rustdesk{Host: "rmm.example.com", Key: "bad key"}).Validate(); err == nil || !strings.Contains(err.Error(), "key") {
+		t.Fatalf("bad key: %v", err)
+	}
+
+	// Omitted when nil, present when set; facts omit an empty id.
+	out, _ := json.Marshal(SyncResponse{PollIntervalS: 30, Commands: []Command{}})
+	if string(out) != `{"poll_interval_s":30,"commands":[]}` {
+		t.Fatalf("got %s", out)
+	}
+	out, _ = json.Marshal(EnrollResponse{DeviceID: 1, DeviceToken: "dt_x", PollIntervalS: 30, Rustdesk: &Rustdesk{Host: "h", Key: "k"}})
+	if string(out) != `{"device_id":1,"device_token":"dt_x","poll_interval_s":30,"rustdesk":{"host":"h","key":"k"}}` {
+		t.Fatalf("got %s", out)
+	}
+	out, _ = json.Marshal(Facts{IPs: []string{}})
+	if strings.Contains(string(out), "rustdesk_id") {
+		t.Fatalf("empty rustdesk_id must be omitted: %s", out)
 	}
 }

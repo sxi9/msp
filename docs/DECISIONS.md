@@ -33,6 +33,21 @@ No inbound ports at client sites, ever.
   consent, and the accessibility service for control.
 - Connecting is logged in the audit log with who, which device, when, and session length.
 
+Status (2026-11-13), split in two phases:
+- **Phase A built (RD1): official client + our relay.** hbbs/hbbr in `deploy/docker-compose.yml`
+  (`rustdesk/rustdesk-server:1.1.16`), `MSP_RUSTDESK_HOST`/`MSP_RUSTDESK_KEY` on the server,
+  agents learn the relay in enroll/sync responses and report `facts.rustdesk_id`,
+  `msp-agent rustdesk setup` configures the **official** RustDesk client (installed by the
+  agent installers with `--with-rustdesk` / `-WithRustDesk` from packages the MSP publishes at
+  `/dl/`) for our relay and a permanent password that never reaches the server, the device
+  page shows the id and a Connect button (`POST /api/v1/devices/{id}/remote-desktop` ->
+  `rustdesk://connect/<id>`), every connection is audited as `device.remote_desktop_opened`.
+  Deviations from the text above: the client is the official build, so a local admin could
+  re-point it; session length is not recorded (only the open); Android is manual.
+- **Phase B not built: branded build.** The client with `RENDEZVOUS_SERVER` and `RS_PUB_KEY`
+  compiled in, which makes "clients cannot be pointed at the public RustDesk network" true,
+  and the Android client: see `docs/RUSTDESK-BRANDING.md` for how and what it needs.
+
 ## D5. Remote lock, only for managed devices
 A technician can lock a device from the dashboard. Rules:
 - The lock action is only available for devices that are enrolled (hold a valid device token)

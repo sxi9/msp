@@ -8,6 +8,8 @@ package protocol
 
 import (
 	"fmt"
+	"net"
+	"strings"
 	"time"
 )
 
@@ -56,6 +58,18 @@ const (
 	MaxScriptBytes         = 262144
 	MaxArgBytes            = 4096
 	MaxMessageBytes        = 4096
+	// MaxRustdeskIDLen caps facts.rustdesk_id (RustDesk ids are 9 digits today;
+	// the column and the validator leave room for longer numeric ids).
+	MaxRustdeskIDLen = 32
+)
+
+// RustdeskURIPrefix is the URL scheme the official RustDesk client registers
+// (get_uri_prefix() in src/common.rs: "<app name lowercased>://"), and
+// RustdeskConnectAuthority the authority for a remote-control session
+// (src/core_main.rs builds "rustdesk://connect/<id>").
+const (
+	RustdeskURIPrefix        = "rustdesk://"
+	RustdeskConnectAuthority = "connect"
 )
 
 // Disk is one mounted filesystem in a metrics sample.
@@ -78,7 +92,9 @@ type Metrics struct {
 }
 
 // Facts is the slow-changing inventory sent at enrollment, on the first sync
-// after start and every 120th sync.
+// after start and every 120th sync. RustdeskID is the only optional key: the
+// id of the locally installed RustDesk client (digits, <= MaxRustdeskIDLen),
+// omitted when RustDesk is not installed (RD1).
 type Facts struct {
 	Kernel       string   `json:"kernel"`
 	CPUModel     string   `json:"cpu_model"`
@@ -88,6 +104,33 @@ type Facts struct {
 	Model        string   `json:"model"`
 	Serial       string   `json:"serial"`
 	IPs          []string `json:"ips"`
+	RustdeskID   string   `json:"rustdesk_id,omitempty"`
+}
+
+// Rustdesk tells an agent which self-hosted RustDesk relay to use (RD1):
+// Host is the bare public hostname or IP of the hbbs/hbbr host (no port: the
+// ID server is reached on 21116 and the relay on 21117, the defaults of both
+// the server and the client) and Key the content of the server's
+// id_ed25519.pub (or the -k value given to hbbs/hbbr). It is present in
+// EnrollResponse and SyncResponse only while the server has a relay
+// configured. Both values are validated with ValidRustdeskHost and
+// ValidRustdeskKey on the server before they are sent and on the agent
+// before they are written into RustDesk2.toml.
+type Rustdesk struct {
+	Host string `json:"host"`
+	Key  string `json:"key"`
+}
+
+// Validate reports why a relay block is unusable ("" and nil when it is
+// fine); the text is suitable for a startup error or an agent log line.
+func (r Rustdesk) Validate() error {
+	if !ValidRustdeskHost(r.Host) {
+		return fmt.Errorf("rustdesk host %q must be a bare DNS hostname or IP address without a port (hbbs is reached on 21116, hbbr on 21117)", r.Host)
+	}
+	if !ValidRustdeskKey(r.Key) {
+		return fmt.Errorf("rustdesk key must be one line of 1..%d base64 characters (the content of id_ed25519.pub)", MaxRustdeskKeyLen)
+	}
+	return nil
 }
 
 // EnrollRequest is the body of POST /api/agent/v1/enroll.
@@ -105,9 +148,10 @@ type EnrollRequest struct {
 
 // EnrollResponse is the 201 body of POST /api/agent/v1/enroll.
 type EnrollResponse struct {
-	DeviceID      int64  `json:"device_id"`
-	DeviceToken   string `json:"device_token"`
-	PollIntervalS int    `json:"poll_interval_s"`
+	DeviceID      int64     `json:"device_id"`
+	DeviceToken   string    `json:"device_token"`
+	PollIntervalS int       `json:"poll_interval_s"`
+	Rustdesk      *Rustdesk `json:"rustdesk,omitempty"`
 }
 
 // SyncRequest is the body of POST /api/agent/v1/sync: heartbeat, metrics and
@@ -135,10 +179,11 @@ type Command struct {
 }
 
 // SyncResponse is the 200 body of POST /api/agent/v1/sync. Commands is always
-// an array, never null.
+// an array, never null. Rustdesk is omitted when the server has no relay.
 type SyncResponse struct {
 	PollIntervalS int       `json:"poll_interval_s"`
 	Commands      []Command `json:"commands"`
+	Rustdesk      *Rustdesk `json:"rustdesk,omitempty"`
 }
 
 // CommandResult is the body of POST /api/agent/v1/commands/{id}/result.
@@ -164,6 +209,83 @@ type ErrorResponse struct {
 type PingResponse struct {
 	OK      bool   `json:"ok"`
 	Version string `json:"version"`
+}
+
+// MaxRustdeskKeyLen bounds the relay public key (an Ed25519 public key is 44
+// base64 characters; a custom -k value may be longer).
+const MaxRustdeskKeyLen = 256
+
+// ValidRustdeskHost reports whether host is a bare DNS hostname (RFC 1123
+// labels of letters, digits and hyphens, at most 253 characters) or an IPv4
+// or IPv6 literal. A port, scheme, path, whitespace or any character that
+// would need quoting in RustDesk2.toml is rejected: the value is written
+// verbatim into a TOML literal string and onto the hbbs command line.
+func ValidRustdeskHost(host string) bool {
+	if host == "" || len(host) > 253 {
+		return false
+	}
+	if net.ParseIP(host) != nil {
+		return true
+	}
+	for _, label := range strings.Split(host, ".") {
+		if label == "" || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return false
+		}
+		for i := 0; i < len(label); i++ {
+			c := label[i]
+			if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-') {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// ValidRustdeskKey reports whether key is one line of base64 (standard or
+// URL-safe alphabet, with or without padding; also the characters hbbs
+// accepts for a custom -k key): 1..MaxRustdeskKeyLen characters, no
+// whitespace, quotes or control characters.
+func ValidRustdeskKey(key string) bool {
+	if key == "" || len(key) > MaxRustdeskKeyLen {
+		return false
+	}
+	for i := 0; i < len(key); i++ {
+		c := key[i]
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '+' || c == '/' || c == '=' || c == '-' || c == '_') {
+			return false
+		}
+	}
+	return true
+}
+
+// ValidRustdeskID reports whether id is a RustDesk client id as the protocol
+// accepts it in facts: 1..MaxRustdeskIDLen ASCII digits.
+func ValidRustdeskID(id string) bool {
+	if id == "" || len(id) > MaxRustdeskIDLen {
+		return false
+	}
+	for i := 0; i < len(id); i++ {
+		if id[i] < '0' || id[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// Validate checks the optional facts fields; the returned text is the
+// 400 invalid_request detail.
+func (f Facts) Validate() error {
+	if f.RustdeskID != "" && !ValidRustdeskID(f.RustdeskID) {
+		return fmt.Errorf("facts.rustdesk_id must be 1..%d digits", MaxRustdeskIDLen)
+	}
+	return nil
+}
+
+// RustdeskConnectURL is the URL that opens a remote-control session to a
+// RustDesk id in the installed client: rustdesk://connect/<id>. The id must
+// have passed ValidRustdeskID.
+func RustdeskConnectURL(id string) string {
+	return RustdeskURIPrefix + RustdeskConnectAuthority + "/" + id
 }
 
 // ValidPlatform reports whether p is linux, windows or android.

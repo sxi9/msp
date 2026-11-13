@@ -112,16 +112,82 @@ request. Every lock writes two audit rows, `command.queued` and `device.lock_req
 with the requesting user, the device and the client IP, and the result is recorded like any
 other command. The same scope rule applies to `ping` and `message`.
 
-## 8. Audit
+## 8. Remote desktop (RustDesk relay)
+
+Phase A of D4 (feature RD1) adds a second channel beside the agent: the official RustDesk
+client on the endpoint, talking only to a RustDesk ID/relay server (`hbbs`/`hbbr`) that the
+MSP hosts. What that changes:
+
+- **Relay exposure.** The relay host opens 21115/tcp, 21116/tcp+udp and 21117/tcp to the
+  internet (21118/21119 stay closed; the web client is not used). hbbs/hbbr accept any
+  client that knows the server's public key; the key is not a secret (every client carries
+  it), so the relay is reachable by anyone who learns it. It carries only end-to-end
+  encrypted RustDesk sessions and cannot start one: a session still needs the target id and
+  its password. Keep the image pinned (`rustdesk/rustdesk-server:1.1.16`) and updated like
+  any exposed service, and keep `deploy/rustdesk-data/id_ed25519` (the private key) with the
+  database backups: whoever holds it can impersonate the relay.
+- **Permanent password.** `msp-agent rustdesk setup` sets a 16-character random permanent
+  password on the endpoint's client (or the line piped in with `--password-stdin`; there is
+  no argv flag for it, because a process command line is readable by every local user for
+  as long as it runs). It is printed once by the installer and stored in `rustdesk-password`
+  next to `agent.json`: 0600 under a 0700 directory on Linux; on Windows, where Go's mode
+  bits only toggle the read-only attribute, the agent itself sets a DACL granting SYSTEM and
+  BUILTIN\Administrators only, inheritance disabled, on `%ProgramData%\msp-agent` and on the
+  file (from `msp-agent install`, every config save and `rustdesk setup`; it is an error,
+  not a warning, when that fails). The installer's `icacls` does the same earlier and is not
+  what the guarantee rests on. The one exposure that cannot be avoided is the documented
+  `rustdesk --password <pw>` call: the password is on that process's command line for the
+  seconds it runs (`/proc/<pid>/cmdline`, WMI), so run setup on a quiescent machine.
+  **It is never sent to or stored on the MSP server**, so a server or database compromise
+  does not yield screen access; a compromised endpoint reveals only its own password, as
+  with the device token. The MSP must keep the passwords in its own vault. Phase B
+  (`docs/RUSTDESK-BRANDING.md`) and a per-session one-time password are the follow-ups.
+- **Who can connect.** `POST /api/v1/devices/{id}/remote-desktop` is operator/admin only,
+  CSRF-protected, and answers only for a device that is enrolled on this server and not
+  revoked (404 otherwise: the same scope rule as lock). Staff accounts are not scoped to an
+  org: every operator and admin of the MSP can reach every org's devices, as for every other
+  action, until the org-scoped logins of section 10 exist. The MSP server never joins the
+  session: it hands the technician's browser `rustdesk://connect/<id>` and the technician's
+  own client, configured for the same relay and key, does the rest. Possession of a staff
+  account plus the device password is what opens a screen; neither alone does.
+- **The id is self-reported.** `facts.rustdesk_id` is whatever the agent asserts (digits
+  only, validated for shape); the server cannot check that it belongs to that machine, and a
+  reported id is kept until the agent reports another one (it is not cleared when RustDesk
+  is removed). Whoever holds a device token, or the endpoint's OS, can therefore point the
+  device page at a RustDesk id they control: the technician's session then lands on that
+  machine and the password typed into it is captured, and the audit row names the spoofed
+  id. Before entering the device's permanent password, compare the id in the RustDesk
+  connection dialog with the one on the device page and with the one printed at install
+  time, and treat a changed id like a changed SSH host key. The per-session one-time
+  password above is the structural fix.
+- **Audit.** Every answered request writes `device.remote_desktop_opened` (actor user,
+  device, org, client IP, the RustDesk id and the relay host). Refused requests write nothing.
+  Session duration and screen content are not recorded by the MSP server in phase A; the
+  RustDesk clients keep their own connection logs.
+- **Endpoint side.** The id is read with `rustdesk --get-id` and reported in facts as digits
+  only (`<= 32`), validated on the server (400 otherwise); it is not a secret. A local admin
+  on the endpoint can re-point the official client at another relay (phase B closes that).
+  The relay settings the agent receives from the server are stored in `agent.json` (0600 /
+  the Windows DACL above). Host and key are validated on both ends (`MSP_RUSTDESK_HOST` a
+  bare hostname or IP, the key one base64 line) because the agent writes them verbatim into
+  TOML literal strings in `RustDesk2.toml`: a value with a quote or newline could otherwise
+  inject further `[options]` keys, and a `:port` would point the relay at the ID-server port.
+  A malformed block from the server is ignored and logged, never stored.
+- **The relay is opt-in.** `hbbs`/`hbbr` are in the compose profile `rustdesk`; a plain
+  `up -d` starts neither, so a deployment that never configured remote desktop has nothing
+  listening on 21115-21119.
+
+## 9. Audit
 
 `audit_log` is append-only: the store exposes insert and list only, there is no update or
 delete path, and it is never pruned. Each row names the actor type (`user`, `device`, `system`),
 the actor, the org, the action, the target and the client IP. Actions: logins (success and
 failure), user and org changes, token creation and revocation, enrollment, revocation and
-deletion of devices, command queued/finished/lost, lock requests, alert acknowledgements.
+deletion of devices, command queued/finished/lost, lock requests, remote desktop sessions
+opened, alert acknowledgements.
 Export it with your backups; SIEM forwarding is phase 2.
 
-## 9. Preconditions before scaling to many clients (phase 2)
+## 10. Preconditions before scaling to many clients (phase 2)
 
 The phase-1 controls are adequate for a pilot with a handful of trusted technicians. Before
 the Nth client, in this order:
@@ -134,7 +200,7 @@ the Nth client, in this order:
    allowlisting at the proxy.
 5. Windows job-object process-tree kill and a reviewed script library.
 
-## 10. Reporting a vulnerability
+## 11. Reporting a vulnerability
 
 Report privately to the maintainers of this repository (open a security advisory on the
 repository, or e-mail the address listed in its README once published). Please include the
