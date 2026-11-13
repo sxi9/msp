@@ -28,10 +28,17 @@ screenshot; the database it belonged to was deleted after the run.
 | Fleet with the device offline | [13-fleet-offline-desktop.png](13-fleet-offline-desktop.png) | [13-fleet-offline-phone.png](13-fleet-offline-phone.png) | Fleet after the agent stopped: amber dot, last seen 27 s ago, "0 online 1 offline", open alert count 1 on the row. |
 | Device page with a preset picked | [14-device-presets-desktop.png](14-device-presets-desktop.png) | [14-device-presets-phone.png](14-device-presets-phone.png) | Second run (127.0.0.1:18093, fresh database, server started with `MSP_PRESETS=deploy/presets.example.json`): the Presets dropdown in the Run console is filled from `GET /api/v1/presets` (`source: file`, 10 Linux entries). "Failed services" was picked, which put `systemctl` / `--failed` / `--no-pager` into the argv box and 60 into Timeout. Headless Chromium draws the native dropdown popup outside the page, so the picked state is shown instead of the open list. The phone image was taken after the desktop run, so its history already lists that run. |
 | Preset run with output | [15-device-preset-run-desktop.png](15-device-preset-run-desktop.png) | [15-device-preset-run-phone.png](15-device-preset-run-phone.png) | "Run on vm" with the preset's argv: delivered on the agent's sync, result card `failed`, exit 1, took 3 ms, stderr "System has not been booted with systemd as init system (PID 1)" because the build container has no systemd; the row appears in the command history. |
+| Device page with the Remote desktop card | [16-device-remote-desktop-desktop.png](16-device-remote-desktop-desktop.png) | [16-device-remote-desktop-phone.png](16-device-remote-desktop-phone.png) | Third run (127.0.0.1:18095, fresh database, server started with `MSP_RUSTDESK_HOST=rd.example.com MSP_RUSTDESK_KEY=EXAMPLEKEY123`): the real Linux agent read `id = '123456789'` from a fake `/root/.config/rustdesk/RustDesk.toml` (no RustDesk binary on the build host, so the facts reader took its TOML fallback) and reported it as `facts.rustdesk_id`; the card shows the id with Copy, the relay `rd.example.com`, the Connect button and the hint about the technician's own client; the facts list also carries "RustDesk id". |
+| Audit log after Connect | [17-audit-remote-desktop-desktop.png](17-audit-remote-desktop-desktop.png) | [17-audit-remote-desktop-phone.png](17-audit-remote-desktop-phone.png) | Connect was clicked on the device page: `POST /api/v1/devices/1/remote-desktop` answered 200 with `url: rustdesk://connect/123456789` (the page then handed the `rustdesk://` URL to the browser, which has no client registered here, and stayed put showing the fallback link). The audit page lists `device.remote_desktop_opened` by `admin@example.com`, target device #1, IP 127.0.0.1, detail `{host, hostname, platform, rustdesk_id}`, above the logins and the enrollment. |
 
 Screenshots 14 and 15 come from a second run on 127.0.0.1:18093 with its own fresh database (also deleted
-afterwards); the enrollment token for that run was created through the CLI and is not shown.
+afterwards); the enrollment token for that run was created through the CLI and is not shown. Screenshots 16
+and 17 come from a third run on 127.0.0.1:18095 (RD1, fresh database, deleted afterwards, token again from the
+CLI); at phone width `scrollWidth` was 400 on both pages. The label banner on 16 and 17 was prepended to the
+page body before the capture.
 
 Not shown because they cannot run here: the Windows service and Windows lock (cross-compiled only),
-the Android app (the debug APK builds and its JVM tests pass; it needs a phone), and the Docker image
-(`docker compose config` validates; no daemon in the container to build it).
+the Android app (the debug APK builds and its JVM tests pass; it needs a phone), the Docker image
+(`docker compose config` validates; no daemon in the container to build it), and the RustDesk screen
+session itself (no display, no RustDesk client, no hbbs/hbbr containers here: the Connect click in 17 only
+proves the endpoint, the URL and the audit entry).

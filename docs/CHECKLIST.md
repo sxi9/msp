@@ -88,6 +88,29 @@ Verified in the same container with: `CGO_ENABLED=0 go build ./...`, `go vet ./.
 - [ ] Agent: `rustdesk setup` against the real RustDesk client on Ubuntu and Windows — Not verified: the conventional RustDesk2.toml keys/paths cannot be exercised here (docs/STATUS.md manual test 3 and 4)
 - [x] Installers: `--with-rustdesk` / `-WithRustDesk` download from `/dl/`, verify against SHA256SUMS, install silently, run setup, restart the agent; absent asset prints how to publish it (`bash -n`, `sh -n`; the messages reviewed). Not verified: a real install
 - [x] `scripts/build-agents.sh --sums-only` regenerates SHA256SUMS over `MSP_AGENT_DIR` without building or downloading (exercised on a scratch directory; `sha256sum -c` passes)
-- [x] Dashboard: Remote desktop card (id + Copy, Connect, fallback link, viewer without button, not-configured, not-reported), `?mock=1` and `?mock=1&rustdesk=0` (`web/src/lib/rustdesk.test.ts`; typecheck; screenshot 16)
+- [x] Dashboard: Remote desktop card (id + Copy, Connect, fallback link, viewer without button, not-configured, not-reported), `?mock=1` and `?mock=1&rustdesk=0` (`web/src/lib/rustdesk.test.ts`; typecheck; screenshots 16, 17)
 - [ ] An actual screen session from a technician PC — Not verified: RustDesk cannot run in the build container (docs/STATUS.md manual test 5)
 - [x] Docs: OPS section 10, GUIDE section 8, SECURITY section 8, PROTOCOL (fields, endpoints, audit action, fixtures, CLI), DECISIONS D4 phases, RUSTDESK-BRANDING.md, FEATURES, STATUS, README, ARCHITECTURE
+
+## Remote desktop (RustDesk, phase A)
+
+Final verification pass, 2026-11-13, in the cloud build container (no display, no Docker daemon, no RustDesk
+client). Commands and their results: `CGO_ENABLED=0 go build ./...` ok, `go vet ./...` ok, `CGO_ENABLED=0 go test ./... -count=1`
+ok (agent 3.1 s, e2e 7.4 s, protocol, server 27.0 s, store), `GOOS=windows GOARCH=amd64 go build ./...` ok, `make web`
+(npm ci, 21 web unit tests pass, `tsc --noEmit`, esbuild, server rebuilt), `scripts/e2e.sh` ends with "E2E OK" (every step
+PASS, including the eight RD1 steps), `docker compose -f deploy/docker-compose.yml config` exit 0, `bash -n deploy/install.sh`
+exit 0. Then a live run on 127.0.0.1:18095 with a fresh SQLite file, `MSP_RUSTDESK_HOST=rd.example.com`,
+`MSP_RUSTDESK_KEY=EXAMPLEKEY123`, admin/org/token bootstrapped through the CLI, a fake `/root/.config/rustdesk/RustDesk.toml`
+with `id = '123456789'`, and the real `bin/msp-agent` enrolled and running with a 2 s interval; the database and the fake
+config file were deleted afterwards.
+
+- [x] Server accepts the relay from the environment: `GET /api/v1/rustdesk` -> `{"enabled":true,"host":"rd.example.com","key":"EXAMPLEKEY123"}`
+- [x] Agent learns the relay on enroll: `agent.json` holds `"rustdesk_host": "rd.example.com"` right after `msp-agent enroll`
+- [x] Agent reports the id from the config-file fallback: with no `rustdesk` binary on PATH the facts reader read `RustDesk.toml`; `GET /api/v1/devices/1` showed `device.rustdesk_id` and `facts.rustdesk_id` = `123456789` within 5 s of the agent starting
+- [x] Device page shows the Remote desktop card with the id, Copy, relay `rd.example.com` and the Connect button; "RustDesk id" also appears in the facts list (screenshot 16, desktop 1280 px and phone 400 px, phone `scrollWidth` 400)
+- [x] Connect: Playwright clicked the button; `POST /api/v1/devices/1/remote-desktop` returned 200 with `{"url":"rustdesk://connect/123456789","rustdesk_id":"123456789","host":"rd.example.com","key":"EXAMPLEKEY123"}`; the card then showed the `Open rustdesk://connect/123456789 in RustDesk` fallback link and the "if nothing opened" hint (headless Chromium has no handler for `rustdesk://`, the page stayed)
+- [x] Audit: `GET /api/v1/audit` lists exactly one `device.remote_desktop_opened`, actor `user` `admin@example.com`, target `device` #1, IP `127.0.0.1`, detail `{"host":"rd.example.com","hostname":"vm","platform":"linux","rustdesk_id":"123456789"}`; the Audit page renders it (screenshot 17, desktop and phone, phone `scrollWidth` 400)
+- [x] Nothing left behind: server and agent stopped, the live database and `/root/.config/rustdesk/RustDesk.toml` removed
+- [ ] An actual screen session technician -> device — Not verified: RustDesk cannot run in the build container (no display, no client); needs a technician PC with the official client and a device with the client installed (docs/STATUS.md manual test 5)
+- [ ] The relay containers `hbbs`/`hbbr` running — Not verified: no Docker daemon here; only `docker compose config` validates the two services (docs/STATUS.md manual test 1)
+- [ ] The installers `--with-rustdesk` / `-WithRustDesk` on a real Ubuntu desktop and Windows PC — Not verified: only `bash -n` here and the stub-client tests; needs the published packages and a real machine (docs/STATUS.md manual tests 2 to 4)
