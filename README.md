@@ -12,6 +12,57 @@ ride on the heartbeat channel.
 - `docs/GUIDE.md` is the technician's guide; `docs/RUSTDESK-BRANDING.md` the not-yet-built
   branded RustDesk client (remote desktop phase B).
 
+## Screenshots
+
+Every image was taken from a live run in the build container (real server, real Linux agent) and
+carries its label in the top banner. Desktop width shown here; phone-width versions and the full
+set of 34 are in [`docs/screenshots/`](docs/screenshots/README.md). Diagrams are in
+[`docs/diagrams/`](docs/diagrams/README.md).
+
+**System map.** Agents connect outbound only; one server holds the APIs, queue, alerts, SQLite and the dashboard.
+
+![System map](docs/diagrams/01-system-map.png)
+
+**Fleet.** Every device across all clients with online status, OS, last seen, CPU, memory, disk and open alerts.
+
+![Fleet](docs/screenshots/02-fleet-desktop.png)
+
+**Client page.** Enrollment token shown once, with the Linux, Windows and Android install one-liners.
+
+![Client page with enrollment token](docs/screenshots/04-org-enrollment-token-desktop.png)
+
+**Device page.** Status, metrics, facts, disks, actions (Lock, Ping, Message) and the run console.
+
+![Device page](docs/screenshots/05-device-desktop.png)
+
+**Remote command.** `uname -a` queued from the dashboard, delivered on the agent's sync, output and exit code shown.
+
+![Remote command with output](docs/screenshots/06-device-command-output-desktop.png)
+
+**Remote lock.** Delivered, executed and audited; the headless build host reports "no interactive session".
+
+![Remote lock](docs/screenshots/07-device-lock-history-desktop.png)
+
+**Presets.** The command library loaded from `presets.json`; a pick fills the console and the timeout.
+
+![Presets](docs/screenshots/14-device-presets-desktop.png)
+
+**Remote desktop.** RustDesk ID reported by the agent; Connect opens the technician's RustDesk client through our own relay.
+
+![Remote desktop](docs/screenshots/16-device-remote-desktop-desktop.png)
+
+**Alerts.** The agent was stopped; the evaluator opened an offline alert, then it was acknowledged.
+
+![Offline alert](docs/screenshots/11-alerts-offline-open-desktop.png)
+
+**Audit log.** Login, token, enrollment, command, lock and remote desktop connect, with actor and IP.
+
+![Audit log](docs/screenshots/17-audit-remote-desktop-desktop.png)
+
+**Phone width.** No horizontal scroll on any page.
+
+![Fleet at phone width](docs/screenshots/02-fleet-phone.png)
+
 ## Quickstart (Linux, one machine)
 
 Requirements: Go 1.24. Node 22 is only needed for `make web`; the Go build and all
