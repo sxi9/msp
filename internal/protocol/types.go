@@ -198,6 +198,15 @@ type Command struct {
 	Body     string   `json:"body,omitempty"`
 	Text     string   `json:"text,omitempty"`
 	TimeoutS int      `json:"timeout_s"`
+	// Cols, Rows and ShellSession belong to kind shell (RS1, decision D3).
+	// Cols/Rows are the initial terminal size; they are omitted (hence 0,
+	// meaning "default") for every other kind and whenever a shell command
+	// leaves them at the default. ShellSession is the per-session accounting
+	// the dashboard API attaches to a shell COMMAND; it is nil until the
+	// shell_sessions row exists.
+	Cols         int           `json:"cols,omitempty"`
+	Rows         int           `json:"rows,omitempty"`
+	ShellSession *ShellSession `json:"shell_session,omitempty"`
 }
 
 // SyncResponse is the 200 body of POST /api/agent/v1/sync. Commands is always
@@ -386,10 +395,10 @@ func ClampTimeout(n int) int {
 	return n
 }
 
-// ValidKind reports whether k is one of the five command kinds.
+// ValidKind reports whether k is one of the command kinds (RS1 added shell).
 func ValidKind(k string) bool {
 	switch k {
-	case KindExec, KindScript, KindLock, KindPing, KindMessage:
+	case KindExec, KindScript, KindLock, KindPing, KindMessage, KindShell:
 		return true
 	}
 	return false
@@ -416,12 +425,14 @@ func ShellsFor(platform string) []string {
 	return nil
 }
 
-// KindsFor returns the command kinds a platform accepts: all five on desktop
-// platforms, only lock, ping and message on android, none for an unknown platform.
+// KindsFor returns the command kinds a platform accepts: exec, script, lock,
+// ping, message and shell on desktop platforms, only lock, ping and message on
+// android, none for an unknown platform. shell (RS1) is desktop only, so the
+// server answers 400 unsupported_on_platform for a shell on android.
 func KindsFor(platform string) []string {
 	switch platform {
 	case PlatformLinux, PlatformWindows:
-		return []string{KindExec, KindScript, KindLock, KindPing, KindMessage}
+		return []string{KindExec, KindScript, KindLock, KindPing, KindMessage, KindShell}
 	case PlatformAndroid:
 		return []string{KindLock, KindPing, KindMessage}
 	}
@@ -443,8 +454,14 @@ func KindSupportedOn(kind, platform string) bool {
 // platform (use KindSupportedOn for that). The returned error text is what the
 // server sends as the 400 invalid_request detail.
 func (c Command) Validate() error {
-	if c.TimeoutS < 0 || c.TimeoutS > MaxTimeoutS {
-		return fmt.Errorf("timeout_s must be 0 (default %d) or 1..%d", DefaultTimeoutS, MaxTimeoutS)
+	// kind shell allows a far longer session (MaxShellTimeoutS); every other
+	// kind is capped at MaxTimeoutS.
+	maxTimeout := MaxTimeoutS
+	if c.Kind == KindShell {
+		maxTimeout = MaxShellTimeoutS
+	}
+	if c.TimeoutS < 0 || c.TimeoutS > maxTimeout {
+		return fmt.Errorf("timeout_s must be 0 (default) or 1..%d", maxTimeout)
 	}
 	switch c.Kind {
 	case KindExec:
@@ -491,6 +508,16 @@ func (c Command) Validate() error {
 		}
 		if len(c.Argv) != 0 || c.Shell != "" || c.Body != "" {
 			return fmt.Errorf("message must not set argv, shell or body")
+		}
+	case KindShell:
+		// shell is optional; "" means the agent's platform default. cols/rows
+		// are not validated here: the server clamps them into range with
+		// ClampShellCols/ClampShellRows, it never rejects them.
+		if c.Shell != "" && !ValidShell(c.Shell) {
+			return fmt.Errorf("shell must be empty (default) or one of sh, bash, powershell, cmd")
+		}
+		if len(c.Argv) != 0 || c.Body != "" || c.Text != "" {
+			return fmt.Errorf("shell must not set argv, body or text")
 		}
 	default:
 		return fmt.Errorf("unknown kind %q (expected exec, script, lock, ping or message)", c.Kind)

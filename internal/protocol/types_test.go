@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 // roundTrip unmarshals the fixture into v, marshals it back and compares the
@@ -56,6 +57,8 @@ func TestFixturesRoundTrip(t *testing.T) {
 		{"sync_response_rustdesk.json", &SyncResponse{}},
 		{"sync_android_apps.json", &SyncRequest{}},
 		{"command_result.json", &CommandResult{}},
+		{"command_shell.json", &Command{}},
+		{"sync_response_shell.json", &SyncResponse{}},
 		{"error.json", &ErrorResponse{}},
 	}
 	for _, c := range cases {
@@ -250,7 +253,7 @@ func TestPlatformTables(t *testing.T) {
 	if got := ShellsFor(PlatformAndroid); len(got) != 0 {
 		t.Fatalf("android shells %v", got)
 	}
-	if got := KindsFor(PlatformLinux); !reflect.DeepEqual(got, []string{"exec", "script", "lock", "ping", "message"}) {
+	if got := KindsFor(PlatformLinux); !reflect.DeepEqual(got, []string{"exec", "script", "lock", "ping", "message", "shell"}) {
 		t.Fatalf("linux kinds %v", got)
 	}
 	if got := KindsFor(PlatformAndroid); !reflect.DeepEqual(got, []string{"lock", "ping", "message"}) {
@@ -259,13 +262,20 @@ func TestPlatformTables(t *testing.T) {
 	if KindsFor("darwin") != nil || KindSupportedOn(KindPing, "darwin") {
 		t.Fatal("unknown platform must support nothing")
 	}
-	for _, k := range []string{KindExec, KindScript, KindLock, KindPing, KindMessage} {
+	for _, k := range []string{KindExec, KindScript, KindLock, KindPing, KindMessage, KindShell} {
 		if !ValidKind(k) {
 			t.Errorf("ValidKind(%s)", k)
 		}
 	}
-	if ValidKind("shell") || ValidKind("") {
+	if ValidKind("") || ValidKind("desktop") {
 		t.Fatal("ValidKind must reject unknown kinds")
+	}
+	// shell (RS1) is desktop only.
+	if !KindSupportedOn(KindShell, PlatformLinux) || !KindSupportedOn(KindShell, PlatformWindows) {
+		t.Fatal("shell must be supported on desktop platforms")
+	}
+	if KindSupportedOn(KindShell, PlatformAndroid) {
+		t.Fatal("shell must not be supported on android")
 	}
 }
 
@@ -283,6 +293,12 @@ func TestCommandValidate(t *testing.T) {
 		{Kind: KindLock, TimeoutS: 30},
 		{Kind: KindPing},
 		{Kind: KindMessage, Text: "Please call the helpdesk", TimeoutS: 30},
+		{Kind: KindShell},
+		{Kind: KindShell, Shell: ShellBash, Cols: 120, Rows: 32, TimeoutS: DefaultShellTimeoutS},
+		{Kind: KindShell, Shell: ShellPowershell, TimeoutS: MaxShellTimeoutS},
+		// cols/rows are clamped by the server, never rejected, so even an
+		// out-of-range or negative size is a valid command shape.
+		{Kind: KindShell, Shell: ShellSh, Cols: 9000, Rows: -3},
 	}
 	for i, c := range ok {
 		if err := c.Validate(); err != nil {
@@ -314,7 +330,12 @@ func TestCommandValidate(t *testing.T) {
 		{Command{Kind: KindMessage, Text: strings.Repeat("m", MaxMessageBytes+1)}, "text exceeds"},
 		{Command{Kind: KindMessage, Text: "hi", Argv: []string{"a"}}, "must not set argv"},
 		{Command{Kind: KindMessage, Text: "hi", Shell: "sh"}, "must not set argv"},
-		{Command{Kind: "shell", Argv: []string{"ls"}}, "unknown kind"},
+		{Command{Kind: KindShell, Argv: []string{"ls"}}, "shell must not set argv"},
+		{Command{Kind: KindShell, Body: "x"}, "shell must not set argv"},
+		{Command{Kind: KindShell, Text: "x"}, "shell must not set argv"},
+		{Command{Kind: KindShell, Shell: "zsh"}, "shell must be empty"},
+		{Command{Kind: KindShell, TimeoutS: MaxShellTimeoutS + 1}, "timeout_s"},
+		{Command{Kind: "telnet", Argv: []string{"ls"}}, "unknown kind"},
 		{Command{}, "unknown kind"},
 	}
 	for i, b := range bad {
@@ -473,5 +494,131 @@ func TestFactsAppsValidate(t *testing.T) {
 	out, _ = json.Marshal(App{Package: "com.example", Label: "Example", Version: "1.2.3", System: true})
 	if string(out) != `{"package":"com.example","label":"Example","version":"1.2.3","system":true}` {
 		t.Fatalf("app JSON shape: %s", out)
+	}
+}
+
+func TestShellClamps(t *testing.T) {
+	for n, want := range map[int]int{0: DefaultShellCols, -5: MinShellCols, 10: MinShellCols, 20: 20, 300: 300, 500: 500, 9000: MaxShellCols} {
+		if got := ClampShellCols(n); got != want {
+			t.Errorf("ClampShellCols(%d)=%d want %d", n, got, want)
+		}
+	}
+	for n, want := range map[int]int{0: DefaultShellRows, -1: MinShellRows, 3: MinShellRows, 5: 5, 100: 100, 200: 200, 9000: MaxShellRows} {
+		if got := ClampShellRows(n); got != want {
+			t.Errorf("ClampShellRows(%d)=%d want %d", n, got, want)
+		}
+	}
+	for n, want := range map[int]int{0: DefaultShellTimeoutS, -3: 1, 1: 1, 3600: 3600, 14400: 14400, 28800: 28800, 99999: MaxShellTimeoutS} {
+		if got := ClampShellTimeout(n); got != want {
+			t.Errorf("ClampShellTimeout(%d)=%d want %d", n, got, want)
+		}
+	}
+}
+
+func TestShellControlFrames(t *testing.T) {
+	// Each constructor must marshal to exactly the wire JSON of RS1 section B.
+	cases := []struct {
+		frame ControlFrame
+		want  string
+	}{
+		{ResizeFrame(120, 32), `{"type":"resize","cols":120,"rows":32}`},
+		{ExitFrame(0), `{"type":"exit","code":0}`},
+		{ExitFrame(130), `{"type":"exit","code":130}`},
+		{StatusFrame(ShellStateWaitingForAgent, ""), `{"type":"status","state":"waiting_for_agent"}`},
+		{StatusFrame(ShellStateConnected, ""), `{"type":"status","state":"connected"}`},
+		{StatusFrame(ShellStateClosed, CloseIdleTimeout), `{"type":"status","state":"closed","reason":"idle_timeout"}`},
+	}
+	for _, c := range cases {
+		if got := string(c.frame.Encode()); got != c.want {
+			t.Errorf("Encode %+v\n got %s\nwant %s", c.frame, got, c.want)
+		}
+		// Round trip: every emitted frame parses back to an equal value.
+		got, err := ParseControlFrame([]byte(c.want))
+		if err != nil {
+			t.Errorf("ParseControlFrame(%s): %v", c.want, err)
+			continue
+		}
+		if !reflect.DeepEqual(got, c.frame) {
+			t.Errorf("ParseControlFrame(%s) = %+v want %+v", c.want, got, c.frame)
+		}
+	}
+
+	// A resize frame exposes its dimensions; an exit frame its code.
+	r, err := ParseControlFrame([]byte(`{"type":"resize","cols":200,"rows":50}`))
+	if err != nil || r.Type != CtrlResize || r.Cols != 200 || r.Rows != 50 {
+		t.Fatalf("resize parse: %+v err %v", r, err)
+	}
+	e, err := ParseControlFrame([]byte(`{"type":"exit","code":0}`))
+	if err != nil || e.Type != CtrlExit || e.Code == nil || *e.Code != 0 {
+		t.Fatalf("exit parse: %+v err %v", e, err)
+	}
+
+	// Unknown and malformed frames are rejected.
+	for _, bad := range []string{`{"type":"bogus"}`, `{"type":""}`, `{}`, `not json`} {
+		if _, err := ParseControlFrame([]byte(bad)); err == nil {
+			t.Errorf("ParseControlFrame(%q) must fail", bad)
+		}
+	}
+}
+
+func TestShellCloseReasons(t *testing.T) {
+	for _, ok := range []string{"", CloseTechnicianClosed, CloseAgentClosed, CloseIdleTimeout, CloseMaxDuration, CloseServerShutdown, CloseAgentNeverConnected} {
+		if !ValidCloseReason(ok) {
+			t.Errorf("ValidCloseReason(%q) must be true", ok)
+		}
+	}
+	for _, bad := range []string{"closed", "technician", "idle", "killed"} {
+		if ValidCloseReason(bad) {
+			t.Errorf("ValidCloseReason(%q) must be false", bad)
+		}
+	}
+}
+
+func TestShellSessionJSON(t *testing.T) {
+	// connected_at is null until the agent attaches; the key is always present.
+	out, _ := json.Marshal(ShellSession{})
+	if string(out) != `{"bytes_in":0,"bytes_out":0,"close_reason":"","transcript_truncated":false,"connected_at":null}` {
+		t.Fatalf("zero ShellSession: %s", out)
+	}
+	at := time.Date(2026, 11, 13, 10, 0, 3, 0, time.UTC)
+	out, _ = json.Marshal(ShellSession{BytesIn: 1, BytesOut: 2, CloseReason: CloseAgentClosed, TranscriptTruncated: true, ConnectedAt: &at})
+	if string(out) != `{"bytes_in":1,"bytes_out":2,"close_reason":"agent_closed","transcript_truncated":true,"connected_at":"2026-11-13T10:00:03Z"}` {
+		t.Fatalf("populated ShellSession: %s", out)
+	}
+
+	// A shell COMMAND with no session carries no shell_session key; cols/rows
+	// at the default are omitted too.
+	out, _ = json.Marshal(Command{ID: 42, Kind: KindShell, Shell: ShellBash, TimeoutS: DefaultShellTimeoutS})
+	if string(out) != `{"id":42,"kind":"shell","shell":"bash","timeout_s":14400}` {
+		t.Fatalf("shell command without session: %s", out)
+	}
+}
+
+func TestShellFixtures(t *testing.T) {
+	var cmd Command
+	roundTrip(t, "command_shell.json", &cmd)
+	if cmd.Kind != KindShell || cmd.Shell != ShellBash || cmd.Cols != 120 || cmd.Rows != 32 || cmd.TimeoutS != DefaultShellTimeoutS {
+		t.Fatalf("command_shell: %+v", cmd)
+	}
+	if err := cmd.Validate(); err != nil {
+		t.Fatalf("command_shell must validate: %v", err)
+	}
+	if cmd.ShellSession == nil || cmd.ShellSession.BytesIn != 128 || cmd.ShellSession.BytesOut != 4096 ||
+		cmd.ShellSession.CloseReason != CloseTechnicianClosed || cmd.ShellSession.TranscriptTruncated ||
+		cmd.ShellSession.ConnectedAt == nil || !ValidCloseReason(cmd.ShellSession.CloseReason) {
+		t.Fatalf("command_shell session: %+v", cmd.ShellSession)
+	}
+
+	var sr SyncResponse
+	roundTrip(t, "sync_response_shell.json", &sr)
+	if len(sr.Commands) != 1 || sr.Commands[0].Kind != KindShell || sr.Commands[0].ShellSession != nil {
+		t.Fatalf("sync_response_shell: %+v", sr.Commands)
+	}
+	if err := sr.Commands[0].Validate(); err != nil {
+		t.Fatalf("sync_response_shell command must validate: %v", err)
+	}
+	// Desktop-only: supported on linux/windows, not android.
+	if !KindSupportedOn(KindShell, PlatformLinux) || KindSupportedOn(KindShell, PlatformAndroid) {
+		t.Fatal("shell platform support")
 	}
 }

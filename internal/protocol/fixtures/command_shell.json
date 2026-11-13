@@ -1,0 +1,15 @@
+{
+  "id": 42,
+  "kind": "shell",
+  "shell": "bash",
+  "cols": 120,
+  "rows": 32,
+  "timeout_s": 14400,
+  "shell_session": {
+    "bytes_in": 128,
+    "bytes_out": 4096,
+    "close_reason": "technician_closed",
+    "transcript_truncated": false,
+    "connected_at": "2026-11-13T10:00:03Z"
+  }
+}

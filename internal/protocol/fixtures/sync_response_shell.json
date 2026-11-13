@@ -1,0 +1,6 @@
+{
+  "poll_interval_s": 30,
+  "commands": [
+    {"id": 42, "kind": "shell", "shell": "bash", "cols": 120, "rows": 32, "timeout_s": 14400}
+  ]
+}

@@ -9,6 +9,7 @@ go 1.24.0
 // the requires. Newest versions whose go directive is <= 1.24: later releases of
 // all three modules require Go 1.26.
 require (
+	github.com/coder/websocket v1.8.15
 	golang.org/x/crypto v0.48.0
 	golang.org/x/sys v0.41.0
 	modernc.org/sqlite v1.45.0
