@@ -4,7 +4,7 @@
 export type Role = 'admin' | 'operator' | 'viewer';
 export type Platform = 'linux' | 'windows' | 'android';
 export type DeviceStatus = 'online' | 'offline' | 'pending';
-export type CommandKind = 'exec' | 'script' | 'lock' | 'ping' | 'message';
+export type CommandKind = 'exec' | 'script' | 'lock' | 'ping' | 'message' | 'shell';
 export type CommandStatus = 'queued' | 'sent' | 'done' | 'failed' | 'timeout' | 'lost' | 'cancelled';
 export type Severity = 'low' | 'medium' | 'high';
 
@@ -53,7 +53,24 @@ export interface Command {
   status: CommandStatus; created_at: string; sent_at: string | null; started_at: string | null;
   finished_at: string | null; exit_code: number | null; stdout: string; stderr: string;
   truncated: boolean; error: string;
+  /** Present only for kind `shell` once the relay session row exists; null before that (RS1 A). */
+  shell_session?: ShellSession | null;
 }
+
+/** The shell_session block a kind `shell` command carries (RS1 A). */
+export interface ShellSession {
+  bytes_in: number; bytes_out: number;
+  /** "" | technician_closed | agent_closed | idle_timeout | max_duration | server_shutdown | agent_never_connected */
+  close_reason: string;
+  transcript_truncated: boolean;
+  connected_at: string | null;
+}
+
+/** Body of POST /api/v1/devices/{id}/shell: shell optional, cols/rows default 120x32 (RS1 A). */
+export interface NewShell { shell?: string; cols: number; rows: number }
+
+/** Body of POST /api/v1/devices/{id}/shell on success (201): the command, the one-time ticket and the browser WS path. */
+export interface ShellOpened { command: Command; ticket: string; ws_path: string }
 
 /** Body of POST /api/v1/devices/{id}/commands; only the keys of the kind are sent. */
 export interface NewCommand { kind: CommandKind; argv?: string[]; shell?: string; body?: string; text?: string; timeout_s: number }

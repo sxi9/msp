@@ -8,6 +8,7 @@ import { loadPresets, presetFill, presetsFor } from '../lib/presets.ts';
 import { notReportedHint, remoteDesktopError, technicianHint } from '../lib/rustdesk.ts';
 import { appsOf, appsSummary, filterApps, type InstalledApp } from '../lib/apps.ts';
 import { COMMAND_DONE, canOperate, isAdmin, type Command, type Device as DeviceT, type NewCommand, type Preset, type RemoteDesktopOpened, type RustdeskInfo, type User } from '../types.ts';
+import { RemoteShell, ShellResult } from './Shell.tsx';
 import { StatusDot } from '../components/StatusDot.tsx';
 import { Sparkline } from '../components/Sparkline.tsx';
 import { CopyButton } from '../components/CopyBlock.tsx';
@@ -43,6 +44,7 @@ export function describe(c: Command): string {
     case 'exec': return argvPreview(c.argv);
     case 'script': return `${c.shell}: ${c.body.split('\n')[0].slice(0, 80)}`;
     case 'message': return c.text;
+    case 'shell': return c.shell ? `interactive shell (${c.shell})` : 'interactive shell';
     default: return '';
   }
 }
@@ -146,6 +148,7 @@ export function Device({ id, user }: { id: number; user: User }) {
 
       {apps && <InstalledApps apps={apps} />}
       {builtins && <BuiltIns device={d} onQueue={queue} />}
+      <RemoteShell device={d} user={user} />
       {!d.revoked && <RemoteDesktop device={d} operator={operator} />}
       {operator && d.can_run_commands && <Console device={d} onQueue={queue} />}
       {error && <p class="error">{error}</p>}
@@ -356,6 +359,7 @@ function CommandResult({ command: c }: { command: Command }) {
       </div>
       {c.error && <p class="error">{c.error}</p>}
       {c.truncated && <p class="warn">Output was truncated at 64 KiB per stream.</p>}
+      {c.kind === 'shell' && <ShellResult command={c} />}
       <Output label="stdout" text={c.stdout} />
       <Output label="stderr" text={c.stderr} />
     </div>

@@ -1,12 +1,12 @@
 // fetch() wrapper for /api/v1 plus one typed function per endpoint. With
 // ?mock=1 in the URL every call is answered in-memory by mock.ts instead.
 import type {
-  Alert, AuditEntry, Command, Device, DeviceDetail, EnrollmentToken, Heartbeat, NewCommand, Org,
-  PresetLibrary, RemoteDesktopOpened, RustdeskInfo, Summary, TokenCreated, User,
+  Alert, AuditEntry, Command, Device, DeviceDetail, EnrollmentToken, Heartbeat, NewCommand, NewShell,
+  Org, PresetLibrary, RemoteDesktopOpened, RustdeskInfo, ShellOpened, Summary, TokenCreated, User,
 } from './types.ts';
 import { mockRequest } from './mock.ts';
 
-const MOCK = typeof location !== 'undefined' && /(^|[?&])mock=1(&|$)/.test(location.search);
+export const MOCK = typeof location !== 'undefined' && /(^|[?&])mock=1(&|$)/.test(location.search);
 
 export class ApiError extends Error {
   status: number;
@@ -79,6 +79,12 @@ export const api = {
   createCommand: (deviceId: number, c: NewCommand) => request<{ command: Command }>('POST', `/api/v1/devices/${deviceId}/commands`, c),
   listCommands: (deviceId: number, limit = 50) => request<{ commands: Command[] }>('GET', `/api/v1/devices/${deviceId}/commands?limit=${limit}`),
   getCommand: (id: number) => request<{ command: Command }>('GET', `/api/v1/commands/${id}`),
+  // Opens an interactive shell relay (RS1 D): 201 with the command, a one-time
+  // ticket and the browser WS path; the panel then connects ws_path?ticket=.
+  openShell: (deviceId: number, s: NewShell) => request<ShellOpened>('POST', `/api/v1/devices/${deviceId}/shell`, s),
+  // The recorded agent->browser transcript of a finished shell command
+  // (text/plain). Opened as a link, not fetched through request().
+  transcriptUrl: (commandId: number) => `/api/v1/shell/${commandId}/transcript`,
   presets: () => request<PresetLibrary>('GET', '/api/v1/presets'),
   rustdesk: () => request<RustdeskInfo>('GET', '/api/v1/rustdesk'),
   remoteDesktop: (deviceId: number) => request<RemoteDesktopOpened>('POST', `/api/v1/devices/${deviceId}/remote-desktop`),

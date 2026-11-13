@@ -1,7 +1,8 @@
 // In-memory stand-in for the server, active when location.search has mock=1
 // (add &role=viewer|operator to try a weaker role). Lets the dashboard be
 // developed and demoed without a backend. Nothing here ships to the server.
-import type { Alert, AuditEntry, Command, Device, EnrollmentToken, NewCommand, Org, Preset, User } from './types.ts';
+import type { Alert, AuditEntry, Command, Device, EnrollmentToken, NewCommand, NewShell, Org, Preset, User } from './types.ts';
+import type { ShellSocket } from './lib/shell.ts';
 
 interface Reply { status: number; body: unknown }
 
@@ -208,6 +209,25 @@ function route(method: string, path: string, body: unknown): Reply {
     log('device.remote_desktop_opened', 'device', d.id, d.org_id, { hostname: d.hostname, rustdesk_id: d.rustdesk_id, host: rustdesk.host });
     return ok({ url: `rustdesk://connect/${d.rustdesk_id}`, rustdesk_id: d.rustdesk_id, host: rustdesk.host, key: rustdesk.key });
   }
+  if ((x = m(/^\/api\/v1\/devices\/(\d+)\/shell$/))) {
+    const r = needRole('operator'); if (r) return r;
+    const d = devices.find((d) => d.id === Number(x![1])); if (!d) return err(404, 'not_found');
+    if (d.platform === 'android') return err(400, 'unsupported_on_platform');
+    if (d.revoked) return err(400, 'unsupported_on_device');
+    if (d.status !== 'online') return err(409, 'device_offline');
+    const ns = b as unknown as NewShell;
+    const shell = String(ns.shell || (d.platform === 'windows' ? 'powershell' : 'bash'));
+    const c: Command = {
+      id: nextId++, device_id: d.id, org_id: d.org_id, created_by: me.id, created_by_email: me.email, kind: 'shell',
+      argv: [], shell, body: '', text: '', timeout_s: 14400, status: 'sent', created_at: iso(0), sent_at: iso(0),
+      started_at: null, finished_at: null, exit_code: null, stdout: '', stderr: '', truncated: false, error: '',
+      shell_session: { bytes_in: 0, bytes_out: 0, close_reason: '', transcript_truncated: false, connected_at: null },
+    };
+    commands.unshift(c); log('shell.opened', 'command', c.id, d.org_id, { shell });
+    // A 43-char base64url-shaped stand-in; the real server issues a random one.
+    const ticket = ('Mock' + 'Ticket0123456789abcdefghijklmnopqrstuvwxyz').slice(0, 43);
+    return ok({ command: c, ticket, ws_path: `/api/v1/shell/${c.id}/ws` }, 201);
+  }
   if ((x = m(/^\/api\/v1\/devices\/(\d+)\/revoke$/))) {
     const r = needRole('admin'); if (r) return r;
     const d = devices.find((d) => d.id === Number(x![1])); if (!d) return err(404, 'not_found');
@@ -278,4 +298,42 @@ export function mockRequest(method: string, path: string, body?: unknown): Promi
     const r = route(method, path, body);
     resolve({ status: r.status, body: r.body === null ? null : JSON.parse(JSON.stringify(r.body)) });
   }, 60));
+}
+
+/**
+ * A stub shell for ?mock=1: no server, no WebSocket. It implements ShellSocket,
+ * announces waiting_for_agent then connected, prints a banner, and echoes typed
+ * bytes back as PTY output (Enter -> CRLF) so the terminal panel is usable
+ * offline. Resize control frames are accepted and ignored.
+ */
+export function mockShellSocket(shell: string): ShellSocket {
+  const emit = (s: string) => sock.onmessage?.({ data: new TextEncoder().encode(s).buffer });
+  const status = (state: string, reason = '') => sock.onmessage?.({ data: JSON.stringify({ type: 'status', state, reason }) });
+  const sock: ShellSocket = {
+    binaryType: 'arraybuffer', readyState: 0,
+    onopen: null, onmessage: null, onclose: null, onerror: null,
+    send(data) {
+      if (sock.readyState !== 1 || typeof data === 'string') return; // ignore resize frames
+      const bytes = data instanceof Uint8Array ? data : new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+      let out = '';
+      for (const byte of bytes) out += byte === 13 ? '\r\n' : String.fromCharCode(byte);
+      emit(out);
+    },
+    close() {
+      if (sock.readyState === 3) return;
+      sock.readyState = 3;
+      status('closed', 'technician_closed');
+      sock.onclose?.();
+    },
+  };
+  setTimeout(() => {
+    sock.readyState = 1;
+    sock.onopen?.();
+    status('waiting_for_agent');
+    setTimeout(() => {
+      status('connected');
+      emit(`mock ${shell} (echo) — typed keystrokes are echoed back; this is a demo with no real device.\r\n$ `);
+    }, 300);
+  }, 60);
+  return sock;
 }

@@ -1,3 +1,6 @@
+/* The xterm.js stylesheet, bundled into dist/app.css through esbuild's CSS
+   @import resolution (per docs/specs/facts.json); it must stay the first rule. */
+@import '@xterm/xterm/css/xterm.css';
 :root {
   --bg: #f6f7f9; --panel: #ffffff; --text: #1c2128; --muted: #6b7380; --line: #d9dde3;
   --accent: #2563eb; --accent-text: #ffffff; --ok: #16a34a; --bad: #dc2626; --warn: #d97706; --grey: #9aa3af;
@@ -118,6 +121,19 @@ pre.out { margin: 0; padding: 8px 64px 8px 10px; background: var(--code-bg); bor
 .apps-scroll td { white-space: normal; overflow-wrap: anywhere; }
 .apps-scroll td .chip { margin-left: 6px; }
 .apps tr.system td { color: var(--muted); }
+/* Remote shell: the xterm viewport scrolls inside its own fixed-height box, so a
+   long session never grows the page and the fit addon keeps cols within width. */
+.shell-card h2 { margin: 0; }
+.shell-panel { margin-top: 10px; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+.shell-status { display: flex; align-items: center; gap: 8px; padding: 6px 10px; background: var(--code-bg); border-bottom: 1px solid var(--line); font-size: 12.5px; }
+.shell-status .right { margin-left: auto; display: flex; }
+.shell-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--grey); flex: none; }
+.shell-dot.waiting_for_agent { background: var(--warn); }
+.shell-dot.connected { background: var(--ok); }
+.shell-dot.closed { background: var(--bad); }
+.shell-term { height: 360px; width: 100%; max-width: 100%; background: #0b0e12; overflow: hidden; }
+.shell-term .xterm { height: 100%; padding: 6px; }
+.shell-summary { display: flex; flex-wrap: wrap; gap: 12px; align-items: baseline; margin: 4px 0; }
 .login { width: 320px; display: flex; flex-direction: column; gap: 12px; }
 .login label { flex-direction: column; align-items: stretch; gap: 4px; }
 
@@ -140,4 +156,5 @@ pre.out { margin: 0; padding: 8px 64px 8px 10px; background: var(--code-bg); bor
   .grid td[data-label=""]::before { content: none; }
   .apps-scroll td { min-width: 0; }
   .apps-scroll td code { overflow-wrap: anywhere; word-break: break-all; }
+  .shell-term { height: 300px; }
 }
