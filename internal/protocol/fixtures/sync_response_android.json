@@ -1,0 +1,8 @@
+{
+  "poll_interval_s": 60,
+  "commands": [
+    {"id": 9, "kind": "lock", "timeout_s": 30},
+    {"id": 10, "kind": "ping", "timeout_s": 30},
+    {"id": 11, "kind": "message", "text": "Please call the helpdesk", "timeout_s": 30}
+  ]
+}

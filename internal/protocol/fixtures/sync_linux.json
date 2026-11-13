@@ -1,0 +1,26 @@
+{
+  "agent_version": "0.1.0",
+  "interval_s": 30,
+  "wait_s": 25,
+  "uptime_s": 86400,
+  "metrics": {
+    "cpu_pct": 12.5,
+    "mem_total_mb": 16000,
+    "mem_used_mb": 8120,
+    "disks": [
+      {"mount": "/", "total_gb": 476.0, "used_gb": 201.3},
+      {"mount": "/boot/efi", "total_gb": 0.5, "used_gb": 0.1}
+    ],
+    "ips": ["10.0.0.12"]
+  },
+  "facts": {
+    "kernel": "6.8.0-45-generic",
+    "cpu_model": "Intel(R) Core(TM) i5-1345U",
+    "cpu_count": 8,
+    "mem_total_mb": 16000,
+    "manufacturer": "Dell Inc.",
+    "model": "Latitude 5540",
+    "serial": "ABC123",
+    "ips": ["10.0.0.12"]
+  }
+}

@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">MSP Agent</string>
+    <string name="notification_title">Managed by your IT provider</string>
+    <string name="channel_agent">Agent status</string>
+    <string name="channel_message">Messages from IT</string>
+    <string name="hint_server">Server URL</string>
+    <string name="hint_token">Enrollment token</string>
+    <string name="btn_enroll">Enroll</string>
+    <string name="btn_start">Start</string>
+    <string name="btn_stop">Stop</string>
+    <string name="btn_battery">Allow background</string>
+    <string name="btn_admin">Grant device admin</string>
+    <string name="admin_explanation">Lets your IT provider lock this device remotely.</string>
+    <string name="status_idle">Not enrolled.</string>
+    <string name="token_rejected">Token rejected — open app to re-enroll</string>
+</resources>

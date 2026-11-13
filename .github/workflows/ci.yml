@@ -1,0 +1,141 @@
+# CI mirrors the BUILD_AND_TEST section of docs/PLAN.md: the same commands the Makefile
+# runs in the build container, split into four independent jobs.
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  GOTOOLCHAIN: local
+
+jobs:
+  go:
+    name: go (vet, test -race, agents)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache: true
+      - name: go vet
+        run: go vet ./...
+      - name: go test -race
+        # -race needs cgo, so CGO_ENABLED is left at its default here; every build
+        # elsewhere (Makefile, Dockerfile, build-agents.sh) runs with CGO_ENABLED=0.
+        run: go test -race ./... -count=1
+      - name: cross-compile agents + server into dist/
+        run: scripts/build-agents.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+  web:
+    name: web (test, typecheck, build)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      - run: npm test
+      - run: npm run typecheck
+      - run: npm run build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: web-dist
+          path: web/dist/
+          if-no-files-found: error
+
+  android:
+    name: android (assembleDebug, unit tests)
+    runs-on: ubuntu-latest
+    env:
+      ANDROID_HOME: ${{ github.workspace }}/android-sdk
+      ANDROID_SDK_ROOT: ${{ github.workspace }}/android-sdk
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: platforms;android-35 build-tools;35.0.0
+      - name: Gradle 8.14.3 (the version verified in the build container; no wrapper jar is committed)
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.14.3"
+      - name: assembleDebug + testDebugUnitTest
+        working-directory: android
+        run: gradle --no-daemon --console=plain --max-workers=1 :app:assembleDebug :app:testDebugUnitTest
+      - uses: actions/upload-artifact@v4
+        with:
+          name: msp-agent-debug-apk
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+
+  e2e:
+    name: e2e (real binaries + systemd install)
+    runs-on: ubuntu-latest
+    env:
+      MSP_E2E_PORT: "18080"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache: true
+      - name: make build
+        run: make build
+      - name: scripts/e2e.sh
+        run: scripts/e2e.sh
+      - name: systemd install round trip
+        # Starts a fresh server, mints a token, installs the agent as a real systemd unit
+        # (the install subcommand copies the binary to /usr/local/bin and enables the unit),
+        # checks the unit is active and the device reaches the API, then uninstalls.
+        run: |
+          set -euxo pipefail
+          T=$(mktemp -d); echo "E2E_TMP=$T" >> "$GITHUB_ENV"
+          B=http://127.0.0.1:${MSP_E2E_PORT}
+          export MSP_DB=$T/msp.db MSP_LISTEN=127.0.0.1:${MSP_E2E_PORT} MSP_BASE_URL=$B MSP_AGENT_DIR=$PWD/dist
+          echo 'admin-pass-123' | ./bin/msp-server user add --email admin@example.com --role admin --password-stdin
+          ORG=$(./bin/msp-server org add --name "CI Org")
+          ET=$(./bin/msp-server token new --org "$ORG" --label ci-systemd --max-uses 2 --ttl 1h)
+          nohup ./bin/msp-server serve > "$T/server.log" 2>&1 &
+          echo $! > "$T/server.pid"
+          for i in $(seq 1 40); do curl -sf "$B/api/agent/v1/ping" >/dev/null && break; sleep 0.5; done
+          curl -sf "$B/api/agent/v1/ping"
+          sudo ./bin/msp-agent install --server "$B" --token "$ET" --insecure-http
+          sleep 3
+          systemctl is-active msp-agent
+          sudo ./bin/msp-agent status
+          curl -sf -c "$T/jar" -H 'X-Requested-With: msp' -H 'Content-Type: application/json' \
+            -d '{"email":"admin@example.com","password":"admin-pass-123"}' "$B/api/v1/login" >/dev/null
+          for i in $(seq 1 30); do
+            N=$(curl -sf -b "$T/jar" "$B/api/v1/devices" | jq '[.devices[] | select(.status=="online")] | length')
+            [ "$N" -ge 1 ] && break; sleep 1
+          done
+          test "$N" -ge 1
+          sudo ./bin/msp-agent uninstall
+          if systemctl is-active --quiet msp-agent; then echo "unit still active after uninstall"; exit 1; fi
+      - name: logs and cleanup
+        if: always()
+        run: |
+          [ -n "${E2E_TMP:-}" ] || exit 0
+          [ -f "$E2E_TMP/server.pid" ] && kill "$(cat "$E2E_TMP/server.pid")" 2>/dev/null || true
+          echo "--- server.log"; cat "$E2E_TMP/server.log" 2>/dev/null || true
+          echo "--- journalctl -u msp-agent"; sudo journalctl -u msp-agent --no-pager 2>/dev/null | tail -50 || true
+          sudo systemctl disable --now msp-agent 2>/dev/null || true

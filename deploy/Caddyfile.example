@@ -1,0 +1,13 @@
+# Caddy reverse proxy for the MSP server (automatic HTTPS via Let's Encrypt).
+# Copy to deploy/Caddyfile, replace the hostname, uncomment the caddy service in
+# docker-compose.yml, and set on the server service:
+#   MSP_BASE_URL=https://rmm.example.com  MSP_SECURE_COOKIES=1  MSP_TRUST_PROXY=1
+#
+# "server" is the compose service name; Caddy resolves it on the compose network.
+# Agents long-poll /api/agent/v1/sync for up to 25 s; Caddy's default proxy timeouts are
+# unlimited, so no tuning is needed. If you put another proxy in between, give it an idle
+# timeout above 40 s (the agent's own HTTP timeout).
+
+rmm.example.com {
+	reverse_proxy server:8080
+}

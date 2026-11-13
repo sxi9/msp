@@ -1,0 +1,14 @@
+[Unit]
+Description=MSP Agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/msp-agent run --config /etc/msp-agent/agent.json
+Restart=always
+RestartSec=10
+KillMode=process
+
+[Install]
+WantedBy=multi-user.target

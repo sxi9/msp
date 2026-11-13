@@ -1,0 +1,20 @@
+# build outputs (anchored to the repo root: web/dist/index.html is committed)
+/bin/
+/dist/
+
+# sqlite databases and server data
+*.db
+*.db-wal
+*.db-shm
+data/
+
+# dashboard: dependencies and the esbuild bundle (index.html stays committed)
+web/node_modules/
+web/dist/app.js
+web/dist/app.css
+
+# android build state (the gradle wrapper jar is not committed either)
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties

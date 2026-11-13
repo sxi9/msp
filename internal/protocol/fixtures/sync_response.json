@@ -1,0 +1,7 @@
+{
+  "poll_interval_s": 30,
+  "commands": [
+    {"id": 7, "kind": "exec", "argv": ["uname", "-a"], "timeout_s": 60},
+    {"id": 8, "kind": "script", "shell": "sh", "body": "df -h\nuptime\n", "timeout_s": 120}
+  ]
+}
