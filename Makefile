@@ -21,7 +21,8 @@ test:
 	$(GO) vet ./...
 	$(GO) test ./... -count=1 -p 4
 
-## race: race detector on the concurrent packages
+## race: race detector on the concurrent packages (-race needs cgo, so the global CGO_ENABLED=0 is overridden here only)
+race: export CGO_ENABLED = 1
 race:
 	$(GO) test -race ./internal/server ./internal/agent ./internal/e2e -count=1
 

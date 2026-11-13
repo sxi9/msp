@@ -284,6 +284,7 @@ func TestPingAndHealthz(t *testing.T) {
 
 func TestEnroll(t *testing.T) {
 	e := newTestEnv(t)
+	e.srv.enrollLimit = newRateLimiter(1000) // this test enrolls more than 10 times
 
 	id, token := e.enroll("uid-1", protocol.PlatformLinux)
 	d := e.device(id)
@@ -584,10 +585,11 @@ func TestResult(t *testing.T) {
 	now := e.clock.now()
 	okResult := protocol.CommandResult{ExitCode: 0, Stdout: "Linux\n", StartedAt: now, FinishedAt: now.Add(time.Second)}
 
-	// Not yet sent (queued) -> 404.
+	// Exists for this device but not in status sent (still queued) -> 409
+	// (store.ErrConflict: the row is the device's but is not awaiting a result).
 	c := e.queue(id, "uname", "-a")
 	path := fmt.Sprintf("/api/agent/v1/commands/%d/result", c.ID)
-	if resp, body := e.do(http.MethodPost, path, okResult, bearer(token)); resp.StatusCode != 404 || errorCode(t, body) != "not_found" {
+	if resp, body := e.do(http.MethodPost, path, okResult, bearer(token)); resp.StatusCode != 409 || errorCode(t, body) != "conflict" {
 		t.Fatalf("result for queued command: %d %s", resp.StatusCode, body)
 	}
 	if _, out, _ := e.sync(token, syncRequest(0)); len(out.Commands) != 1 {
