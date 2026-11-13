@@ -50,6 +50,69 @@ func (s *Store) CreateUser(ctx context.Context, email, passwordHash, role string
 	return User{ID: id, Email: email, Role: role, CreatedAt: storedTime(now), PasswordHash: passwordHash}, nil
 }
 
+// CreateUserScoped inserts a staff account and applies its per-technician org
+// scoping (RS2) in one transaction, so a scoped create never leaves an
+// all-orgs account behind when the scoping fails. allOrgs true (or an admin
+// role, which is always all-orgs) ignores orgIDs and keeps full visibility;
+// allOrgs false stores exactly orgIDs (deduplicated). Every org id must exist,
+// and a non-existent one rolls the whole insert back with ErrNotFound (no
+// account is created). A duplicate email yields ErrConflict. passwordHash is
+// the caller's bcrypt hash.
+func (s *Store) CreateUserScoped(ctx context.Context, email, passwordHash, role string, allOrgs bool, orgIDs []int64) (User, error) {
+	email = strings.ToLower(strings.TrimSpace(email))
+	if role == "admin" {
+		allOrgs = true
+	}
+	now := s.Now()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return User{}, fmt.Errorf("store: create user: %w", err)
+	}
+	defer tx.Rollback()
+
+	res, err := tx.ExecContext(ctx,
+		`INSERT INTO users (email, password_hash, role, created_at, all_orgs) VALUES (?, ?, ?, ?, ?)`,
+		email, passwordHash, role, fmtTime(now), boolInt(allOrgs))
+	if err != nil {
+		if isUniqueViolation(err) {
+			return User{}, ErrConflict
+		}
+		return User{}, fmt.Errorf("store: create user: %w", err)
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return User{}, fmt.Errorf("store: create user: %w", err)
+	}
+	if !allOrgs {
+		seen := map[int64]bool{}
+		for _, oid := range orgIDs {
+			if seen[oid] {
+				continue
+			}
+			seen[oid] = true
+			// INSERT ... SELECT guards against a non-existent org (including one
+			// deleted since the handler validated it): a bad id inserts no row,
+			// which we report as ErrNotFound and roll the account back with it.
+			res, err := tx.ExecContext(ctx,
+				`INSERT INTO user_orgs (user_id, org_id) SELECT ?, id FROM orgs WHERE id = ?`, id, oid)
+			if err != nil {
+				return User{}, fmt.Errorf("store: create user: %w", err)
+			}
+			n, err := rowsAffected(res)
+			if err != nil {
+				return User{}, fmt.Errorf("store: create user: %w", err)
+			}
+			if n == 0 {
+				return User{}, ErrNotFound
+			}
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return User{}, fmt.Errorf("store: create user: %w", err)
+	}
+	return User{ID: id, Email: email, Role: role, CreatedAt: storedTime(now), PasswordHash: passwordHash}, nil
+}
+
 // GetUserByEmail looks a user up by (lowercased) email.
 func (s *Store) GetUserByEmail(ctx context.Context, email string) (User, error) {
 	email = strings.ToLower(strings.TrimSpace(email))

@@ -2,7 +2,7 @@
 // ?mock=1 in the URL every call is answered in-memory by mock.ts instead.
 import type {
   Alert, AuditEntry, Command, Device, DeviceDetail, EnrollmentToken, Heartbeat, NewCommand, NewShell,
-  Org, PresetLibrary, RemoteDesktopOpened, RustdeskInfo, ShellOpened, Summary, TokenCreated, User,
+  Org, OrgAssignment, PresetLibrary, RemoteDesktopOpened, RustdeskInfo, ShellOpened, Summary, TokenCreated, User,
 } from './types.ts';
 import { mockRequest } from './mock.ts';
 
@@ -94,6 +94,12 @@ export const api = {
   ackAlert: (id: number) => request<void>('POST', `/api/v1/alerts/${id}/ack`),
   listAudit: (f: { limit?: number; org_id?: number; before?: number }) => request<{ entries: AuditEntry[] }>('GET', `/api/v1/audit${qs(f)}`),
   listUsers: () => request<{ users: User[] }>('GET', '/api/v1/users'),
-  createUser: (email: string, password: string, role: string) => request<{ user: User }>('POST', '/api/v1/users', { email, password, role }),
+  // `access` scopes an operator/viewer to a set of client orgs; omitted (and
+  // ignored by the server) for admins, who always see every org (RS2).
+  createUser: (email: string, password: string, role: string, access?: OrgAssignment) =>
+    request<{ user: User }>('POST', '/api/v1/users', { email, password, role, ...(access ?? {}) }),
+  // Replaces a user's client access (RS2); 400 if the target is an admin and
+  // all_orgs is false (admins cannot be scoped).
+  setUserOrgs: (id: number, access: OrgAssignment) => request<void>('PUT', `/api/v1/users/${id}/orgs`, access),
   disableUser: (id: number) => request<void>('POST', `/api/v1/users/${id}/disable`),
 };

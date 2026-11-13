@@ -44,6 +44,7 @@ P1 = first build. P2 = next. P3 = after that.
 - P2 Email, SMS, Slack notifications, escalation, maintenance windows
 - P2 Two-factor auth, device token rotation
 - RD1 (built) RustDesk hbbs/hbbr in compose, `MSP_RUSTDESK_HOST`/`KEY`, device RustDesk id registry (`devices.rustdesk_id`), `GET /api/v1/rustdesk`, `POST /devices/{id}/remote-desktop`, audit `device.remote_desktop_opened`
+- RS2 (built) Per-technician org scoping: `user_orgs` table + `users.all_orgs`, visible-org set resolved per request and pushed into the store list queries, 404-not-403 at every org/device endpoint, `all_orgs`/`org_ids` on `GET /users`, scoping on `POST /users`, `PUT /users/{id}/orgs`, audit `user.orgs_changed`
 - P3 Session length / recording audit for remote desktop
 - P3 Single sign-on, mutual TLS
 
@@ -61,6 +62,7 @@ P1 = first build. P2 = next. P3 = after that.
 - P2 Reports: uptime, disk trends, patch compliance, exports
 - P2 Client portal with limited self-service view
 - RD1 (built) Remote desktop card on the device page: id, Copy, Connect button (opens `rustdesk://connect/<id>`), not-configured / not-reported states
+- RS2 (built) Users page "Edit access" dialog (All-clients toggle + per-client checklist) and the same control on the create-user form; "Add client" hidden for non-admins; a scoped technician's Fleet/Orgs/Alerts/Audit simply show less
 - P3 White-label branding per client, custom dashboards
 
 ## Monitoring beyond agents

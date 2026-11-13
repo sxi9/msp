@@ -12,7 +12,7 @@ import (
 
 func (e *testEnv) openAlerts(deviceID int64) map[string]store.Alert {
 	e.t.Helper()
-	alerts, err := e.st.ListAlerts(context.Background(), true, nil, 100)
+	alerts, err := e.st.ListAlerts(context.Background(), true, nil, nil, 100)
 	if err != nil {
 		e.t.Fatalf("ListAlerts: %v", err)
 	}
@@ -56,7 +56,7 @@ func TestOfflineAlertOpensAndResolves(t *testing.T) {
 	}
 	// Idempotent.
 	EvaluateNow(e.srv)
-	all, _ := e.st.ListAlerts(context.Background(), false, nil, 100)
+	all, _ := e.st.ListAlerts(context.Background(), false, nil, nil, 100)
 	if len(all) != 1 {
 		t.Fatalf("second evaluation duplicated the alert: %d rows", len(all))
 	}
@@ -67,7 +67,7 @@ func TestOfflineAlertOpensAndResolves(t *testing.T) {
 	if a := e.openAlerts(id); len(a) != 0 {
 		t.Fatalf("alert not resolved: %+v", a)
 	}
-	all, _ = e.st.ListAlerts(context.Background(), false, nil, 100)
+	all, _ = e.st.ListAlerts(context.Background(), false, nil, nil, 100)
 	if len(all) != 1 || all[0].ResolvedAt == nil {
 		t.Fatalf("resolved row %+v", all)
 	}
@@ -183,7 +183,7 @@ func TestEvaluatorWritesOnlyOnChange(t *testing.T) {
 		e.clock.advance(15 * time.Second)
 		EvaluateNow(e.srv)
 	}
-	all, _ := e.st.ListAlerts(context.Background(), false, nil, 100)
+	all, _ := e.st.ListAlerts(context.Background(), false, nil, nil, 100)
 	if len(all) != 1 || all[0].ResolvedAt != nil || !all[0].OpenedAt.Equal(opened) {
 		t.Fatalf("steady state changed the alert rows: %+v", all)
 	}

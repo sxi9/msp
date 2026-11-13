@@ -134,6 +134,15 @@ pre.out { margin: 0; padding: 8px 64px 8px 10px; background: var(--code-bg); bor
 .shell-term { height: 360px; width: 100%; max-width: 100%; background: #0b0e12; overflow: hidden; }
 .shell-term .xterm { height: 100%; padding: 6px; }
 .shell-summary { display: flex; flex-wrap: wrap; gap: 12px; align-items: baseline; margin: 4px 0; }
+/* per-technician client access (RS2): the All-clients toggle + org checklist,
+   shared by the create-user form and the Users-page Edit-access editor. */
+.orgscope { margin: 6px 0; }
+.orgscope-all { color: var(--text); font-size: 13px; }
+.orgscope-list { list-style: none; margin: 8px 0 0; padding: 8px; max-height: 200px; overflow: auto; border: 1px solid var(--line); border-radius: 6px; display: grid; gap: 4px; }
+.orgscope-list label { color: var(--text); }
+.access-names { white-space: normal; overflow-wrap: anywhere; }
+.row-actions { display: inline-flex; gap: 6px; align-items: center; }
+
 .login { width: 320px; display: flex; flex-direction: column; gap: 12px; }
 .login label { flex-direction: column; align-items: stretch; gap: 4px; }
 

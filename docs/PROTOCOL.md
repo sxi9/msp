@@ -373,11 +373,22 @@ insufficient role. Roles: `viewer < operator < admin`.
 
 ### Summary and orgs
 
+Every list and counter below is scoped to the **visible org set** of the caller
+**(RS2)**: a user whose `all_orgs` is false sees only the orgs assigned to them
+(section 6, Users), and an admin or an `all_orgs` user sees every org. A request
+for one resource in an org the caller cannot see returns `404 not_found` — the
+same response an unrelated resource gives, never a distinguishable `403` (see
+docs/SECURITY.md section 4).
+
 - `GET /api/v1/summary` -> `{"orgs":4,"devices":57,"online":51,"offline":5,"pending":1,"open_alerts":3}`
+  — every counter is computed over the caller's visible orgs only.
 - `GET /api/v1/orgs` -> `{"orgs":[{"id":1,"name":"Acme Dental","created_at":"...","device_count":12,"online_count":11,"open_alerts":1}]}`
+  — only the caller's visible orgs.
 - `POST /api/v1/orgs {"name"}` (admin) -> `201 {"org":{...}}`; `409 {"error":"conflict"}` on
-  duplicate. Audit `org.created`.
-- `GET /api/v1/orgs/{id}` -> `{"org":{...},"tokens":[{"id":3,"org_id":1,"token_prefix":"et_Ab12cD3","label":"front desk","max_uses":10,"uses":2,"expires_at":"...","created_by":1,"created_at":"...","revoked_at":null}]}`
+  duplicate. Audit `org.created`. Org creation is admin-only; the dashboard hides "Add client" for non-admins.
+- `GET /api/v1/orgs/{id}` -> `{"org":{...},"tokens":[{"id":3,"org_id":1,"token_prefix":"et_Ab12cD3","label":"front desk","max_uses":10,"uses":2,"expires_at":"...","created_by":1,"created_at":"...","revoked_at":null}]}`.
+  `404 not_found` when the org is not in the caller's visible set **(RS2)**; token
+  create/revoke under an org is likewise `404` when the org is not visible, checked before the action.
 - `POST /api/v1/orgs/{id}/tokens {"label":"front desk","max_uses":10,"ttl_hours":168}`
   (admin|operator; defaults 10 and 168; `max_uses` 1..1000, `ttl_hours` 1..8760) ->
   `201 {"token":{...row...},"plaintext":"et_...","install":{"linux":"curl -fsSLo /tmp/msp-install.sh BASE/dl/install.sh && sudo bash /tmp/msp-install.sh --server BASE --token et_...","windows":"irm BASE/dl/install.ps1 -OutFile $env:TEMP\\msp-install.ps1; & $env:TEMP\\msp-install.ps1 -Server BASE -Token et_...","android":"Install BASE/dl/msp-agent.apk, open MSP Agent, enter BASE and the token et_..."}}`
@@ -390,6 +401,13 @@ revoked it also carries a `warning` (and the server logs one): that is a cloned 
 the previous agent's token is now invalid.
 
 ### Devices
+
+Every device-scoped endpoint below (list, detail, heartbeats, commands, shell, transcript,
+remote-desktop, lock/ping/message, revoke, delete) is filtered or gated by the caller's **visible
+org set (RS2)**: the list returns only devices whose org is visible, an explicit `?org_id=` outside
+the set is `404 not_found`, and a single device/command the caller cannot see returns `404
+not_found` **before** any side effect, role result or `409` — so a scoped user cannot tell a device
+in another org exists (docs/SECURITY.md section 4).
 
 - `GET /api/v1/devices?org_id=&status=online|offline|pending&q=<hostname substring>` -> `{"devices":[DEVICE...]}`
 
@@ -551,13 +569,28 @@ good set keeps being served.
 
 ### Alerts, audit, users
 
-- `GET /api/v1/alerts?state=open|all&org_id=` -> `{"alerts":[{"id":9,"org_id":1,"org_name":"...","device_id":42,"hostname":"ws-01","type":"offline","severity":"high","message":"no sync for 6m","opened_at":"...","resolved_at":null,"acknowledged_by":null,"acknowledged_at":null}]}` (default open; limit 500).
-- `POST /api/v1/alerts/{id}/ack` (admin|operator) -> `204`. Audit `alert.ack`.
-- `GET /api/v1/audit?limit=200&org_id=&before=<id>` -> `{"entries":[{"id":1,"at":"...","actor_type":"user","actor_id":1,"actor_label":"admin@example.com","org_id":1,"action":"command.queued","target_type":"command","target_id":7,"ip":"127.0.0.1","detail":{...}}]}` newest first; `actor_label` = user email, `"device:<id>"` or `"system"`.
-- `GET /api/v1/users` (admin) -> `{"users":[{"id":1,"email":"...","role":"admin","created_at":"...","disabled_at":null}]}`
+- `GET /api/v1/alerts?state=open|all&org_id=` -> `{"alerts":[{"id":9,"org_id":1,"org_name":"...","device_id":42,"hostname":"ws-01","type":"offline","severity":"high","message":"no sync for 6m","opened_at":"...","resolved_at":null,"acknowledged_by":null,"acknowledged_at":null}]}` (default open; limit 500). Filtered to the caller's visible orgs **(RS2)**; an explicit `?org_id=` outside the visible set is `404 not_found`.
+- `POST /api/v1/alerts/{id}/ack` (admin|operator) -> `204`. Audit `alert.ack`. `404 not_found`
+  when the alert's org is not visible **(RS2)**, resolved before the ack so there is no side effect.
+- `GET /api/v1/audit?limit=200&org_id=&before=<id>` -> `{"entries":[{"id":1,"at":"...","actor_type":"user","actor_id":1,"actor_label":"admin@example.com","org_id":1,"action":"command.queued","target_type":"command","target_id":7,"ip":"127.0.0.1","detail":{...}}]}` newest first; `actor_label` = user email, `"device:<id>"` or `"system"`. Filtered to the caller's visible orgs **(RS2)**; rows with `org_id` null (system actions not tied to an org) are visible only to all-orgs users.
+- `GET /api/v1/users` (admin) -> `{"users":[{"id":1,"email":"...","role":"admin","created_at":"...","disabled_at":null,"all_orgs":true,"org_ids":[]}]}`.
+  `all_orgs` **(RS2)** is true when the user sees every org; `org_ids` lists the assigned orgs
+  and is empty when `all_orgs`. An admin row is always `all_orgs:true` with an empty `org_ids`.
 - `POST /api/v1/users {"email","password","role"}` (admin; password >= 10 chars; role in
   `admin|operator|viewer`) -> `201 {"user":{...}}`; `409 conflict`. Audit `user.created`.
+  For an operator or viewer the body may add `"all_orgs":false,"org_ids":[1,2]` to scope the new
+  user **(RS2)** (every id must exist, else `400 invalid_request`; an empty list with `all_orgs:false`
+  is allowed and means the user sees nothing yet). The scoping fields are ignored for the admin role
+  (admins are always all-orgs); a missing `all_orgs` keeps today's full visibility.
+- `PUT /api/v1/users/{id}/orgs {"all_orgs":bool,"org_ids":[...]}` (admin) -> `200 {"user":{...}}`
+  **(RS2)**: replaces the user's org assignment. `404 not_found` when the user does not exist;
+  `400 invalid_request` when the target is an admin and `all_orgs` is false (admins cannot be
+  scoped) or an `org_id` does not exist. Audit `user.orgs_changed` with the new set.
 - `POST /api/v1/users/{id}/disable` (admin) -> `204`. Audit `user.disabled`.
+
+A scoped user who is later **promoted to admin** becomes all-orgs at once (the visible-org rule
+keys off role); **demoting an admin** to operator keeps `all_orgs:true` until an admin scopes them
+through `PUT …/orgs`.
 
 ### Other paths and headers
 
@@ -573,7 +606,8 @@ good set keeps being served.
 
 ## 7. Audit actions (`audit_log.action`)
 
-`user.login`, `user.login_failed`, `user.created`, `user.disabled`, `user.password_changed`
+`user.login`, `user.login_failed`, `user.created`, `user.disabled`, `user.orgs_changed` **(RS2)**,
+`user.password_changed`
 (actor the user, or `system` with detail `via: cli`), `user.password_change_failed`, `org.created`,
 `token.created`, `token.revoked`, `device.enrolled`, `device.revoked`, `device.deleted`,
 `device.lock_requested` **(A1)**, `device.remote_desktop_opened` **(RD1)**,

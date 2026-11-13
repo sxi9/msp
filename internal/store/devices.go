@@ -184,6 +184,10 @@ func (s *Store) ListDevices(ctx context.Context, f DeviceFilter) ([]Device, erro
 		where = append(where, `d.org_id = ?`)
 		args = append(args, *f.OrgID)
 	}
+	if clause, clauseArgs := orgInClause(`d.org_id`, f.VisibleOrgs); clause != "" {
+		where = append(where, clause)
+		args = append(args, clauseArgs...)
+	}
 	if f.Query != "" {
 		where = append(where, `d.hostname LIKE ? ESCAPE '\'`)
 		args = append(args, "%"+likeEscape(f.Query)+"%")

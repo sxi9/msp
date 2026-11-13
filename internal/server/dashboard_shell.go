@@ -72,6 +72,10 @@ func (s *Server) handleOpenShell(w http.ResponseWriter, r *http.Request) {
 		s.dashStoreError(w, err, "get device")
 		return
 	}
+	// 404 across orgs before any side effect or 409 (RS2).
+	if !s.dashOrgVisible(w, r, dev.OrgID) {
+		return
+	}
 	if dev.Revoked {
 		writeError(w, http.StatusBadRequest, "unsupported_on_device", "device token is revoked")
 		return
@@ -181,6 +185,9 @@ func (s *Server) handleBrowserShell(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "not_found", "")
 		return
 	}
+	if !s.dashOrgVisible(w, r, cmd.OrgID) {
+		return
+	}
 	// Reject a reconnect to a shell that has already closed. Without a live
 	// session in memory, getOrCreate would build a brand-new session for the
 	// finished command; its teardown would then overwrite the flushed
@@ -232,6 +239,9 @@ func (s *Server) handleShellTranscript(w http.ResponseWriter, r *http.Request) {
 	}
 	if cmd.Kind != protocol.KindShell {
 		writeError(w, http.StatusNotFound, "not_found", "")
+		return
+	}
+	if !s.dashOrgVisible(w, r, cmd.OrgID) {
 		return
 	}
 

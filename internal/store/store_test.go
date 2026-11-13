@@ -69,8 +69,8 @@ func fixture(t *testing.T, s *Store) (Org, User, Device, string) {
 }
 
 // migrationCount is the number of files in migrations/ (0001_init,
-// 0002_heartbeats_at, 0003_shell_sessions).
-const migrationCount = 3
+// 0002_heartbeats_at, 0003_shell_sessions, 0004_user_orgs).
+const migrationCount = 4
 
 func TestOpenMigratesAndReopens(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "msp.db")
@@ -96,7 +96,7 @@ func TestOpenMigratesAndReopens(t *testing.T) {
 	if err := s2.Ping(ctx); err != nil {
 		t.Fatalf("Ping: %v", err)
 	}
-	orgs, err := s2.ListOrgs(ctx)
+	orgs, err := s2.ListOrgs(ctx, nil)
 	if err != nil || len(orgs) != 1 || orgs[0].Name != "one" {
 		t.Fatalf("after reopen orgs = %+v, err %v", orgs, err)
 	}
@@ -190,7 +190,7 @@ func TestOrgsAndUsers(t *testing.T) {
 	if _, err := s.OpenAlert(ctx, org.ID, dev.ID, "offline", "high", "no sync"); err != nil {
 		t.Fatal(err)
 	}
-	orgs, err := s.ListOrgs(ctx)
+	orgs, err := s.ListOrgs(ctx, nil)
 	if err != nil || len(orgs) != 1 {
 		t.Fatalf("ListOrgs = %+v, %v", orgs, err)
 	}
@@ -896,7 +896,7 @@ func TestAlerts(t *testing.T) {
 	if n, _ := s.CountOpenAlerts(ctx); n != 2 {
 		t.Fatalf("CountOpenAlerts = %d", n)
 	}
-	open, err := s.ListAlerts(ctx, true, nil, 0)
+	open, err := s.ListAlerts(ctx, true, nil, nil, 0)
 	if err != nil || len(open) != 2 || open[0].Type != "disk_full" || open[1].Type != "offline" {
 		t.Fatalf("ListAlerts open = %+v, %v", open, err)
 	}
@@ -923,15 +923,15 @@ func TestAlerts(t *testing.T) {
 	if created, _ = s.OpenAlert(ctx, org.ID, dev.ID, "offline", "high", "again"); !created {
 		t.Fatal("OpenAlert after resolve should create a new row")
 	}
-	all, _ := s.ListAlerts(ctx, false, nil, 0)
+	all, _ := s.ListAlerts(ctx, false, nil, nil, 0)
 	if len(all) != 3 || all[0].Message != "again" || all[2].ResolvedAt == nil || all[2].AcknowledgedBy == nil || *all[2].AcknowledgedBy != u.ID {
 		t.Fatalf("ListAlerts all = %+v", all)
 	}
 	other := org.ID + 1
-	if got, _ := s.ListAlerts(ctx, false, &other, 0); len(got) != 0 {
+	if got, _ := s.ListAlerts(ctx, false, &other, nil, 0); len(got) != 0 {
 		t.Fatalf("org filter = %+v", got)
 	}
-	if got, _ := s.ListAlerts(ctx, true, &org.ID, 1); len(got) != 1 {
+	if got, _ := s.ListAlerts(ctx, true, &org.ID, nil, 1); len(got) != 1 {
 		t.Fatalf("limit = %+v", got)
 	}
 	d, _ := s.GetDevice(ctx, dev.ID)
@@ -970,7 +970,7 @@ func TestAuditAndSummary(t *testing.T) {
 		t.Fatal("bad actor_type accepted")
 	}
 
-	entries, err := s.ListAudit(ctx, 200, nil, 0)
+	entries, err := s.ListAudit(ctx, 200, nil, nil, 0)
 	if err != nil || len(entries) != 3 {
 		t.Fatalf("ListAudit = %+v, %v", entries, err)
 	}
@@ -984,13 +984,13 @@ func TestAuditAndSummary(t *testing.T) {
 	if usr.ActorLabel != "admin@example.com" || usr.Detail["kind"] != "exec" || usr.TargetID == nil || *usr.TargetID != 7 || usr.IP != "127.0.0.1" {
 		t.Fatalf("user entry = %+v", usr)
 	}
-	if got, _ := s.ListAudit(ctx, 200, &org.ID, 0); len(got) != 2 {
+	if got, _ := s.ListAudit(ctx, 200, &org.ID, nil, 0); len(got) != 2 {
 		t.Fatalf("org filter = %+v", got)
 	}
-	if got, _ := s.ListAudit(ctx, 200, nil, devE.ID); len(got) != 1 || got[0].ID != usr.ID {
+	if got, _ := s.ListAudit(ctx, 200, nil, nil, devE.ID); len(got) != 1 || got[0].ID != usr.ID {
 		t.Fatalf("before filter = %+v", got)
 	}
-	if got, _ := s.ListAudit(ctx, 1, nil, 0); len(got) != 1 || got[0].ID != sys.ID {
+	if got, _ := s.ListAudit(ctx, 1, nil, nil, 0); len(got) != 1 || got[0].ID != sys.ID {
 		t.Fatalf("limit = %+v", got)
 	}
 	b, _ := json.Marshal(usr)
@@ -1010,7 +1010,7 @@ func TestAuditAndSummary(t *testing.T) {
 	s.RecordSync(ctx, dev.ID, "", protocol.SyncRequest{IntervalS: 30}, time.Minute)
 	s.UpsertDevice(ctx, UpsertDeviceParams{OrgID: org2.ID, DeviceUID: "p", Hostname: "p", Platform: "android"})
 	s.OpenAlert(ctx, org2.ID, d2.ID, "offline", "high", "x")
-	sum, err := s.Summary(ctx)
+	sum, err := s.Summary(ctx, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

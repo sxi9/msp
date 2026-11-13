@@ -41,8 +41,12 @@ func (s *Store) Audit(ctx context.Context, e AuditEntry) error {
 
 // ListAudit returns entries newest first, optionally scoped to an org and to
 // ids below beforeID (0 = no bound). ActorLabel is the user's email for
-// actor_type user, "device:<id>" for device, "system" otherwise.
-func (s *Store) ListAudit(ctx context.Context, limit int, orgID *int64, beforeID int64) ([]AuditEntry, error) {
+// actor_type user, "device:<id>" for device, "system" otherwise. visible
+// restricts the result to a caller's visible org set (RS2): nil = every entry,
+// a non-nil set keeps only entries whose org is visible. Entries with
+// org_id IS NULL (system actions not tied to an org) are visible only to
+// all-orgs callers, so a scoped (non-nil visible) caller never sees them.
+func (s *Store) ListAudit(ctx context.Context, limit int, orgID *int64, visible []int64, beforeID int64) ([]AuditEntry, error) {
 	if limit <= 0 {
 		limit = 200
 	}
@@ -56,6 +60,10 @@ func (s *Store) ListAudit(ctx context.Context, limit int, orgID *int64, beforeID
 	if orgID != nil {
 		where = append(where, `e.org_id = ?`)
 		args = append(args, *orgID)
+	}
+	if clause, clauseArgs := orgInClause(`e.org_id`, visible); clause != "" {
+		where = append(where, clause)
+		args = append(args, clauseArgs...)
 	}
 	if beforeID > 0 {
 		where = append(where, `e.id < ?`)

@@ -154,11 +154,14 @@ type AuditEntry struct {
 }
 
 // DeviceFilter narrows ListDevices. Status is one of online|offline|pending
-// or "" for all; Query is a hostname substring.
+// or "" for all; Query is a hostname substring. VisibleOrgs restricts the
+// result to a caller's visible org set (RS2): nil means no restriction (every
+// org), a non-nil but empty slice means no org is visible (no rows).
 type DeviceFilter struct {
-	OrgID  *int64
-	Status string
-	Query  string
+	OrgID       *int64
+	Status      string
+	Query       string
+	VisibleOrgs []int64
 }
 
 // Summary is the dashboard landing-page counter set.

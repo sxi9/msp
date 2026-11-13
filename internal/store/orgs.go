@@ -29,6 +29,20 @@ func (s *Store) CreateOrg(ctx context.Context, name string) (Org, error) {
 	return Org{ID: id, Name: name, CreatedAt: storedTime(now)}, nil
 }
 
+// OrgExists reports whether an org id exists. It is used to validate a user's
+// org assignment (RS2) without the fleet-count work GetOrg does.
+func (s *Store) OrgExists(ctx context.Context, id int64) (bool, error) {
+	var one int
+	err := s.db.QueryRowContext(ctx, `SELECT 1 FROM orgs WHERE id = ?`, id).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("store: org exists: %w", err)
+	}
+	return true, nil
+}
+
 // GetOrg returns one organisation with its fleet counts.
 func (s *Store) GetOrg(ctx context.Context, id int64) (Org, error) {
 	var (
@@ -55,10 +69,19 @@ func (s *Store) GetOrg(ctx context.Context, id int64) (Org, error) {
 	return o, nil
 }
 
-// ListOrgs returns every organisation ordered by name, with device_count,
-// online_count (StatusOf over a device scan) and open_alerts.
-func (s *Store) ListOrgs(ctx context.Context) ([]Org, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, name, created_at FROM orgs ORDER BY name, id`)
+// ListOrgs returns organisations ordered by name, with device_count,
+// online_count (StatusOf over a device scan) and open_alerts. visible
+// restricts the result to a caller's visible org set (RS2): nil = every org, a
+// non-nil but empty slice = none.
+func (s *Store) ListOrgs(ctx context.Context, visible []int64) ([]Org, error) {
+	q := `SELECT id, name, created_at FROM orgs`
+	var args []any
+	if clause, clauseArgs := orgInClause(`id`, visible); clause != "" {
+		q += ` WHERE ` + clause
+		args = append(args, clauseArgs...)
+	}
+	q += ` ORDER BY name, id`
+	rows, err := s.db.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("store: list orgs: %w", err)
 	}

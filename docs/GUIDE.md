@@ -372,6 +372,22 @@ are phase 2.
 - **Users** (admin only): add technicians with email, password (10+ characters) and role;
   disable them when they leave. Sessions are cookies; the dashboard sends a CSRF header on
   every write. Login is rate limited to 10 attempts per minute per IP.
+
+### Client access per technician
+
+By default every technician sees every client. To limit an **operator** or **viewer** to a
+subset of clients, use the **Edit access** control on their row in the Users page: turn off the
+**All clients** toggle and tick the clients they should have. Saving takes effect immediately —
+that technician's Fleet, Orgs, Alerts and Audit pages, the client filter dropdowns, and the
+summary counters then show only their clients, and anything outside their set (a device, a
+client, an alert, a remote shell or remote-desktop session) simply does not exist for them: the
+link returns "not found" rather than a "forbidden" they could use to probe. The create-user
+form offers the same All-clients toggle and client checklist when the role is operator or
+viewer. **Admins always see every client** and cannot be scoped; their row reads "All clients
+(admin)" with no editor. Promoting a scoped technician to admin gives them every client at once;
+demoting an admin keeps them on all clients until you scope them. Only admins create clients, so
+the "Add client" button is hidden for everyone else.
+
 - **Account** (click your email in the top bar): change your own password; your other
   sessions are signed out. A forgotten password is reset by an admin on the server with
   `msp-server user set-password --email ... --password-stdin`.

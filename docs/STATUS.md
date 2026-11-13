@@ -10,7 +10,7 @@ Every component and feature carries one label. Updated whenever something change
 | `NOT VERIFIED` | Built, but cannot be exercised in the build container (needs a real Windows machine or Android phone). Needs a manual check; see the "Manual test" column. |
 | `PLANNED` | In the plan (phase 2 or 3), not started. |
 
-Last update: 2026-11-13 (RS1 interactive remote shell, decision D3: the WebSocket relay, the Linux PTY agent, the xterm.js dashboard terminal and the store migration, proven end to end by `internal/e2e` `TestRemoteShellEndToEnd` — real server + real Linux agent + a real browser WebSocket client — plus `go test ./...` and `scripts/e2e.sh`; Windows ConPTY cross-builds but is NOT VERIFIED here. Before that: Android installed-apps inventory `facts.apps`, screenshots 18 and 19; RD1 remote desktop, phase A of D4, screenshots 16 and 17). Server, Linux agent and dashboard verified in a live run (see docs/screenshots/); the rows below marked WORKING without a screenshot are covered by `go test ./...` (internal/store, internal/server, internal/e2e) and `scripts/e2e.sh` ("E2E OK").
+Last update: 2026-11-13 (RS2 per-technician org scoping: a `user_orgs` table + `users.all_orgs` (migration `0004_user_orgs`), the visible-org set resolved per request and pushed into the store list queries, the 404-not-403 rule at every org/device endpoint, `all_orgs`/`org_ids` on `GET /users`, scoping on `POST /users`, `PUT /users/{id}/orgs`, audit `user.orgs_changed`, and the Users-page "Edit access" dialog — proven by `internal/e2e` `TestOrgScoping`, `internal/server` `TestDashboardOrgScoping`/`TestDashboardUserOrgsAdmin`, `internal/store` `user_orgs_test.go`, `web/src/lib/orgscope.test.ts`, plus `go test ./...`, `make web` and `scripts/e2e.sh`. Before that: RS1 interactive remote shell, decision D3: the WebSocket relay, the Linux PTY agent, the xterm.js dashboard terminal and the store migration, proven end to end by `internal/e2e` `TestRemoteShellEndToEnd` — real server + real Linux agent + a real browser WebSocket client — plus `go test ./...` and `scripts/e2e.sh`; Windows ConPTY cross-builds but is NOT VERIFIED here. Before that: Android installed-apps inventory `facts.apps`, screenshots 18 and 19; RD1 remote desktop, phase A of D4, screenshots 16 and 17). Server, Linux agent and dashboard verified in a live run (see docs/screenshots/); the rows below marked WORKING without a screenshot are covered by `go test ./...` (internal/store, internal/server, internal/e2e) and `scripts/e2e.sh` ("E2E OK").
 
 ## Components
 
@@ -89,11 +89,22 @@ Manual test for the `NOT VERIFIED` rows, in order: (1) on a host with Docker, fi
 | Dashboard: Remote shell button, `@xterm/xterm` terminal + fit/resize, status line, Close, Transcript link on finished shell commands, `?mock=1` echo shell, xterm CSS bundled into `app.css` | Dashboard | `WORKING` (`web/src/lib/shell.test.ts`; `make web` typecheck + build; live run with the real Linux agent: logged in, opened the terminal, typed `echo RS1-SHELL-OK` over the WebSocket relay and saw the output, closed, the audit `shell.opened`/`connected`/`closed` and `GET …/transcript` confirm it — `docs/screenshots/20-device-remote-shell-{desktop,phone}.png`, `21-audit-remote-shell-{desktop,phone}.png`) |
 | End-to-end: real server + real Linux agent + real browser WebSocket client, `echo RS1OK`, resize, close, command `done`, audit `shell.opened`/`connected`/`closed`, transcript contains the output | All | `WORKING` (`internal/e2e` `TestRemoteShellEndToEnd`) |
 
+## RS2: per-technician org scoping (phase 2)
+
+| Part | Component | Label |
+|---|---|---|
+| Store: migration `0004_user_orgs` (`user_orgs` table, `users.all_orgs` DEFAULT 1), `VisibleOrgIDs`/`UserCanSeeOrg`/`GetUserOrgs`/`SetUserOrgs` (admin forced all-orgs), `orgInClause` pushed into `ListOrgs`/`ListDevices`/`ListAlerts`/`ListAudit`/`Summary`, `OrgExists`/`GetAlert` for single-resource checks | Store | `WORKING` (`internal/store` `user_orgs_test.go`; `store_test.go` migrationCount 4; `go test ./...`) |
+| Server: visible-org set resolved per request (`dashVisibleOrgs`/`dashOrgVisible`), 404-not-403 at every org/device/alert/command/shell endpoint before any side effect, `all_orgs`/`org_ids` on `GET /users`, scoping fields on `POST /users`, `PUT /users/{id}/orgs` (reject scoping an admin, 404 missing user, 400 bad org), audit `user.orgs_changed` | Server | `WORKING` (`internal/server` `TestDashboardOrgScoping`, `TestDashboardUserOrgsAdmin`) |
+| Dashboard: Users-page "Edit access" dialog (All-clients toggle + per-client checklist) and create-user control, "Add client" hidden for non-admins, `OrgChecklist` component, `accessOf` helper, `?mock=1` scoped operator | Dashboard | `WORKING` (`web/src/lib/orgscope.test.ts`; `make web` typecheck + build + 38 web tests) |
+| End-to-end: real server through httptest, two orgs A/B each with a device, alert and audit history, an operator scoped to A — sees only A in orgs/devices/alerts/audit/summary, 404 with no side effect on every B endpoint, admin `PUT …/orgs` grants B and the operator then sees B | All | `WORKING` (`internal/e2e` `TestOrgScoping`) |
+| Screenshots: Edit-access dialog and a scoped operator's reduced Fleet | Dashboard | `NOT VERIFIED` (the headless browser/screenshot tooling is not available in this build container; the behaviour is covered by the tests above) |
+
 ## Later phases
 
 | Feature | Phase | Label |
 |---|---|---|
 | Interactive remote shell over WebSocket relay | 2 | `WORKING` (Linux, RS1 table above) / `NOT VERIFIED` (Windows ConPTY) |
+| Per-technician org scoping | 2 | `WORKING` (RS2 table above) |
 | Patch management, software deployment, file transfer | 2 | `PLANNED` |
 | Notifications: email, SMS, Slack; escalation; maintenance windows | 2 | `PLANNED` |
 | Script library, automations, policy groups, bulk actions | 2 | `PLANNED` |

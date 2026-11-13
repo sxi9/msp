@@ -7,13 +7,27 @@ import (
 )
 
 // Summary computes the dashboard counters in one device scan plus two counts.
-func (s *Store) Summary(ctx context.Context) (Summary, error) {
+// visible restricts every counter to a caller's visible org set (RS2): nil =
+// every org, a non-nil but empty slice = none.
+func (s *Store) Summary(ctx context.Context, visible []int64) (Summary, error) {
 	var sum Summary
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM orgs`).Scan(&sum.Orgs); err != nil {
+
+	orgWhere, orgArgs := orgInClause(`id`, visible)
+	orgQ := `SELECT COUNT(*) FROM orgs`
+	if orgWhere != "" {
+		orgQ += ` WHERE ` + orgWhere
+	}
+	if err := s.db.QueryRowContext(ctx, orgQ, orgArgs...).Scan(&sum.Orgs); err != nil {
 		return Summary{}, fmt.Errorf("store: summary: %w", err)
 	}
+
 	now := s.Now()
-	rows, err := s.db.QueryContext(ctx, `SELECT last_seen_at, interval_s FROM devices`)
+	devWhere, devArgs := orgInClause(`org_id`, visible)
+	devQ := `SELECT last_seen_at, interval_s FROM devices`
+	if devWhere != "" {
+		devQ += ` WHERE ` + devWhere
+	}
+	rows, err := s.db.QueryContext(ctx, devQ, devArgs...)
 	if err != nil {
 		return Summary{}, fmt.Errorf("store: summary: %w", err)
 	}
@@ -43,8 +57,14 @@ func (s *Store) Summary(ctx context.Context) (Summary, error) {
 	if err := rows.Err(); err != nil {
 		return Summary{}, fmt.Errorf("store: summary: %w", err)
 	}
-	if sum.OpenAlerts, err = s.CountOpenAlerts(ctx); err != nil {
-		return Summary{}, err
+
+	alertWhere, alertArgs := orgInClause(`org_id`, visible)
+	alertQ := `SELECT COUNT(*) FROM alerts WHERE resolved_at IS NULL`
+	if alertWhere != "" {
+		alertQ += ` AND ` + alertWhere
+	}
+	if err := s.db.QueryRowContext(ctx, alertQ, alertArgs...).Scan(&sum.OpenAlerts); err != nil {
+		return Summary{}, fmt.Errorf("store: summary: %w", err)
 	}
 	return sum, nil
 }

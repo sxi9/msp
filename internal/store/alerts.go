@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 )
@@ -66,9 +67,24 @@ func (s *Store) ResolveAlert(ctx context.Context, deviceID int64, typ string) er
 	return nil
 }
 
-// ListAlerts returns alerts newest first, optionally only open ones and
-// only for one org, with org_name and hostname joined in.
-func (s *Store) ListAlerts(ctx context.Context, openOnly bool, orgID *int64, limit int) ([]Alert, error) {
+// GetAlert returns one alert by id (with org_name and hostname joined in) for
+// a single-resource visibility check (RS2). ErrNotFound when it does not exist.
+func (s *Store) GetAlert(ctx context.Context, id int64) (Alert, error) {
+	a, err := scanAlert(s.db.QueryRowContext(ctx, alertSelect+` WHERE a.id = ?`, id))
+	if errors.Is(err, sql.ErrNoRows) {
+		return Alert{}, ErrNotFound
+	}
+	if err != nil {
+		return Alert{}, fmt.Errorf("store: get alert: %w", err)
+	}
+	return a, nil
+}
+
+// ListAlerts returns alerts newest first, optionally only open ones and only
+// for one org, with org_name and hostname joined in. visible restricts the
+// result to a caller's visible org set (RS2): nil = every org, a non-nil but
+// empty slice = none.
+func (s *Store) ListAlerts(ctx context.Context, openOnly bool, orgID *int64, visible []int64, limit int) ([]Alert, error) {
 	if limit <= 0 {
 		limit = 500
 	}
@@ -83,6 +99,10 @@ func (s *Store) ListAlerts(ctx context.Context, openOnly bool, orgID *int64, lim
 	if orgID != nil {
 		where = append(where, `a.org_id = ?`)
 		args = append(args, *orgID)
+	}
+	if clause, clauseArgs := orgInClause(`a.org_id`, visible); clause != "" {
+		where = append(where, clause)
+		args = append(args, clauseArgs...)
 	}
 	if len(where) > 0 {
 		q += ` WHERE ` + strings.Join(where, ` AND `)

@@ -8,7 +8,20 @@ export type CommandKind = 'exec' | 'script' | 'lock' | 'ping' | 'message' | 'she
 export type CommandStatus = 'queued' | 'sent' | 'done' | 'failed' | 'timeout' | 'lost' | 'cancelled';
 export type Severity = 'low' | 'medium' | 'high';
 
-export interface User { id: number; email: string; role: Role; created_at: string; disabled_at: string | null }
+export interface User {
+  id: number; email: string; role: Role; created_at: string; disabled_at: string | null;
+  /**
+   * Per-technician client access (RS2). Present on the admin users list
+   * (GET /api/v1/users); absent on /me and /login, which carry only the session
+   * identity. `true` = this user sees every client org; admins are always `true`.
+   */
+  all_orgs?: boolean;
+  /** The user's assigned client org ids; `[]` (or absent) when all_orgs (RS2). */
+  org_ids?: number[];
+}
+
+/** The PUT /api/v1/users/{id}/orgs body and the create-user access block (RS2). */
+export interface OrgAssignment { all_orgs: boolean; org_ids: number[] }
 
 export interface Summary { orgs: number; devices: number; online: number; offline: number; pending: number; open_alerts: number }
 

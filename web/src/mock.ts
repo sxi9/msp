@@ -8,8 +8,15 @@ interface Reply { status: number; body: unknown }
 
 const iso = (msAgo: number) => new Date(Date.now() - msAgo).toISOString();
 const role = (new URLSearchParams(location.search).get('role') ?? 'admin') as User['role'];
-const me: User = { id: 1, email: 'admin@example.com', role, created_at: iso(86400e3 * 30), disabled_at: null };
-const users: User[] = [me, { id: 2, email: 'tech@example.com', role: 'operator', created_at: iso(86400e3 * 9), disabled_at: null }];
+const me: User = { id: 1, email: 'admin@example.com', role, created_at: iso(86400e3 * 30), disabled_at: null, all_orgs: true, org_ids: [] };
+const users: User[] = [
+  me,
+  // A scoped operator: sees only Acme Dental (org 1), so the Edit-access editor
+  // opens with "All clients" off and that one org checked (RS2).
+  { id: 2, email: 'tech@example.com', role: 'operator', created_at: iso(86400e3 * 9), disabled_at: null, all_orgs: false, org_ids: [1] },
+  // An all-clients viewer, for contrast in the list.
+  { id: 3, email: 'viewer@example.com', role: 'viewer', created_at: iso(86400e3 * 4), disabled_at: null, all_orgs: true, org_ids: [] },
+];
 const orgs: Org[] = [
   { id: 1, name: 'Acme Dental', created_at: iso(86400e3 * 20), device_count: 0, online_count: 0, open_alerts: 0 },
   { id: 2, name: 'Zed Legal', created_at: iso(86400e3 * 12), device_count: 0, online_count: 0, open_alerts: 0 },
@@ -89,6 +96,10 @@ const androidFacts = (d: Device) => ({
 let nextId = 100;
 const log = (action: string, target_type: string, target_id: number | null, org_id: number | null, detail: Record<string, unknown> = {}) =>
   audit.unshift({ id: nextId++, at: iso(0), actor_type: 'user', actor_id: me.id, actor_label: me.email, org_id, action, target_type, target_id, ip: '127.0.0.1', detail });
+
+// Dedupe + sort the org_ids of an RS2 access payload, dropping non-integers.
+const normIds = (raw: unknown): number[] =>
+  Array.isArray(raw) ? [...new Set(raw.map(Number).filter((n) => Number.isInteger(n)))].sort((a, b) => a - b) : [];
 
 const ok = (body: unknown, status = 200): Reply => ({ status, body });
 const err = (status: number, error: string, detail = ''): Reply => ({ status, body: { error, detail } });
@@ -279,9 +290,29 @@ function route(method: string, path: string, body: unknown): Reply {
     const email = String(b.email ?? '').trim().toLowerCase(), password = String(b.password ?? ''), rl = String(b.role ?? '');
     if (!email.includes('@') || password.length < 10 || !['admin', 'operator', 'viewer'].includes(rl)) return err(400, 'invalid_request', 'email, password >= 10 chars and a valid role are required');
     if (users.some((u) => u.email === email)) return err(409, 'conflict');
-    const user: User = { id: nextId++, email, role: rl as User['role'], created_at: iso(0), disabled_at: null };
+    // admins are always all-orgs; operator/viewer may carry all_orgs/org_ids (RS2).
+    const scopable = rl === 'operator' || rl === 'viewer';
+    const wantAll = b.all_orgs === undefined ? true : b.all_orgs === true;
+    const ids = normIds(b.org_ids);
+    if (scopable && !wantAll) { for (const id of ids) if (!orgs.some((o) => o.id === id)) return err(400, 'invalid_request', `org ${id} does not exist`); }
+    const user: User = {
+      id: nextId++, email, role: rl as User['role'], created_at: iso(0), disabled_at: null,
+      all_orgs: scopable ? wantAll : true, org_ids: scopable && !wantAll ? ids : [],
+    };
     users.push(user); log('user.created', 'user', user.id, null, { email, role: rl });
     return ok({ user }, 201);
+  }
+  if ((x = m(/^\/api\/v1\/users\/(\d+)\/orgs$/))) {
+    const r = needRole('admin'); if (r) return r;
+    const u = users.find((u) => u.id === Number(x![1])); if (!u) return err(404, 'not_found');
+    const wantAll = b.all_orgs === true;
+    if (u.role === 'admin' && !wantAll) return err(400, 'invalid_request', 'admins cannot be scoped');
+    const ids = normIds(b.org_ids);
+    if (!wantAll) { for (const id of ids) if (!orgs.some((o) => o.id === id)) return err(400, 'invalid_request', `org ${id} does not exist`); }
+    u.all_orgs = u.role === 'admin' ? true : wantAll;
+    u.org_ids = u.role === 'admin' || wantAll ? [] : ids;
+    log('user.orgs_changed', 'user', u.id, null, { all_orgs: u.all_orgs, org_ids: u.org_ids });
+    return ok(null, 204);
   }
   if ((x = m(/^\/api\/v1\/users\/(\d+)\/disable$/))) {
     const r = needRole('admin'); if (r) return r;

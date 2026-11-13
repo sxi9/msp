@@ -40,6 +40,10 @@ func (s *Server) handleCreateCommand(w http.ResponseWriter, r *http.Request) {
 		s.dashStoreError(w, err, "get device")
 		return
 	}
+	// 404 across orgs before any side effect, role result or 409 (RS2).
+	if !s.dashOrgVisible(w, r, dev.OrgID) {
+		return
+	}
 	var cmd protocol.Command
 	if err := readJSON(r, &cmd); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
@@ -173,8 +177,12 @@ func (s *Server) handleListCommands(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx := r.Context()
-	if _, err := s.st.GetDevice(ctx, id); err != nil {
+	dev, err := s.st.GetDevice(ctx, id)
+	if err != nil {
 		s.dashStoreError(w, err, "get device")
+		return
+	}
+	if !s.dashOrgVisible(w, r, dev.OrgID) {
 		return
 	}
 	cmds, err := s.st.ListCommands(ctx, id, dashLimit(r, 50, 200))
@@ -200,6 +208,9 @@ func (s *Server) handleGetCommand(w http.ResponseWriter, r *http.Request) {
 	cmd, err := s.st.GetCommand(r.Context(), id)
 	if err != nil {
 		s.dashStoreError(w, err, "get command")
+		return
+	}
+	if !s.dashOrgVisible(w, r, cmd.OrgID) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"command": s.enrichCommand(r.Context(), cmd)})

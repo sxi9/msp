@@ -792,7 +792,7 @@ func TestDashboardUsers(t *testing.T) {
 	if err := json.Unmarshal(body, &list); err != nil || len(list.Users) != 3 {
 		t.Fatalf("list users %s (%v)", body, err)
 	}
-	if got := dashKeys(dashDecode(t, body)["users"].([]any)[0].(map[string]any)); strings.Join(got, ",") != "created_at,disabled_at,email,id,role" {
+	if got := dashKeys(dashDecode(t, body)["users"].([]any)[0].(map[string]any)); strings.Join(got, ",") != "all_orgs,created_at,disabled_at,email,id,org_ids,role" {
 		t.Fatalf("user keys %v", got)
 	}
 

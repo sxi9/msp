@@ -22,10 +22,20 @@ func (s *Server) handleListDevices(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_request", "status must be online, offline or pending")
 		return
 	}
+	visible, ok := s.dashVisibleOrgs(w, r)
+	if !ok {
+		return
+	}
+	// An explicit ?org_id= that is not visible gets the same 404 as a
+	// non-existent org (RS2), before the list is computed.
+	if orgID != nil && !s.dashOrgVisible(w, r, *orgID) {
+		return
+	}
 	devices, err := s.st.ListDevices(r.Context(), store.DeviceFilter{
-		OrgID:  orgID,
-		Status: status,
-		Query:  strings.TrimSpace(r.URL.Query().Get("q")),
+		OrgID:       orgID,
+		Status:      status,
+		Query:       strings.TrimSpace(r.URL.Query().Get("q")),
+		VisibleOrgs: visible,
 	})
 	if err != nil {
 		s.log.Error("list devices", "err", err)
@@ -65,8 +75,11 @@ func (s *Server) handleGetDevice(w http.ResponseWriter, r *http.Request) {
 		s.dashStoreError(w, err, "get device")
 		return
 	}
+	if !s.dashOrgVisible(w, r, dev.OrgID) {
+		return
+	}
 
-	all, err := s.st.ListAlerts(ctx, true, &dev.OrgID, 0)
+	all, err := s.st.ListAlerts(ctx, true, &dev.OrgID, nil, 0)
 	if err != nil {
 		s.log.Error("list alerts", "device", id, "err", err)
 		writeError(w, http.StatusInternalServerError, "internal", "")
@@ -110,8 +123,12 @@ func (s *Server) handleListHeartbeats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx := r.Context()
-	if _, err := s.st.GetDevice(ctx, id); err != nil {
+	dev, err := s.st.GetDevice(ctx, id)
+	if err != nil {
 		s.dashStoreError(w, err, "get device")
+		return
+	}
+	if !s.dashOrgVisible(w, r, dev.OrgID) {
 		return
 	}
 	hbs, err := s.st.ListHeartbeats(ctx, id, dashLimit(r, 120, 1000))
@@ -140,6 +157,9 @@ func (s *Server) handleRevokeDevice(w http.ResponseWriter, r *http.Request) {
 		s.dashStoreError(w, err, "get device")
 		return
 	}
+	if !s.dashOrgVisible(w, r, dev.OrgID) {
+		return
+	}
 	if err := s.st.RevokeDevice(ctx, id); err != nil {
 		s.dashStoreError(w, err, "revoke device")
 		return
@@ -163,6 +183,9 @@ func (s *Server) handleDeleteDevice(w http.ResponseWriter, r *http.Request) {
 	dev, err := s.st.GetDevice(ctx, id)
 	if err != nil {
 		s.dashStoreError(w, err, "get device")
+		return
+	}
+	if !s.dashOrgVisible(w, r, dev.OrgID) {
 		return
 	}
 	if err := s.st.DeleteDevice(ctx, id); err != nil {

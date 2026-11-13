@@ -20,7 +20,7 @@ An unticked box with a note is built but needs real hardware, or is not started.
 - [x] Agent downloads at /dl/ with SHA256SUMS
 - [x] Graceful shutdown releases parked long-polls
 - [x] Command preset library: presets.json, live reload, served to the dashboard
-- [ ] Per-technician org scoping (all staff see all clients in phase 1) — moved to phase 2
+- [x] Per-technician org scoping (RS2): `user_orgs` + `users.all_orgs`, visible-org set in the store list queries, 404-not-403 at every org/device endpoint, `all_orgs`/`org_ids` on `GET /users`, `PUT /users/{id}/orgs`, audit `user.orgs_changed`; proven by `internal/e2e` `TestOrgScoping` and `TestDashboardOrgScoping`
 
 ### Desktop agent, Linux
 - [x] Enroll, config with 0600 permissions, device token
@@ -67,7 +67,7 @@ An unticked box with a note is built but needs real hardware, or is not started.
 
 ## Phase 2 — Operations
 - [x] Interactive remote shell in the browser over a WebSocket relay (PTY / ConPTY), audited and transcribed (RS1, decision D3; Linux verified end to end by `internal/e2e` `TestRemoteShellEndToEnd`; Windows ConPTY cross-builds but needs a Windows host)
-- [ ] Per-technician org scoping and client-level permissions
+- [x] Per-technician org scoping (RS2): scope an operator/viewer to a chosen set of client orgs, enforced in SQL with the 404-not-403 rule at every endpoint (client-facing self-service logins remain future work)
 - [ ] Patch status and install: Windows Update, apt
 - [ ] Software deployment and file transfer
 - [ ] Installed-software inventory on desktops

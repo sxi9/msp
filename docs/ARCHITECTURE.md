@@ -203,3 +203,40 @@ is on the path and records the whole session.
   agent never writes shell output to its logs. The agent posts a result only for its two refuse
   cases (a shell already running, or a PTY that will not open); otherwise the server completes the
   command when the relay closes.
+
+## Per-technician org scoping (RS2, phase 2)
+
+A second isolation layer on top of the existing org data model, with no new transport and no
+change to the agent API. Every piece of data already belongs to one org; RS2 adds, per staff
+user, a *visible org set* and enforces it on every read and write.
+
+```
+ session user ──► store.VisibleOrgIDs(userID) ──► (ids, all)
+                  all = role==admin || users.all_orgs==1       ids = user_orgs rows otherwise
+                      │                                             │
+   list endpoints ────┘  WHERE org_id IN (ids)           single-resource ──► UserCanSeeOrg ──► 404 if not
+   (devices, orgs, alerts, audit, summary)               (device, command, alert, token, org)
+```
+
+- **Model**: migration `0004_user_orgs` adds `user_orgs(user_id, org_id)` (cascading FKs) and
+  `users.all_orgs INTEGER NOT NULL DEFAULT 1`, so every existing user keeps full visibility on
+  upgrade. `0001_init.sql` is never edited. A user is unrestricted when `role == admin` or
+  `all_orgs == 1`; otherwise they see exactly the `user_orgs` rows. Admins are always all-orgs and
+  cannot be scoped (enforced in the store).
+- **One rule, one place** (`internal/store/user_orgs.go`): `VisibleOrgIDs`, `UserCanSeeOrg`,
+  `GetUserOrgs`, `SetUserOrgs`. The filter is pushed into the list queries (`orgInClause` → a SQL
+  `org_id IN (…)` fragment on `ListOrgs`, `ListDevices`, `ListAlerts`, `ListAudit`, `Summary`), so
+  large lists are never filtered in Go after the fact; single-resource loads check the loaded row's
+  org against the caller.
+- **Server** (`dashboard.go` helpers `dashVisibleOrgs`/`dashOrgVisible`): the caller's set is
+  resolved once per request from the session user. The visibility check follows the **404-not-403
+  rule** — a scoped user reaching a resource outside their set gets `404 not_found`, resolved
+  **before** any side effect, role result or 409, so another org's resources are indistinguishable
+  from ones that do not exist. Role (`403`) and visibility (`404`) stay independent checks.
+- **Admin management**: `GET /users` exposes `all_orgs`/`org_ids`, `POST /users` can scope an
+  operator/viewer at creation, `PUT /users/{id}/orgs` replaces the assignment (audit
+  `user.orgs_changed`). A role change is reflected immediately by the resolution logic (a promoted
+  scoped user becomes all-orgs; a demoted admin keeps all_orgs until scoped), so no role-change
+  endpoint is needed.
+- **Package rules unchanged**: this is store queries plus server handlers and a Preact dialog; no
+  new dependency, and `internal/agent` is untouched.

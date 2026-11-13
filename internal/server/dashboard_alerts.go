@@ -23,7 +23,14 @@ func (s *Server) handleListAlerts(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_request", "org_id must be a positive integer")
 		return
 	}
-	alerts, err := s.st.ListAlerts(r.Context(), openOnly, orgID, 500)
+	visible, vok := s.dashVisibleOrgs(w, r)
+	if !vok {
+		return
+	}
+	if orgID != nil && !s.dashOrgVisible(w, r, *orgID) {
+		return
+	}
+	alerts, err := s.st.ListAlerts(r.Context(), openOnly, orgID, visible, 500)
 	if err != nil {
 		s.log.Error("list alerts", "err", err)
 		writeError(w, http.StatusInternalServerError, "internal", "")
@@ -51,21 +58,21 @@ func (s *Server) handleAckAlert(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx := r.Context()
 
-	// The store has no single-alert getter; find the row among the open
-	// alerts so the audit entry carries its org and device.
-	var orgID *int64
-	detail := map[string]any{}
-	if open, err := s.st.ListAlerts(ctx, true, nil, 0); err == nil {
-		for _, a := range open {
-			if a.ID == id {
-				org := a.OrgID
-				orgID = &org
-				detail["device_id"] = a.DeviceID
-				detail["hostname"] = a.Hostname
-				detail["type"] = a.Type
-				break
-			}
-		}
+	// Resolve the alert first so an ack across orgs 404s before the side
+	// effect (RS2), and so the audit entry carries its org and device.
+	alert, err := s.st.GetAlert(ctx, id)
+	if err != nil {
+		s.dashStoreError(w, err, "get alert")
+		return
+	}
+	if !s.dashOrgVisible(w, r, alert.OrgID) {
+		return
+	}
+	orgID := alert.OrgID
+	detail := map[string]any{
+		"device_id": alert.DeviceID,
+		"hostname":  alert.Hostname,
+		"type":      alert.Type,
 	}
 
 	if err := s.st.AckAlert(ctx, id, u.ID); err != nil {
@@ -73,6 +80,6 @@ func (s *Server) handleAckAlert(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	actor := u.ID
-	s.audit(ctx, "user", &actor, orgID, "alert.ack", "alert", &id, clientIP(r), detail)
+	s.audit(ctx, "user", &actor, &orgID, "alert.ack", "alert", &id, clientIP(r), detail)
 	w.WriteHeader(http.StatusNoContent)
 }

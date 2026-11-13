@@ -68,8 +68,25 @@ key); the debug build is lab-only and never published (`docs/OPS.md` section 3).
 
 `viewer` < `operator` < `admin`. Viewers read everything and change nothing. Operators also
 create enrollment tokens, queue commands (exec, script, lock, ping, message) and acknowledge
-alerts. Admins also manage orgs, users, and revoke or delete devices. All staff see all orgs
-in phase 1; per-client logins are phase 2.
+alerts. Admins also manage orgs, users, and revoke or delete devices.
+
+**Tenant isolation now has two layers (RS2).** The first is data ownership: every device,
+command, alert, token and audit row belongs to exactly one org, and the server never joins
+across the tenant tree. The second is **per-user visibility**: an operator or viewer can be
+scoped to a chosen set of orgs (`all_orgs = 0` plus the `user_orgs` rows), and then sees and
+acts on nothing outside that set. A user's visible org set is **all orgs** when the role is
+admin or `all_orgs = 1`, otherwise exactly the `user_orgs` rows; admins are always all-orgs and
+cannot be scoped. The set is resolved once per request from the session user and pushed into the
+store queries (`org_id IN (…)`) so lists are filtered in SQL, not after the fact.
+
+The visibility layer follows a strict **404-not-403 rule**: a scoped user who reaches a
+resource outside their set gets the **same response an unrelated resource would give** —
+`404 not_found`, never a distinguishable "exists but forbidden". Every org- and device-scoped
+endpoint resolves the resource, then returns `404` **before** any side effect, role-check result
+or `409`, so a scoped user cannot tell that a device, command, alert or org in another org even
+exists. Role (`403`) and visibility (`404`) are independent checks; visibility is enforced first.
+The agent API (`/api/agent/v1/*`) is device-token auth and is unchanged: scoping is a
+staff-visibility feature only.
 
 ## 5. Agent transport policy
 
@@ -144,9 +161,10 @@ MSP hosts. What that changes:
   (`docs/RUSTDESK-BRANDING.md`) and a per-session one-time password are the follow-ups.
 - **Who can connect.** `POST /api/v1/devices/{id}/remote-desktop` is operator/admin only,
   CSRF-protected, and answers only for a device that is enrolled on this server and not
-  revoked (404 otherwise: the same scope rule as lock). Staff accounts are not scoped to an
-  org: every operator and admin of the MSP can reach every org's devices, as for every other
-  action, until the org-scoped logins of section 11 exist. The MSP server never joins the
+  revoked (404 otherwise: the same scope rule as lock). The same per-user visibility layer
+  applies **(RS2, section 4)**: a scoped operator reaching a device outside their org set gets
+  `404 not_found`, resolved before the request has any effect; an all-orgs operator or admin
+  reaches every org's devices as before. The MSP server never joins the
   session: it hands the technician's browser `rustdesk://connect/<id>` and the technician's
   own client, configured for the same relay and key, does the rest. Possession of a staff
   account plus the device password is what opens a screen; neither alone does.
@@ -232,7 +250,9 @@ the Nth client, in this order:
 2. **Command signing**: operator-held keys sign queued commands and agents verify them, so a
    server compromise alone cannot push commands.
 3. **Device token rotation** with overlap, and Keystore wrapping on Android.
-4. **Org-scoped logins** so a client's own staff see only their devices, and dashboard IP
+4. **Per-technician org scoping** — done **(RS2)**: an operator or viewer can be restricted to a
+   chosen set of client orgs (section 4), enforced in SQL with the 404-not-403 rule at every
+   endpoint. Still outstanding here: client-facing self-service logins and dashboard IP
    allowlisting at the proxy.
 5. Windows job-object process-tree kill and a reviewed script library.
 

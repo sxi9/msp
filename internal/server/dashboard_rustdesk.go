@@ -25,12 +25,13 @@ func (s *Server) handleRustdeskInfo(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleRemoteDesktop is POST /api/v1/devices/{id}/remote-desktop (operator).
-// 404 when the device is unknown or revoked (same scope rule as lock: every
-// enrolled, non-revoked device of every org; staff accounts are not scoped
-// to an org set, docs/SECURITY.md section 4), 409 rustdesk_disabled when the
-// server has no relay, 409 no_rustdesk_id when the agent never reported one.
-// The id is whatever the agent asserted in its facts (digits only): the
-// server cannot verify that it belongs to this machine.
+// Like every device-scoped endpoint it resolves the device, then returns 404
+// not_found if the device is unknown, in an org the caller cannot see, or
+// revoked — before any side effect (RS2 per-user visibility and the
+// 404-not-403 rule, docs/SECURITY.md sections 4 and 8). 409 rustdesk_disabled
+// when the server has no relay, 409 no_rustdesk_id when the agent never
+// reported one. The id is whatever the agent asserted in its facts (digits
+// only): the server cannot verify that it belongs to this machine.
 func (s *Server) handleRemoteDesktop(w http.ResponseWriter, r *http.Request) {
 	id, ok := pathInt(r, "id")
 	if !ok {
@@ -41,6 +42,9 @@ func (s *Server) handleRemoteDesktop(w http.ResponseWriter, r *http.Request) {
 	dev, err := s.st.GetDevice(ctx, id)
 	if err != nil {
 		s.dashStoreError(w, err, "get device")
+		return
+	}
+	if !s.dashOrgVisible(w, r, dev.OrgID) {
 		return
 	}
 	if dev.Revoked {

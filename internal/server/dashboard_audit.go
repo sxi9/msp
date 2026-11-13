@@ -24,7 +24,14 @@ func (s *Server) handleListAudit(w http.ResponseWriter, r *http.Request) {
 		}
 		before = n
 	}
-	entries, err := s.st.ListAudit(r.Context(), dashLimit(r, 200, 1000), orgID, before)
+	visible, ok := s.dashVisibleOrgs(w, r)
+	if !ok {
+		return
+	}
+	if orgID != nil && !s.dashOrgVisible(w, r, *orgID) {
+		return
+	}
+	entries, err := s.st.ListAudit(r.Context(), dashLimit(r, 200, 1000), orgID, visible, before)
 	if err != nil {
 		s.log.Error("list audit", "err", err)
 		writeError(w, http.StatusInternalServerError, "internal", "")

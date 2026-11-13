@@ -230,7 +230,7 @@ func (e *testEnv) command(id int64) store.Command {
 
 func (e *testEnv) auditActions(action string) []store.AuditEntry {
 	e.t.Helper()
-	entries, err := e.st.ListAudit(context.Background(), 500, nil, 0)
+	entries, err := e.st.ListAudit(context.Background(), 500, nil, nil, 0)
 	if err != nil {
 		e.t.Fatalf("ListAudit: %v", err)
 	}

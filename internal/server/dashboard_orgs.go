@@ -18,9 +18,13 @@ const (
 	dashMaxTTLH     = 8760
 )
 
-// handleListOrgs is GET /api/v1/orgs.
+// handleListOrgs is GET /api/v1/orgs: only the caller's visible orgs (RS2).
 func (s *Server) handleListOrgs(w http.ResponseWriter, r *http.Request) {
-	orgs, err := s.st.ListOrgs(r.Context())
+	visible, ok := s.dashVisibleOrgs(w, r)
+	if !ok {
+		return
+	}
+	orgs, err := s.st.ListOrgs(r.Context(), visible)
 	if err != nil {
 		s.log.Error("list orgs", "err", err)
 		writeError(w, http.StatusInternalServerError, "internal", "")
@@ -79,6 +83,9 @@ func (s *Server) handleGetOrg(w http.ResponseWriter, r *http.Request) {
 		s.dashStoreError(w, err, "get org")
 		return
 	}
+	if !s.dashOrgVisible(w, r, org.ID) {
+		return
+	}
 	tokens, err := s.st.ListEnrollmentTokens(ctx, id)
 	if err != nil {
 		s.log.Error("list enrollment tokens", "org", id, "err", err)
@@ -133,6 +140,9 @@ func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request) {
 		s.dashStoreError(w, err, "get org")
 		return
 	}
+	if !s.dashOrgVisible(w, r, id) {
+		return
+	}
 	actor, _ := dashActor(r)
 	plain, tok, err := s.st.CreateEnrollmentToken(ctx, id, label, req.MaxUses, time.Duration(req.TTLHours)*time.Hour, actor)
 	if err != nil {
@@ -161,6 +171,9 @@ func (s *Server) handleRevokeToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx := r.Context()
+	if !s.dashOrgVisible(w, r, id) {
+		return
+	}
 	if err := s.st.RevokeEnrollmentToken(ctx, id, tid); err != nil {
 		s.dashStoreError(w, err, "revoke enrollment token")
 		return

@@ -58,6 +58,7 @@ func registerDashboard(s *Server, mux *http.ServeMux) {
 	with(RoleAdmin, "GET /api/v1/users", s.handleListUsers)
 	with(RoleAdmin, "POST /api/v1/users", s.handleCreateUser)
 	with(RoleAdmin, "POST /api/v1/users/{id}/disable", s.handleDisableUser)
+	with(RoleAdmin, "PUT /api/v1/users/{id}/orgs", s.handleSetUserOrgs)
 
 	// Static: agent downloads and the SPA (index.html fallback).
 	mux.HandleFunc("GET /dl/{file...}", s.handleDownload)
@@ -69,15 +70,70 @@ func (s *Server) dashRoute(role string, h http.HandlerFunc) http.Handler {
 	return s.sessionAuth(s.csrf(s.requireRole(role, h)))
 }
 
-// handleSummary is GET /api/v1/summary.
+// handleSummary is GET /api/v1/summary: counters over the caller's visible
+// orgs only (RS2).
 func (s *Server) handleSummary(w http.ResponseWriter, r *http.Request) {
-	sum, err := s.st.Summary(r.Context())
+	visible, ok := s.dashVisibleOrgs(w, r)
+	if !ok {
+		return
+	}
+	sum, err := s.st.Summary(r.Context(), visible)
 	if err != nil {
 		s.log.Error("summary", "err", err)
 		writeError(w, http.StatusInternalServerError, "internal", "")
 		return
 	}
 	writeJSON(w, http.StatusOK, sum)
+}
+
+// dashVisibleOrgs resolves the session user's visible org set for a list query
+// (RS2). The result is passed straight into the store list filters: nil means
+// every org (an admin or an all_orgs user), a non-nil (possibly empty) slice
+// is the exact visible set, where empty means the user sees no org yet. ok is
+// false only on a store error, after it has written the response.
+func (s *Server) dashVisibleOrgs(w http.ResponseWriter, r *http.Request) (visible []int64, ok bool) {
+	u := userFrom(r.Context())
+	if u == nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized", "")
+		return nil, false
+	}
+	ids, all, err := s.st.VisibleOrgIDs(r.Context(), u.ID)
+	if err != nil {
+		s.log.Error("visible orgs", "user", u.ID, "err", err)
+		writeError(w, http.StatusInternalServerError, "internal", "")
+		return nil, false
+	}
+	if all {
+		return nil, true
+	}
+	if ids == nil {
+		ids = []int64{}
+	}
+	return ids, true
+}
+
+// dashOrgVisible reports whether the session user may see orgID. When not, it
+// writes 404 not_found — the same response an unrelated resource gives, so a
+// scoped user cannot tell a resource in another org exists (RS2). ok is false
+// (response already written) on a store error or an invisible org, so the
+// caller returns at once, before any side effect.
+func (s *Server) dashOrgVisible(w http.ResponseWriter, r *http.Request, orgID int64) (ok bool) {
+	u := userFrom(r.Context())
+	if u == nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized", "")
+		return false
+	}
+	can, err := s.st.UserCanSeeOrg(r.Context(), u.ID, orgID)
+	if err != nil {
+		s.log.Error("org visibility", "user", u.ID, "org", orgID, "err", err)
+		writeError(w, http.StatusInternalServerError, "internal", "")
+		return false
+	}
+	if !can {
+		writeError(w, http.StatusNotFound, "not_found", "")
+		return false
+	}
+	return true
 }
 
 // dashBaseURL is the public base URL used in install one-liners: cfg.BaseURL
