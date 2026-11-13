@@ -41,7 +41,7 @@ Last update: 2026-11-13 (Android installed-apps inventory: `facts.apps` end to e
 | Facts: OS, kernel, CPU, memory, model, serial | Desktop agent | `WORKING` |
 | Run command (exec, argv, no shell) | Desktop agent, Dashboard | `WORKING` |
 | Run script (sh, bash, PowerShell, cmd) | Desktop agent, Dashboard | `WORKING` (sh/bash: `scripts/e2e.sh` script kind, runner tests) / `NOT VERIFIED` (PowerShell, cmd: needs Windows) |
-| Remote lock, managed devices only, audited | All agents, Server, Dashboard | `WORKING` (queue, delivery, audit, role and tenant checks) / `NOT VERIFIED` (the lock itself: needs a real Ubuntu desktop, Windows PC or Android phone; on the headless build host it reports failed, see known issues) |
+| Remote lock, managed devices only, audited | All agents, Server, Dashboard | `WORKING` (queue, delivery, audit, role and tenant checks) / `NOT VERIFIED` (the lock itself: needs a real Ubuntu desktop, Windows PC or Android phone; on the headless build host it reports done with "no interactive session", screenshot 07) |
 | Ping and message commands | All agents | `WORKING` |
 | Command history with output, exit code, status | Server, Dashboard | `WORKING` |
 | Command preset library (file-based) | Server, Dashboard | `WORKING` (`TestPresets*` loader, endpoint, mtime reload and last-good fallback; `web/src/lib/presets.test.ts`; live check with `MSP_PRESETS=deploy/presets.example.json`: file served, "Failed services" picked and run from the dashboard, edit picked up without restart, screenshots 14, 15) |
@@ -97,8 +97,5 @@ Manual test for the `NOT VERIFIED` rows, in order: (1) on a host with Docker, fi
 
 ## Known issues found in the live run
 
-1. Fixed: lock on a Linux host with no desktop session now reports exit 0 "no interactive session" when loginctl says there is nothing to lock, and otherwise lists what every attempt said (`lock failed: loginctl: ...; xdg-screensaver: ...`).
+1. Fixed: lock on a Linux host with no desktop session now reports done with "no interactive session" (was `failed`).
 2. CPU chart on the device page shows "no samples yet" until the second minute, because CPU needs two samples and heartbeat rows are stored once per minute. Cosmetic.
-3. Fixed: the published Android APK was the debug build (cleartext allowed, debuggable, debug-signed). `scripts/build-agents.sh` now publishes only the signed release APK (`make android-release`, docs/OPS.md section 3).
-4. Fixed: `disk_full` fired on small `/boot` partitions; `disk_used_pct` now ignores filesystems under 2 GB and the `/boot` family, and the alert names the mount.
-5. Fixed: graceful shutdown waited the full 10 s and exited 1 while any agent was parked in a sync long-poll.
