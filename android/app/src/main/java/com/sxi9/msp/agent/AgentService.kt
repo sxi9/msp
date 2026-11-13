@@ -27,7 +27,8 @@ class AgentService : Service() {
         const val CHANNEL = "msp_agent"
         const val NOTIFICATION_ID = 1
         private const val TAG = "msp-agent"
-        private const val FACTS_EVERY = 60
+        // docs/PROTOCOL.md 3.3: facts on the first sync after start and every 120th sync.
+        private const val FACTS_EVERY = 120
         private const val BACKOFF_MIN_S = 30
         private const val BACKOFF_MAX_S = 600
         private const val UNAUTHORIZED_RETRY_S = 300

@@ -18,3 +18,8 @@ android/.gradle/
 android/build/
 android/app/build/
 android/local.properties
+
+# android release signing material is never committed (docs/OPS.md section 3)
+*.jks
+*.keystore
+*.p12

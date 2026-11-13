@@ -28,6 +28,27 @@ const PRESETS: Record<'linux' | 'windows', Preset[]> = {
 };
 const SHELLS: Record<string, string[]> = { linux: ['sh', 'bash'], windows: ['powershell', 'cmd'] };
 
+/** Readable labels for the protocol's facts keys; unknown keys show as-is. */
+const FACT_LABELS: Record<string, string> = {
+  kernel: 'Kernel', cpu_model: 'CPU', cpu_count: 'CPUs', mem_total_mb: 'Memory',
+  manufacturer: 'Manufacturer', model: 'Model', serial: 'Serial', ips: 'IPs',
+};
+
+/** One facts value as text: arrays joined, empty strings and nulls as an em dash, memory in MB. */
+export function factText(key: string, v: unknown): string {
+  if (v === null || v === undefined || v === '') return '—';
+  if (Array.isArray(v)) return v.length ? v.join(', ') : '—';
+  if (key === 'mem_total_mb' && typeof v === 'number') return `${v} MB`;
+  return String(v);
+}
+
+/** Timeout field text -> seconds for the request: empty or 0 means the default 60, else clamped 1..3600. */
+export function parseTimeout(text: string): number {
+  const n = Math.floor(Number(text));
+  if (!Number.isFinite(n) || n <= 0) return 60;
+  return Math.min(3600, n);
+}
+
 /** One-line description of a command for the history table. */
 export function describe(c: Command): string {
   switch (c.kind) {
@@ -117,7 +138,7 @@ export function Device({ id, user }: { id: number; user: User }) {
         <div>
           <h2>Facts</h2>
           <dl class="kv">
-            {Object.entries(facts).map(([k, v]) => [<dt key={`k${k}`}>{k}</dt>, <dd key={`v${k}`}>{Array.isArray(v) ? v.join(', ') : String(v ?? '—')}</dd>])}
+            {Object.entries(facts).map(([k, v]) => [<dt key={`k${k}`} title={k}>{FACT_LABELS[k] ?? k}</dt>, <dd key={`v${k}`}>{factText(k, v)}</dd>])}
             {Object.keys(facts).length === 0 && <dd class="muted">No facts reported yet.</dd>}
           </dl>
         </div>
@@ -173,7 +194,9 @@ function Console({ device, onQueue }: { device: DeviceT; onQueue: (c: NewCommand
   const [mode, setMode] = useState<'exec' | 'script'>('exec');
   const [text, setText] = useState('');
   const [shell, setShell] = useState(shells[0]);
-  const [timeout, setTimeoutS] = useState(60);
+  // The raw field text is kept so Backspace can empty it; it is parsed on submit.
+  const [timeoutText, setTimeoutText] = useState('60');
+  const timeout = parseTimeout(timeoutText);
   const [busy, setBusy] = useState(false);
   const argv = parseArgv(text);
   const usePreset = (i: number) => {
@@ -206,7 +229,7 @@ function Console({ device, onQueue }: { device: DeviceT; onQueue: (c: NewCommand
           <option value={-1}>Presets…</option>
           {PRESETS[platform].map((p, i) => <option key={p.label} value={i}>{p.label}</option>)}
         </select>
-        <label>Timeout s<input type="number" min={1} max={3600} value={timeout} onInput={(e) => setTimeoutS(Number(e.currentTarget.value) || 60)} /></label>
+        <label>Timeout s<input type="number" min={1} max={3600} placeholder="60" value={timeoutText} onInput={(e) => setTimeoutText(e.currentTarget.value)} onBlur={() => setTimeoutText(String(timeout))} /></label>
       </div>
       <textarea rows={mode === 'exec' ? 4 : 8} spellcheck={false} placeholder={mode === 'exec' ? 'One argument per line, e.g.\nuname\n-a' : `Script body for ${shell}`} value={text} onInput={(e) => setText(e.currentTarget.value)} />
       {mode === 'exec' && <p class="muted">argv: <code>{argv.length ? argvPreview(argv) : '(empty)'}</code> — no shell is involved; metacharacters are literal.</p>}

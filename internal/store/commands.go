@@ -286,12 +286,12 @@ func (s *Store) CompleteCommand(ctx context.Context, id, deviceID int64, res pro
 	derived := ResultStatus(res)
 	var started, finished any
 	if !res.StartedAt.IsZero() {
-		started = fmtTime(res.StartedAt)
+		started = fmtTimeMs(res.StartedAt)
 	}
 	if !res.FinishedAt.IsZero() {
-		finished = fmtTime(res.FinishedAt)
+		finished = fmtTimeMs(res.FinishedAt)
 	} else {
-		finished = fmtTime(s.Now())
+		finished = fmtTimeMs(s.Now())
 	}
 	_, err = tx.ExecContext(ctx,
 		`UPDATE commands SET status = ?, exit_code = ?, stdout = ?, stderr = ?, truncated = ?, error = ?,

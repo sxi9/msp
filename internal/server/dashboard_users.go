@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"strings"
 
+	"golang.org/x/crypto/bcrypt"
+
 	"github.com/sxi9/msp/internal/store"
 )
 
@@ -80,6 +82,77 @@ func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 		"role":  u.Role,
 	})
 	writeJSON(w, http.StatusCreated, map[string]any{"user": u})
+}
+
+// validPassword returns the 400 detail for an unacceptable new password, or "".
+func validPassword(pw string) string {
+	switch {
+	case len(pw) < dashMinPassword:
+		return "password must be at least 10 characters"
+	case len(pw) > dashMaxPassword:
+		return "password too long"
+	}
+	return ""
+}
+
+// handleChangePassword is POST /api/v1/me/password {"current_password",
+// "new_password"} for the session user of any role: verifies the current
+// password (rate limited per IP like login, so a stolen session cannot
+// brute-force it), stores the new hash, drops the user's other sessions and
+// audits user.password_changed. The current session stays valid.
+func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
+	me := userFrom(r.Context())
+	if me == nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized", "")
+		return
+	}
+	ip := clientIP(r)
+	if !s.loginLimit.allow(ip) {
+		writeError(w, http.StatusTooManyRequests, "rate_limited", "")
+		return
+	}
+	var req struct {
+		Current string `json:"current_password"`
+		New     string `json:"new_password"`
+	}
+	if err := readJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	if req.Current == "" {
+		writeError(w, http.StatusBadRequest, "invalid_request", "current_password is required")
+		return
+	}
+	if detail := validPassword(req.New); detail != "" {
+		writeError(w, http.StatusBadRequest, "invalid_request", detail)
+		return
+	}
+	ctx := r.Context()
+	if bcrypt.CompareHashAndPassword([]byte(me.PasswordHash), []byte(req.Current)) != nil {
+		s.audit(ctx, "user", &me.ID, nil, "user.password_change_failed", "user", &me.ID, ip, map[string]any{"email": me.Email, "reason": "bad_password"})
+		writeError(w, http.StatusBadRequest, "invalid_request", "current password is incorrect")
+		return
+	}
+	if req.New == req.Current {
+		writeError(w, http.StatusBadRequest, "invalid_request", "new password must differ from the current one")
+		return
+	}
+	hash, err := s.hashPassword(req.New)
+	if err != nil {
+		s.log.Error("hash password", "err", err)
+		writeError(w, http.StatusInternalServerError, "internal", "")
+		return
+	}
+	keep := ""
+	if c, err := r.Cookie(sessionCookie); err == nil {
+		keep = c.Value
+	}
+	if err := s.st.SetPassword(ctx, me.ID, hash, keep); err != nil {
+		s.dashStoreError(w, err, "set password")
+		return
+	}
+	s.audit(ctx, "user", &me.ID, nil, "user.password_changed", "user", &me.ID, ip, map[string]any{"email": me.Email})
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // handleDisableUser is POST /api/v1/users/{id}/disable (admin). An admin

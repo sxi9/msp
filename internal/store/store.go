@@ -214,6 +214,13 @@ func fmtTime(t time.Time) string {
 	return t.UTC().Format(time.RFC3339)
 }
 
+// fmtTimeMs renders a timestamp with millisecond precision (still RFC3339;
+// parseTime reads it back). Used for command started_at/finished_at so the
+// dashboard can show a real duration instead of "0 ms".
+func fmtTimeMs(t time.Time) string {
+	return t.UTC().Format("2006-01-02T15:04:05.000Z07:00")
+}
+
 // storedTime is the value a timestamp has after a round trip through the
 // database (UTC, second precision), so freshly created rows match re-read ones.
 func storedTime(t time.Time) time.Time {

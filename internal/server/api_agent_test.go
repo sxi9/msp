@@ -363,14 +363,111 @@ func TestEnrollRateLimit(t *testing.T) {
 	e := newTestEnv(t)
 	req := enrollRequest("rl", protocol.PlatformLinux)
 	req.EnrollmentToken = "et_bogus"
-	for i := 1; i <= 10; i++ {
+	for i := 1; i <= enrollPerMinute; i++ {
 		if resp, _ := e.do(http.MethodPost, "/api/agent/v1/enroll", req, nil); resp.StatusCode != 401 {
 			t.Fatalf("call %d: status %d, want 401", i, resp.StatusCode)
 		}
 	}
 	resp, body := e.do(http.MethodPost, "/api/agent/v1/enroll", req, nil)
 	if resp.StatusCode != 429 || errorCode(t, body) != "rate_limited" {
-		t.Fatalf("11th call: %d %s", resp.StatusCode, body)
+		t.Fatalf("call %d: %d %s", enrollPerMinute+1, resp.StatusCode, body)
+	}
+}
+
+// TestReEnrollFromAnotherHostIsAudited: the same (org, device_uid) enrolling
+// under a different hostname (cloned machine-id) rotates the token as
+// documented, but the audit row and the server log say so.
+func TestReEnrollFromAnotherHostIsAudited(t *testing.T) {
+	e := newTestEnv(t)
+	id, token := e.enroll("clone", protocol.PlatformLinux)
+	if status, _, _ := e.sync(token, syncRequest(0)); status != 200 {
+		t.Fatal("sync")
+	}
+	req := enrollRequest("clone", protocol.PlatformLinux)
+	req.Hostname = "ws-other"
+	req.EnrollmentToken = e.token
+	resp, body := e.do(http.MethodPost, "/api/agent/v1/enroll", req, nil)
+	if resp.StatusCode != 201 {
+		t.Fatalf("re-enroll: %d %s", resp.StatusCode, body)
+	}
+	var out protocol.EnrollResponse
+	if err := json.Unmarshal(body, &out); err != nil || out.DeviceID != id {
+		t.Fatalf("re-enroll response %s (%v), want device %d", body, err, id)
+	}
+	a := e.auditActions("device.enrolled")
+	if len(a) != 2 {
+		t.Fatalf("device.enrolled rows = %d", len(a))
+	}
+	first, second := a[1].Detail, a[0].Detail
+	if a[0].ID < a[1].ID {
+		first, second = a[0].Detail, a[1].Detail
+	}
+	if _, ok := first["re_enrolled"]; ok {
+		t.Fatalf("first enrollment flagged as re-enrollment: %v", first)
+	}
+	if second["re_enrolled"] != true || second["previous_hostname"] != "ws-clone" || second["previous_status"] != "online" || second["warning"] == nil {
+		t.Fatalf("second enrollment detail %v", second)
+	}
+	// The first agent's token is now invalid, as the protocol documents.
+	if status, _, _ := e.sync(token, syncRequest(0)); status != 401 {
+		t.Fatalf("old token after re-enroll: %d, want 401", status)
+	}
+	// Same hostname again: re_enrolled but no warning.
+	req.Hostname = "ws-other"
+	if resp, _ := e.do(http.MethodPost, "/api/agent/v1/enroll", req, nil); resp.StatusCode != 201 {
+		t.Fatalf("third enroll: %d", resp.StatusCode)
+	}
+	a = e.auditActions("device.enrolled")
+	var newest store.AuditEntry
+	for _, row := range a {
+		if row.ID > newest.ID {
+			newest = row
+		}
+	}
+	if newest.Detail["re_enrolled"] != true || newest.Detail["warning"] != nil {
+		t.Fatalf("same-host re-enroll detail %v", newest.Detail)
+	}
+}
+
+// TestSyncLongPollReleasedOnShutdown: a parked sync answers at once with an
+// empty command list when the server starts shutting down, so Run's 10 s
+// Shutdown budget is never consumed by long-polls.
+func TestSyncLongPollReleasedOnShutdown(t *testing.T) {
+	e := newTestEnv(t)
+	id, token := e.enroll("shut", protocol.PlatformLinux)
+
+	type result struct {
+		status  int
+		out     protocol.SyncResponse
+		elapsed time.Duration
+	}
+	done := make(chan result, 1)
+	start := time.Now()
+	go func() {
+		status, out, _ := e.sync(token, syncRequest(25))
+		done <- result{status, out, time.Since(start)}
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for e.srv.notifier.waiting(id) == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("sync never parked on the notifier")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	began := time.Now()
+	e.srv.beginShutdown()
+	e.srv.beginShutdown() // idempotent
+	r := <-done
+	if r.status != 200 || len(r.out.Commands) != 0 || r.out.PollIntervalS != 30 {
+		t.Fatalf("released poll: %d %+v", r.status, r.out)
+	}
+	if since := time.Since(began); since > time.Second {
+		t.Fatalf("released %v after beginShutdown, want well under the 25 s wait", since)
+	}
+	// A sync after shutdown began does not park either.
+	start = time.Now()
+	if status, out, _ := e.sync(token, syncRequest(25)); status != 200 || len(out.Commands) != 0 || time.Since(start) > time.Second {
+		t.Fatalf("post-shutdown sync: %d %+v after %v", status, out, time.Since(start))
 	}
 }
 

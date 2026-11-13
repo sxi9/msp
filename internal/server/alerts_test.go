@@ -106,7 +106,7 @@ func TestThresholdAlerts(t *testing.T) {
 	if len(a) != 3 {
 		t.Fatalf("alerts %+v", a)
 	}
-	if a["disk_full"].Severity != "medium" || a["disk_full"].Message != "disk 92.5% used" {
+	if a["disk_full"].Severity != "medium" || a["disk_full"].Message != "disk 92.5% used on /data" {
 		t.Errorf("disk_full %+v", a["disk_full"])
 	}
 	if a["memory_high"].Severity != "low" {
@@ -139,6 +139,57 @@ func TestThresholdAlerts(t *testing.T) {
 	EvaluateNow(e.srv)
 	if a := e.openAlerts(id); len(a) != 3 {
 		t.Fatalf("edge alerts %+v", a)
+	}
+}
+
+// TestDiskAlertIgnoresBootPartition: a 95 % full 1 GB /boot next to a nearly
+// empty root must neither open disk_full nor drive disk_used_pct.
+func TestDiskAlertIgnoresBootPartition(t *testing.T) {
+	e := newTestEnv(t)
+	id, token := e.enroll("boot", protocol.PlatformLinux)
+	req := syncRequest(0)
+	req.Metrics.Disks = []protocol.Disk{
+		{Mount: "/", TotalGB: 252, UsedGB: 16.3},
+		{Mount: "/boot", TotalGB: 1, UsedGB: 0.95},
+		{Mount: "/boot/efi", TotalGB: 0.5, UsedGB: 0.1},
+		{Mount: "/opt/tiny", TotalGB: 0.4, UsedGB: 0.3},
+	}
+	if status, _, _ := e.sync(token, req); status != 200 {
+		t.Fatal("sync")
+	}
+	if d := e.device(id); d.DiskUsedPct == nil || *d.DiskUsedPct != 6.5 {
+		t.Fatalf("disk_used_pct = %v, want 6.5 (root only)", d.DiskUsedPct)
+	}
+	EvaluateNow(e.srv)
+	if a := e.openAlerts(id); len(a) != 0 {
+		t.Fatalf("alerts %+v, want none", a)
+	}
+}
+
+// TestEvaluatorWritesOnlyOnChange: a steady state costs no alert writes.
+func TestEvaluatorWritesOnlyOnChange(t *testing.T) {
+	e := newTestEnv(t)
+	id, token := e.enroll("steady", protocol.PlatformLinux)
+	e.sync(token, syncRequest(0))
+	e.clock.advance(2 * time.Minute) // offline -> one open alert
+	EvaluateNow(e.srv)
+	a := e.openAlerts(id)
+	if len(a) != 1 {
+		t.Fatalf("alerts %+v", a)
+	}
+	opened := a["offline"].OpenedAt
+	// Several passes later the same row is still the only one and untouched.
+	for i := 0; i < 3; i++ {
+		e.clock.advance(15 * time.Second)
+		EvaluateNow(e.srv)
+	}
+	all, _ := e.st.ListAlerts(context.Background(), false, nil, 100)
+	if len(all) != 1 || all[0].ResolvedAt != nil || !all[0].OpenedAt.Equal(opened) {
+		t.Fatalf("steady state changed the alert rows: %+v", all)
+	}
+	open, err := e.st.OpenAlertTypes(context.Background())
+	if err != nil || !open[id]["offline"] || len(open) != 1 || len(open[id]) != 1 {
+		t.Fatalf("OpenAlertTypes = %v, %v", open, err)
 	}
 }
 

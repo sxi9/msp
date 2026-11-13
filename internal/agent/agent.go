@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"runtime"
 	"sync"
 	"time"
@@ -21,6 +22,11 @@ const (
 	resultRetryDelay  = 5 * time.Second
 	factsEvery        = 120
 	maxConcurrent     = 2
+	// Enrollment is rate limited per client IP (60/min, refilled
+	// continuously); a room of machines behind one NAT imaged at once can
+	// hit it, so a 429 is retried rather than failing the install.
+	enrollRetries    = 6
+	enrollRetryDelay = 10 * time.Second
 )
 
 // sleepFn pauses for d or until ctx is done; it returns false when ctx ended
@@ -72,7 +78,18 @@ func Enroll(ctx context.Context, serverURL, token, caFile string, insecureHTTP b
 		IntervalS:       cfg.IntervalS,
 		Facts:           col.Facts(),
 	}
-	resp, err := client.Enroll(ctx, req)
+	var resp protocol.EnrollResponse
+	for attempt := 1; ; attempt++ {
+		resp, err = client.Enroll(ctx, req)
+		var he *HTTPError
+		if err == nil || !errors.As(err, &he) || he.Status != http.StatusTooManyRequests || attempt > enrollRetries {
+			break
+		}
+		slog.Warn("enrollment rate limited by the server, retrying", "attempt", attempt, "retry_in", enrollRetryDelay)
+		if !sleepFn(ctx, enrollRetryDelay) {
+			return cfg, fmt.Errorf("enroll: %w", ctx.Err())
+		}
+	}
 	if err != nil {
 		return cfg, fmt.Errorf("enroll: %w", err)
 	}

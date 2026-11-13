@@ -124,6 +124,36 @@ func (s *Store) DisableUser(ctx context.Context, id int64) error {
 	return nil
 }
 
+// SetPassword replaces a user's bcrypt hash and deletes the user's sessions
+// except keepSession (the plaintext cookie value of the session that made
+// the change; "" drops them all, as the CLI reset does). ErrNotFound when
+// the user does not exist.
+func (s *Store) SetPassword(ctx context.Context, id int64, passwordHash, keepSession string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("store: set password: %w", err)
+	}
+	defer tx.Rollback()
+	res, err := tx.ExecContext(ctx, `UPDATE users SET password_hash = ? WHERE id = ?`, passwordHash, id)
+	if err != nil {
+		return fmt.Errorf("store: set password: %w", err)
+	}
+	n, err := rowsAffected(res)
+	if err != nil {
+		return fmt.Errorf("store: set password: %w", err)
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM sessions WHERE user_id = ? AND token_hash <> ?`, id, HashToken(keepSession)); err != nil {
+		return fmt.Errorf("store: set password: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("store: set password: %w", err)
+	}
+	return nil
+}
+
 // CountUsers returns the number of accounts (the CLI uses it for bootstrap).
 func (s *Store) CountUsers(ctx context.Context) (int, error) {
 	var n int

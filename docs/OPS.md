@@ -28,6 +28,11 @@ msp-server token new --org 1 --label rollout --max-uses 10 --ttl 168h   # prints
 msp-server serve
 ```
 
+Change the bootstrap password right away: sign in, open **Account** (click your email in the
+top bar) and set a new one, or from the server `echo 'new-pass' | msp-server user set-password
+--email admin@example.com --password-stdin` (the CLI path also ends every session of that user;
+use it when a password is forgotten or compromised).
+
 With Docker the same commands run as `docker compose -f deploy/docker-compose.yml run --rm server user add ...`
 (the compose file's header lists them). The image runs as uid 10001 and stores the database
 in the `/data` volume (`./deploy/data` on the host; `chown 10001:10001` it before first start).
@@ -64,10 +69,29 @@ The dashboard prints an install one-liner next to every enrollment token; it dow
 
 - `make agents` (= `scripts/build-agents.sh`) cross-compiles `msp-agent-linux-amd64`,
   `msp-agent-linux-arm64`, `msp-agent-windows-amd64.exe`, `msp-server-linux-amd64`, writes
-  `SHA256SUMS`, copies `install.sh` / `install.ps1`, and copies `msp-agent.apk` when a debug
-  APK has been built (`make android`). With `MSP_AGENT_DIR` set it copies everything there.
+  `SHA256SUMS`, copies `install.sh` / `install.ps1`, and copies the **signed release APK** to
+  `msp-agent.apk` when one has been built (`make android-release`, below). With
+  `MSP_AGENT_DIR` set it copies everything there.
 - The Docker image ships the same set (minus the APK) at `/agents`. To add the APK, mount a
   host directory over `/agents` or bind `MSP_AGENT_DIR` to a directory you maintain.
+
+**Android release signing.** The published APK is always the release build: it refuses
+cleartext `http://` at the platform level, is not debuggable, and is signed with your own key
+so phones can verify updates come from you. The debug APK (`make android`) permits cleartext,
+is debuggable (`adb run-as` can read the device token on an unrooted phone) and is signed with
+the public Android debug key; it is for lab use only and `build-agents.sh` never publishes it.
+Create the key once and keep it with your backups (losing it means phones must uninstall and
+re-enroll to take an update):
+
+```sh
+keytool -genkeypair -v -keystore /secure/msp-agent.jks -alias msp-agent \
+  -keyalg RSA -keysize 4096 -validity 10000 -dname "CN=MSP Agent, O=Your MSP"
+export MSP_ANDROID_KEYSTORE=/secure/msp-agent.jks MSP_ANDROID_KEYSTORE_PASSWORD=...   # optional: MSP_ANDROID_KEY_ALIAS, MSP_ANDROID_KEY_PASSWORD
+make android-release && make agents
+```
+
+`*.jks`, `*.keystore` and `*.p12` are git-ignored. `build-agents.sh` refuses to copy an APK
+that is debuggable or debug-signed, and `SHA256SUMS` is regenerated on every run.
 
 `/dl/` serves single files only (no listing). Rebuild and republish after every upgrade so
 `SHA256SUMS` matches the binaries, or the installers refuse to install.
@@ -122,9 +146,10 @@ for remote lock). The agent is a foreground service with a permanent notificatio
 every 60 s and is shown offline after 195 s without a sync. Doze and OEM battery managers can
 still delay syncs; a few false offline alerts on phones are expected in phase 1.
 
-The **debug** APK (the only one phase 1 builds) permits cleartext `http://` so a lab server
-without TLS can be used; a release build refuses cleartext and must talk to a server with a
-certificate the phone trusts.
+The published APK is the release build: it refuses cleartext and must talk to a server with
+a certificate the phone trusts, and its enrollment screen rejects `http://` except to
+localhost. The debug APK (`make android`) permits cleartext `http://` so a lab server without
+TLS can be used; it is never published (section 3).
 
 ## 5. Enrollment-token hygiene
 
@@ -141,6 +166,15 @@ certificate the phone trusts.
   History, commands and alerts stay.
 - **Re-enroll** by running `msp-agent install` (or the installer) again with a fresh token;
   the same `(org, machine-id)` reuses the device row and rotates the token.
+- **Cloned machines.** The Linux device id is `/etc/machine-id`; VM templates and imaged
+  workstations often share one. Two such machines enrolled in the same org take turns owning
+  one device row and cut each other off (the earlier agent gets `401` and logs "token
+  rejected"). The audit row `device.enrolled` then carries `re_enrolled`, `previous_hostname`
+  and a `warning`, and the server logs "device re-enrolled from a different host". Fix the
+  image: `rm /etc/machine-id /var/lib/dbus/machine-id && systemd-machine-id-setup` (then
+  re-enroll), and regenerate the id in your template before cloning.
+- **Wrong org.** Enrolling a machine first with org A's token and then with org B's leaves a
+  row in A that goes offline and alerts; revoke and delete that row.
 - **Delete** (admin) removes the device and everything attached to it.
 
 ## 7. Backups and upgrades
@@ -169,7 +203,8 @@ installer to update them.
 - Agent: `journalctl -u msp-agent` on Linux, Event Log source `msp-agent` on Windows, the
   notification text on Android.
 - Audit: dashboard Audit page (`/api/v1/audit`), append-only, never pruned.
-- Retention: heartbeat samples are pruned after `MSP_RETENTION_DAYS`; commands (with their
+- Retention: heartbeat samples are pruned hourly after `MSP_RETENTION_DAYS` (indexed, in
+  batches of 5000 rows so syncs interleave); commands (with their
   captured output), alerts and audit rows are kept indefinitely. Watch the database size and
   run `VACUUM` after large deletions if needed.
 - Firewall: agents need **outbound** HTTPS (443, or whatever port the server listens on)

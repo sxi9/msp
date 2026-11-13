@@ -2,6 +2,7 @@
 //
 //	msp-server serve
 //	msp-server user add --email E --role admin|operator|viewer --password-stdin
+//	msp-server user set-password --email E --password-stdin   (recovery: resets the password, ends every session)
 //	msp-server org add --name N                      (prints the new org id)
 //	msp-server token new --org ID [--label L] [--max-uses N] [--ttl 24h]   (prints the plaintext token)
 //	msp-server version
@@ -51,6 +52,7 @@ func usage(w io.Writer) {
 commands:
   serve                                                   run the server (MSP_* env or flags)
   user add   --email E --role admin|operator|viewer --password-stdin
+  user set-password --email E --password-stdin            reset a password (ends that user's sessions)
   org add    --name N                                     prints the new org id
   token new  --org ID [--label L] [--max-uses 10] [--ttl 168h]   prints the plaintext token
   version
@@ -72,6 +74,9 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	case "user":
 		if len(args) >= 2 && args[1] == "add" {
 			return cmdUserAdd(args[2:], stdin, stdout, stderr)
+		}
+		if len(args) >= 2 && args[1] == "set-password" {
+			return cmdUserSetPassword(args[2:], stdin, stdout, stderr)
 		}
 	case "org":
 		if len(args) >= 2 && args[1] == "add" {
@@ -245,6 +250,69 @@ func cmdUserAdd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return exitRuntime
 	}
 	fmt.Fprintf(stdout, "created user %d %s (%s)\n", u.ID, u.Email, u.Role)
+	return exitOK
+}
+
+// cmdUserSetPassword is the recovery path for a forgotten or compromised
+// staff password: it replaces the hash and deletes every session of that
+// user. Self-service changes go through POST /api/v1/me/password.
+func cmdUserSetPassword(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("user set-password", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	db := dbFlag(fs)
+	email := fs.String("email", "", "login email")
+	passwordStdin := fs.Bool("password-stdin", false, "read the new password from stdin")
+	if err := fs.Parse(args); err != nil {
+		return exitUsage
+	}
+	*email = strings.ToLower(strings.TrimSpace(*email))
+	switch {
+	case *email == "" || !strings.Contains(*email, "@"):
+		fmt.Fprintln(stderr, "msp-server user set-password: --email must be an email address")
+		return exitUsage
+	case !*passwordStdin:
+		fmt.Fprintln(stderr, "msp-server user set-password: --password-stdin is required (pipe the password in)")
+		return exitUsage
+	}
+	password, err := readPassword(stdin)
+	if err != nil {
+		fmt.Fprintf(stderr, "msp-server user set-password: read password: %v\n", err)
+		return exitUsage
+	}
+	if len(password) < 10 {
+		fmt.Fprintln(stderr, "msp-server user set-password: password must be at least 10 characters")
+		return exitUsage
+	}
+
+	st, ok := openStore(*db, stderr)
+	if !ok {
+		return exitRuntime
+	}
+	defer st.Close()
+	ctx := context.Background()
+	u, err := st.GetUserByEmail(ctx, *email)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			fmt.Fprintf(stderr, "msp-server user set-password: no user with email %s\n", *email)
+		} else {
+			fmt.Fprintf(stderr, "msp-server user set-password: %v\n", err)
+		}
+		return exitRuntime
+	}
+	hash, err := server.HashPassword(password)
+	if err != nil {
+		fmt.Fprintf(stderr, "msp-server user set-password: hash password: %v\n", err)
+		return exitRuntime
+	}
+	if err := st.SetPassword(ctx, u.ID, hash, ""); err != nil {
+		fmt.Fprintf(stderr, "msp-server user set-password: %v\n", err)
+		return exitRuntime
+	}
+	if err := st.Audit(ctx, store.AuditEntry{ActorType: "system", Action: "user.password_changed", TargetType: "user", TargetID: &u.ID,
+		Detail: map[string]any{"email": u.Email, "via": "cli"}}); err != nil {
+		fmt.Fprintf(stderr, "msp-server user set-password: audit: %v\n", err)
+	}
+	fmt.Fprintf(stdout, "password updated for user %d %s; all of its sessions were ended\n", u.ID, u.Email)
 	return exitOK
 }
 

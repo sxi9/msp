@@ -10,6 +10,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/sxi9/msp/internal/store"
@@ -57,6 +58,13 @@ type Server struct {
 	notifier    *notifier
 	loginLimit  *rateLimiter
 	enrollLimit *rateLimiter
+
+	// shutdown is closed when Run starts shutting the listener down so that
+	// every parked sync long-poll answers at once (http.Server.Shutdown does
+	// not cancel in-flight request contexts; without this each parked sync
+	// would run out the 10 s budget and Shutdown would fail).
+	shutdown     chan struct{}
+	shutdownOnce sync.Once
 }
 
 // dashboardRoutes is appended to by dashboard.go's init(); Handler calls every
@@ -98,8 +106,20 @@ func New(st *store.Store, cfg Config, log *slog.Logger) *Server {
 		log:         log,
 		notifier:    newNotifier(),
 		loginLimit:  newRateLimiter(10),
-		enrollLimit: newRateLimiter(10),
+		enrollLimit: newRateLimiter(enrollPerMinute),
+		shutdown:    make(chan struct{}),
 	}
+}
+
+// enrollPerMinute is the per-IP enrollment budget. A client site usually sits
+// behind one NAT address, so it must cover a room of machines being imaged
+// in the same minute; 60/min still stops token guessing (a token has 256
+// bits of entropy, guessing is hopeless at any rate).
+const enrollPerMinute = 60
+
+// beginShutdown releases every parked long-poll; it is idempotent.
+func (s *Server) beginShutdown() {
+	s.shutdownOnce.Do(func() { close(s.shutdown) })
 }
 
 // Handler assembles the mux and wraps it with the middleware chain:
@@ -118,6 +138,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/login", s.csrf(s.handleLogin))
 	mux.HandleFunc("POST /api/v1/logout", s.csrf(s.handleLogout))
 	mux.Handle("GET /api/v1/me", s.sessionAuth(http.HandlerFunc(s.handleMe)))
+	mux.Handle("POST /api/v1/me/password", s.sessionAuth(s.csrf(s.handleChangePassword)))
 
 	for _, register := range dashboardRoutes {
 		register(s, mux)
@@ -176,6 +197,7 @@ func (s *Server) Run(ctx context.Context) error {
 	case <-ctx.Done():
 	}
 
+	s.beginShutdown()
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	err := srv.Shutdown(shutdownCtx)

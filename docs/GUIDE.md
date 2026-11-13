@@ -258,6 +258,9 @@ are phase 2.
 - **Users** (admin only): add technicians with email, password (10+ characters) and role;
   disable them when they leave. Sessions are cookies; the dashboard sends a CSRF header on
   every write. Login is rate limited to 10 attempts per minute per IP.
+- **Account** (click your email in the top bar): change your own password; your other
+  sessions are signed out. A forgotten password is reset by an admin on the server with
+  `msp-server user set-password --email ... --password-stdin`.
 - **Audit** page: every action with time, actor (user email, `device:<id>` or `system`),
   action name, client and device, and the client IP. Append-only, never pruned.
 

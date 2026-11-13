@@ -57,7 +57,8 @@ Production runs behind TLS: see `docs/OPS.md`.
 | `race`          | race detector on server, agent and e2e packages                              |
 | `web`           | `npm ci`, tests, typecheck, esbuild bundle, then rebuild the server          |
 | `agents`        | cross-compile matrix into `dist/` + `SHA256SUMS` + install scripts           |
-| `android`       | debug APK via the system Gradle (`ANDROID_HOME` defaults to /opt/android-sdk)|
+| `android`       | debug APK (lab only, never published) via the system Gradle (`ANDROID_HOME` defaults to /opt/android-sdk)|
+| `android-release` | the publishable signed APK; needs `MSP_ANDROID_KEYSTORE` (docs/OPS.md section 3) |
 | `android-test`  | JVM protocol tests against `internal/protocol/fixtures`                      |
 | `e2e`           | `scripts/e2e.sh`: real binaries, exit 0 and `E2E OK` are the verdict         |
 | `compose-check` | `docker compose config` and `bash -n` on the scripts (no daemon needed)      |

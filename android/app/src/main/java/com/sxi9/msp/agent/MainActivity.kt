@@ -63,6 +63,10 @@ class MainActivity : Activity() {
             toast("Enter the server URL (https://...)")
             return
         }
+        if (!UrlPolicy.allowed(server, BuildConfig.DEBUG)) {
+            toast("http:// is only allowed to localhost; use https://")
+            return
+        }
         if (!et.startsWith("et_")) {
             toast("Enter the enrollment token (et_...)")
             return

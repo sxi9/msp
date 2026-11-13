@@ -1,7 +1,7 @@
 import { useState } from 'preact/hooks';
 import { api, errorText } from '../api.ts';
 import { usePoll } from '../hooks.ts';
-import { ago, when } from '../lib/format.ts';
+import { ago, fromNow, when } from '../lib/format.ts';
 import { canOperate, type TokenCreated, type User } from '../types.ts';
 import { DeviceTable } from '../components/DeviceTable.tsx';
 import { CopyBlock } from '../components/CopyBlock.tsx';
@@ -52,7 +52,7 @@ export function Org({ id, user }: { id: number; user: User }) {
       )}
       {created && (
         <div class="card">
-          <p><strong>Token created.</strong> It is shown once; copy it now. It expires {ago(created.token.expires_at).replace(' ago', '')} from now at {when(created.token.expires_at)} or after {created.token.max_uses} uses.</p>
+          <p><strong>Token created.</strong> It is shown once; copy it now. It expires {fromNow(created.token.expires_at)} ({when(created.token.expires_at)}) or after {created.token.max_uses} uses.</p>
           <CopyBlock label="Enrollment token" text={created.plaintext} highlight />
           <CopyBlock label="Linux (run as root)" text={created.install.linux} />
           <CopyBlock label="Windows (admin PowerShell)" text={created.install.windows} />

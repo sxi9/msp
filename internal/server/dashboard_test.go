@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"os"
@@ -819,6 +820,69 @@ func TestDashboardUsers(t *testing.T) {
 		if u.ID == created.User.ID && u.DisabledAt == nil {
 			t.Fatalf("disabled_at not set: %+v", u)
 		}
+	}
+}
+
+// TestDashboardChangePassword: any role can change its own password with the
+// current one; other sessions end, the current one survives, audit is written.
+func TestDashboardChangePassword(t *testing.T) {
+	e := newTestEnv(t)
+	viewer := dashUser(e, "viewer@example.com", RoleViewer)
+	other := dashLogin(e, "viewer@example.com", "role-pass-12345")
+	path := "/api/v1/me/password"
+
+	if resp, body := e.do(http.MethodPost, path, map[string]string{"current_password": "role-pass-12345", "new_password": "new-pass-12345"}, withCookie(viewer, nil)); resp.StatusCode != 403 || errorCode(t, body) != "csrf" {
+		t.Fatalf("without csrf header: %d %s", resp.StatusCode, body)
+	}
+	if resp, _ := e.do(http.MethodPost, path, map[string]string{"current_password": "x", "new_password": "new-pass-12345"}, csrfHeader); resp.StatusCode != 401 {
+		t.Fatalf("without session: %d", resp.StatusCode)
+	}
+	bad := []map[string]string{
+		{"current_password": "wrong-pass-123", "new_password": "new-pass-12345"},
+		{"current_password": "role-pass-12345", "new_password": "short"},
+		{"current_password": "role-pass-12345", "new_password": "role-pass-12345"},
+		{"current_password": "", "new_password": "new-pass-12345"},
+	}
+	for _, b := range bad {
+		if resp, body := e.do(http.MethodPost, path, b, withCookie(viewer, csrfHeader)); resp.StatusCode != 400 || errorCode(t, body) != "invalid_request" {
+			t.Fatalf("change password %v: %d %s", b, resp.StatusCode, body)
+		}
+	}
+	if a := e.auditActions("user.password_change_failed"); len(a) != 1 {
+		t.Fatalf("failed attempt audit rows = %d, want 1", len(a))
+	}
+
+	if resp, body := e.do(http.MethodPost, path, map[string]string{"current_password": "role-pass-12345", "new_password": "new-pass-12345"}, withCookie(viewer, csrfHeader)); resp.StatusCode != 204 {
+		t.Fatalf("change password: %d %s", resp.StatusCode, body)
+	}
+	if a := e.auditActions("user.password_changed"); len(a) != 1 || a[0].ActorLabel != "viewer@example.com" || a[0].TargetID == nil {
+		t.Fatalf("audit user.password_changed %+v", a)
+	}
+	// Current session still works, the other session is gone.
+	if resp, _ := e.do(http.MethodGet, "/api/v1/me", nil, withCookie(viewer, nil)); resp.StatusCode != 200 {
+		t.Fatalf("own session after change: %d", resp.StatusCode)
+	}
+	if resp, _ := e.do(http.MethodGet, "/api/v1/me", nil, withCookie(other, nil)); resp.StatusCode != 401 {
+		t.Fatalf("other session after change: %d, want 401", resp.StatusCode)
+	}
+	// Old password refused, new one accepted.
+	if resp, _, _ := e.login("viewer@example.com", "role-pass-12345"); resp.StatusCode != 401 {
+		t.Fatalf("old password login: %d", resp.StatusCode)
+	}
+	dashLogin(e, "viewer@example.com", "new-pass-12345")
+
+	// The CLI reset path: SetPassword with no session to keep ends them all.
+	hash, _ := e.srv.hashPassword("reset-pass-12345")
+	u, _ := e.st.GetUserByEmail(context.Background(), "viewer@example.com")
+	if err := e.st.SetPassword(context.Background(), u.ID, hash, ""); err != nil {
+		t.Fatal(err)
+	}
+	if resp, _ := e.do(http.MethodGet, "/api/v1/me", nil, withCookie(viewer, nil)); resp.StatusCode != 401 {
+		t.Fatalf("session after CLI reset: %d, want 401", resp.StatusCode)
+	}
+	dashLogin(e, "viewer@example.com", "reset-pass-12345")
+	if err := e.st.SetPassword(context.Background(), 9999, hash, ""); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("SetPassword unknown user: %v", err)
 	}
 }
 

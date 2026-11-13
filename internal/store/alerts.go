@@ -127,6 +127,35 @@ func (s *Store) AckAlert(ctx context.Context, id, userID int64) error {
 	return nil
 }
 
+// OpenAlertTypes returns the set of open (device_id, type) pairs in one
+// query, so the evaluator can skip the write statements for devices whose
+// alert state does not change.
+func (s *Store) OpenAlertTypes(ctx context.Context) (map[int64]map[string]bool, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT device_id, type FROM alerts WHERE resolved_at IS NULL`)
+	if err != nil {
+		return nil, fmt.Errorf("store: open alert types: %w", err)
+	}
+	defer rows.Close()
+	out := map[int64]map[string]bool{}
+	for rows.Next() {
+		var (
+			dev int64
+			typ string
+		)
+		if err := rows.Scan(&dev, &typ); err != nil {
+			return nil, fmt.Errorf("store: open alert types: %w", err)
+		}
+		if out[dev] == nil {
+			out[dev] = map[string]bool{}
+		}
+		out[dev][typ] = true
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: open alert types: %w", err)
+	}
+	return out, nil
+}
+
 // CountOpenAlerts returns the number of unresolved alerts.
 func (s *Store) CountOpenAlerts(ctx context.Context) (int, error) {
 	var n int

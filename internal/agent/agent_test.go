@@ -24,16 +24,17 @@ import (
 type fakeServer struct {
 	t *testing.T
 
-	mu       sync.Mutex
-	requests int // every sync request, authorised or not
-	enrolls  []protocol.EnrollRequest
-	syncs    []protocol.SyncRequest
-	results  map[int64]protocol.CommandResult
-	resultN  map[int64]int
-	ua       string
-	auth     []string
-	script   []syncStep      // consumed one per sync
-	resultRC map[int64][]int // per-command status codes to answer before 204
+	mu        sync.Mutex
+	requests  int // every sync request, authorised or not
+	enrolls   []protocol.EnrollRequest
+	syncs     []protocol.SyncRequest
+	results   map[int64]protocol.CommandResult
+	resultN   map[int64]int
+	ua        string
+	auth      []string
+	script    []syncStep      // consumed one per sync
+	resultRC  map[int64][]int // per-command status codes to answer before 204
+	enroll429 int             // enrollment answers 429 this many times first
 }
 
 type syncStep struct {
@@ -67,7 +68,15 @@ func (f *fakeServer) enroll(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	f.enrolls = append(f.enrolls, req)
 	f.ua = r.Header.Get("User-Agent")
+	limited := f.enroll429 > 0
+	if limited {
+		f.enroll429--
+	}
 	f.mu.Unlock()
+	if limited {
+		writeErr(w, 429, "rate_limited")
+		return
+	}
 	if req.EnrollmentToken != "et_good" {
 		writeErr(w, 401, "invalid_enrollment_token")
 		return
@@ -260,6 +269,38 @@ func TestEnrollBadToken(t *testing.T) {
 	var he *HTTPError
 	if !errors.As(err, &he) || he.Status != 401 || he.Code != "invalid_enrollment_token" {
 		t.Fatalf("err = %#v", err)
+	}
+}
+
+func TestEnrollRetriesRateLimit(t *testing.T) {
+	f, ts := newFakeServer(t)
+	f.enroll429 = 2
+	rec := &sleepRecorder{}
+	old := sleepFn
+	sleepFn = rec.fn
+	defer func() { sleepFn = old }()
+	cfg, err := Enroll(context.Background(), ts.URL, "et_good", "", false, 0, "test")
+	if err != nil || cfg.DeviceToken != "dt_secret" {
+		t.Fatalf("enroll after 429s: %v %+v", err, cfg)
+	}
+	if d := rec.durations(); len(d) != 2 || d[0] != enrollRetryDelay || d[1] != enrollRetryDelay {
+		t.Fatalf("sleeps = %v, want two of %v", d, enrollRetryDelay)
+	}
+	f.mu.Lock()
+	n := len(f.enrolls)
+	f.mu.Unlock()
+	if n != 3 {
+		t.Fatalf("enroll requests = %d, want 3", n)
+	}
+
+	// Persistent 429s give up after the retry budget with the 429 error.
+	f.enroll429 = enrollRetries + 5
+	rec2 := &sleepRecorder{}
+	sleepFn = rec2.fn
+	_, err = Enroll(context.Background(), ts.URL, "et_good", "", false, 0, "test")
+	var he *HTTPError
+	if !errors.As(err, &he) || he.Status != 429 || len(rec2.durations()) != enrollRetries {
+		t.Fatalf("persistent 429: err %v, sleeps %v", err, rec2.durations())
 	}
 }
 

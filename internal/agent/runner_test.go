@@ -212,6 +212,38 @@ func TestExecuteLockFallsBackAndReportsFailure(t *testing.T) {
 	if res.ExitCode == 0 || res.Error == "" {
 		t.Fatalf("lock without tools must fail: %+v", res)
 	}
+	// Both attempts are named so the operator can tell why each one failed.
+	if !strings.Contains(res.Error, "loginctl: spawn:") || !strings.Contains(res.Error, "xdg-screensaver: spawn:") {
+		t.Fatalf("error must list every attempt: %q", res.Error)
+	}
+}
+
+func TestExecuteLockReportsEveryAttempt(t *testing.T) {
+	bin := t.TempDir()
+	fail := "#!/bin/sh\necho 'Failed to lock: Access denied' >&2\nexit 1\n"
+	if err := os.WriteFile(bin+"/loginctl", []byte(fail), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin)
+	res := Execute(context.Background(), protocol.Command{ID: 20, Kind: protocol.KindLock, TimeoutS: 30})
+	if res.ExitCode == 0 || !strings.Contains(res.Error, "loginctl: exit 1: Failed to lock: Access denied") || !strings.Contains(res.Error, "xdg-screensaver: spawn:") {
+		t.Fatalf("unexpected result: %+v", res)
+	}
+}
+
+func TestExecuteLockNoSessionsIsNotAFailure(t *testing.T) {
+	// A headless host: loginctl exists but reports nothing to lock. Like the
+	// Windows path this is exit 0 with "no interactive session".
+	bin := t.TempDir()
+	none := "#!/bin/sh\necho 'No sessions.' >&2\nexit 1\n"
+	if err := os.WriteFile(bin+"/loginctl", []byte(none), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin)
+	res := Execute(context.Background(), protocol.Command{ID: 21, Kind: protocol.KindLock, TimeoutS: 30})
+	if res.ExitCode != 0 || res.Error != "" || res.Stdout != "no interactive session" {
+		t.Fatalf("unexpected result: %+v", res)
+	}
 }
 
 func TestExecuteLockUsesFirstSuccessfulTool(t *testing.T) {

@@ -90,6 +90,13 @@ function route(method: string, path: string, body: unknown): Reply {
   }
   if (p === '/api/v1/logout') return ok(null, 204);
   if (p === '/api/v1/me') return ok({ user: me });
+  if (p === '/api/v1/me/password') {
+    const cur = String(b.current_password ?? ''), nw = String(b.new_password ?? '');
+    if (cur.length < 4) return err(400, 'invalid_request', 'current password is incorrect');
+    if (nw.length < 10) return err(400, 'invalid_request', 'password must be at least 10 characters');
+    log('user.password_changed', 'user', me.id, null, { email: me.email });
+    return ok(null, 204);
+  }
   if (p === '/api/v1/summary') return ok({
     orgs: orgs.length, devices: devices.length, online: devices.filter((d) => d.status === 'online').length,
     offline: devices.filter((d) => d.status === 'offline').length, pending: devices.filter((d) => d.status === 'pending').length,

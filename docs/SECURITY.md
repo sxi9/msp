@@ -8,7 +8,11 @@ What the system protects, what it does not, and what must be true before it grow
   Windows machine, and can lock every enrolled phone.** Commands and scripts run with the
   agent's privileges by design; there is no sandbox between the dashboard and the endpoint.
   Protect staff accounts accordingly: unique strong passwords, no shared logins, disable
-  accounts the day someone leaves (`POST /api/v1/users/{id}/disable`).
+  accounts the day someone leaves (`POST /api/v1/users/{id}/disable`). Everyone changes their
+  own password on the Account page (`POST /api/v1/me/password`, requires the current one and
+  ends the user's other sessions); a forgotten or compromised password is reset on the server
+  with `msp-server user set-password`, which ends every session of that user. Change the
+  bootstrap admin password on day one.
 - **Server compromise is fleet compromise.** Whoever controls the server (or its database file)
   can queue commands for every device. Keep the server patched, the database and backups
   private, and the dashboard reachable from as few networks as possible.
@@ -35,7 +39,9 @@ token (`token_hash` NULL) gets `401 invalid_device_token` on the next request; r
 rotates the token and invalidates the old one. On endpoints the device token sits in
 `/etc/msp-agent/agent.json` (root, 0600), `%ProgramData%\msp-agent\agent.json` (administrators)
 or app-private SharedPreferences; anyone with root/admin on the endpoint can read it and
-impersonate that one device.
+impersonate that one device. The published Android APK is the release build (not debuggable,
+so `adb run-as` cannot read the preferences on an unrooted phone; signed with the MSP's own
+key); the debug build is lab-only and never published (`docs/OPS.md` section 3).
 
 ## 3. Dashboard session, CSRF, rate limits, headers
 
@@ -45,8 +51,10 @@ impersonate that one device.
 - CSRF: every non-GET `/api/v1` request must carry `X-Requested-With: msp`, else `403 csrf`.
   Browsers do not add custom headers to cross-site requests, and `SameSite=Strict` keeps the
   cookie off cross-site requests entirely; the two together block CSRF even on older browsers.
-- Rate limits (in-memory per client IP): login 10 attempts/min, enrollment 10 requests/min,
-  both answering `429 rate_limited`. Failed logins are audited (`user.login_failed`). Set
+- Rate limits (in-memory per client IP): login and password change 10 attempts/min,
+  enrollment 60 requests/min (a client site behind one NAT address imaging a room of
+  machines; the desktop agent retries a 429), all answering `429 rate_limited`. Failed logins
+  and password changes are audited (`user.login_failed`, `user.password_change_failed`). Set
   `MSP_TRUST_PROXY=1` only behind a proxy you control, or the limits key on a spoofable header.
 - Headers on every response: `Content-Security-Policy: default-src 'self'; style-src 'self'
   'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'`,

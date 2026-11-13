@@ -26,6 +26,19 @@ export function ago(iso: string | null | undefined, now: number = Date.now()): s
   return `${Math.floor(s / 86400)} d ago`;
 }
 
+/** Time until a future stamp: "in 12 s", "in 5 min", "in 3 h", "in 7 d"; "now" when it is not in the future. */
+export function fromNow(iso: string | null | undefined, now: number = Date.now()): string {
+  if (!iso) return DASH;
+  const t = Date.parse(iso);
+  if (Number.isNaN(t)) return DASH;
+  const s = Math.floor((t - now) / 1000);
+  if (s <= 0) return 'now';
+  if (s < 60) return `in ${s} s`;
+  if (s < 3600) return `in ${Math.floor(s / 60)} min`;
+  if (s < 86400) return `in ${Math.floor(s / 3600)} h`;
+  return `in ${Math.floor(s / 86400)} d`;
+}
+
 /** Elapsed time between two RFC3339 stamps: "340 ms", "2.5 s", "3 min 4 s". */
 export function duration(startIso: string | null | undefined, endIso: string | null | undefined): string {
   if (!startIso || !endIso) return DASH;

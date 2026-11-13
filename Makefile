@@ -9,7 +9,7 @@ GO           ?= go
 
 export CGO_ENABLED = 0
 
-.PHONY: build test race web agents android android-test e2e compose-check docker clean
+.PHONY: build test race web agents android android-release android-test e2e compose-check docker clean
 
 ## build: server and desktop agent for this host into bin/
 build:
@@ -38,9 +38,14 @@ web:
 agents:
 	VERSION=$(VERSION) scripts/build-agents.sh
 
-## android: debug APK at android/app/build/outputs/apk/debug/app-debug.apk
+## android: debug APK at android/app/build/outputs/apk/debug/app-debug.apk (lab use only: cleartext allowed, debuggable, debug-signed; never published)
 android:
 	cd android && ANDROID_HOME=$(ANDROID_HOME) ANDROID_SDK_ROOT=$(ANDROID_HOME) gradle $(GRADLE_FLAGS) :app:assembleDebug
+
+## android-release: the publishable APK at android/app/build/outputs/apk/release/app-release.apk; needs MSP_ANDROID_KEYSTORE (+ _PASSWORD, optional _KEY_ALIAS/_KEY_PASSWORD), see docs/OPS.md section 3
+android-release:
+	@test -n "$$MSP_ANDROID_KEYSTORE" || { echo "MSP_ANDROID_KEYSTORE is not set: the release APK would be unsigned (docs/OPS.md section 3)"; exit 1; }
+	cd android && ANDROID_HOME=$(ANDROID_HOME) ANDROID_SDK_ROOT=$(ANDROID_HOME) gradle $(GRADLE_FLAGS) :app:assembleRelease
 
 ## android-test: JVM protocol tests against internal/protocol/fixtures
 android-test:

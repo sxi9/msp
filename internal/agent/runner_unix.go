@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os/exec"
 	"runtime"
+	"strings"
 	"syscall"
 	"time"
 
@@ -47,14 +48,19 @@ func shellArgv(shell, file string) ([]string, error) {
 }
 
 // lockSession implements kind lock (A1): loginctl lock-sessions, then
-// xdg-screensaver lock; the first that exits 0 is reported, else the last
-// failure.
+// xdg-screensaver lock; the first that exits 0 is reported. A host without
+// any interactive session (headless server, container) answers exit 0 with
+// stdout "no interactive session" like the Windows path. Otherwise the
+// failure reports what every attempt said, not just the last one.
 func lockSession(ctx context.Context, id int64) protocol.CommandResult {
 	attempts := [][]string{
 		{"loginctl", "lock-sessions"},
 		{"xdg-screensaver", "lock"},
 	}
-	var last protocol.CommandResult
+	var (
+		last    protocol.CommandResult
+		reasons []string
+	)
 	for _, argv := range attempts {
 		if ctx.Err() != nil {
 			break
@@ -63,11 +69,38 @@ func lockSession(ctx context.Context, id int64) protocol.CommandResult {
 		if last.ExitCode == 0 && last.Error == "" {
 			return last
 		}
+		if argv[0] == "loginctl" && noSessions(last) {
+			last.ExitCode = 0
+			last.Error = ""
+			last.Stdout = "no interactive session"
+			return last
+		}
+		reasons = append(reasons, argv[0]+": "+attemptReason(last))
 	}
-	if last.Error == "" && last.ExitCode != 0 {
-		last.Error = "lock failed: loginctl and xdg-screensaver both exited non-zero"
+	if last.ExitCode != 0 || last.Error != "" {
+		last.Error = "lock failed: " + strings.Join(reasons, "; ")
 	}
 	return last
+}
+
+// noSessions recognises loginctl answering that there is nothing to lock
+// (no logind sessions, or no logind at all in a container).
+func noSessions(r protocol.CommandResult) bool {
+	out := strings.ToLower(r.Stdout + "\n" + r.Stderr)
+	return strings.Contains(out, "no sessions") || strings.Contains(out, "no such session") ||
+		strings.Contains(out, "failed to connect to bus") || strings.Contains(out, "not been booted with systemd")
+}
+
+// attemptReason summarises one failed lock attempt: the spawn error, else
+// the exit code with the first stderr line.
+func attemptReason(r protocol.CommandResult) string {
+	if r.Error != "" {
+		return r.Error
+	}
+	if line := firstLine(r.Stderr, r.Stdout); line != "unknown error" {
+		return fmt.Sprintf("exit %d: %s", r.ExitCode, line)
+	}
+	return fmt.Sprintf("exit %d", r.ExitCode)
 }
 
 // showMessage implements kind message (A1): notify-send when it is on PATH

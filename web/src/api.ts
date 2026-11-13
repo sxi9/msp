@@ -63,6 +63,8 @@ export const api = {
   login: (email: string, password: string) => request<{ user: User }>('POST', '/api/v1/login', { email, password }),
   logout: () => request<void>('POST', '/api/v1/logout'),
   me: () => request<{ user: User }>('GET', '/api/v1/me'),
+  changePassword: (current_password: string, new_password: string) =>
+    request<void>('POST', '/api/v1/me/password', { current_password, new_password }),
   summary: () => request<Summary>('GET', '/api/v1/summary'),
   listOrgs: () => request<{ orgs: Org[] }>('GET', '/api/v1/orgs'),
   createOrg: (name: string) => request<{ org: Org }>('POST', '/api/v1/orgs', { name }),

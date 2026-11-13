@@ -97,6 +97,17 @@ func (s *Server) handleEnroll(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_request", "facts: "+err.Error())
 		return
 	}
+	// A second enrollment of the same (org, device_uid) rotates the token of
+	// the existing row. That is the documented re-enroll path for the same
+	// machine, but when the hostname differs it is almost always a cloned
+	// /etc/machine-id (VM template, imaged workstation): the first machine's
+	// agent is cut off at its next sync. Surface it loudly.
+	prev, reEnrolled, err := s.st.FindEnrollment(ctx, tok.OrgID, req.DeviceUID)
+	if err != nil {
+		s.log.Error("find enrollment", "err", err)
+		writeError(w, http.StatusInternalServerError, "internal", "")
+		return
+	}
 	dev, plain, err := s.st.UpsertDevice(ctx, store.UpsertDeviceParams{
 		OrgID:        tok.OrgID,
 		DeviceUID:    req.DeviceUID,
@@ -113,12 +124,24 @@ func (s *Server) handleEnroll(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal", "")
 		return
 	}
-	s.audit(ctx, "device", &dev.ID, &dev.OrgID, "device.enrolled", "device", &dev.ID, ip, map[string]any{
+	detail := map[string]any{
 		"hostname": dev.Hostname,
 		"platform": dev.Platform,
 		"token_id": tok.ID,
-	})
-	s.log.Info("device enrolled", "device", dev.ID, "org", dev.OrgID, "hostname", dev.Hostname, "platform", dev.Platform)
+	}
+	if reEnrolled {
+		detail["re_enrolled"] = true
+		detail["previous_hostname"] = prev.Hostname
+		detail["previous_status"] = prev.Status
+		if prev.Hostname != dev.Hostname && !prev.Revoked {
+			detail["warning"] = "re-enrolled from a different host: the previous agent's token is now invalid (cloned machine-id?)"
+			s.log.Warn("device re-enrolled from a different host; previous agent cut off (cloned machine-id?)",
+				"device", dev.ID, "org", dev.OrgID, "hostname", dev.Hostname, "previous_hostname", prev.Hostname,
+				"previous_status", prev.Status, "ip", ip)
+		}
+	}
+	s.audit(ctx, "device", &dev.ID, &dev.OrgID, "device.enrolled", "device", &dev.ID, ip, detail)
+	s.log.Info("device enrolled", "device", dev.ID, "org", dev.OrgID, "hostname", dev.Hostname, "platform", dev.Platform, "re_enrolled", reEnrolled)
 	writeJSON(w, http.StatusCreated, protocol.EnrollResponse{
 		DeviceID:      dev.ID,
 		DeviceToken:   plain,
@@ -172,6 +195,9 @@ func (s *Server) handleSync(w http.ResponseWriter, r *http.Request, dev store.De
 				return
 			}
 		case <-timer.C:
+		case <-s.shutdown:
+			// Server stopping: answer with an empty list now so the agent
+			// re-syncs after its interval instead of hitting a closed socket.
 		case <-ctx.Done():
 			// Client went away; nothing was claimed, nothing to write.
 			return

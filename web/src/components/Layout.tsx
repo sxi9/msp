@@ -36,7 +36,7 @@ export function Layout({ user, route, onLogout, children }: { user: User; route:
           </div>
         )}
         <div class="userbox">
-          <span title={user.role}>{user.email} <span class="chip">{user.role}</span></span>
+          <span class="email" title={`${user.role}: account settings`}><a href="#/account" class={route.name === 'account' ? 'active' : ''}>{user.email}</a> <span class="chip">{user.role}</span></span>
           <button type="button" class="btn btn-sm" onClick={onLogout}>Log out</button>
         </div>
       </header>

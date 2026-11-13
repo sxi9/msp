@@ -17,38 +17,43 @@ import java.time.temporal.ChronoUnit
 object Commands {
     const val MESSAGE_CHANNEL = "msp_message"
 
+    /** What a built-in command produced: exit code, stdout, stderr and the protocol error text. */
+    private data class Outcome(val exit: Int, val stdout: String = "", val stderr: String = "", val error: String = "")
+
     fun run(ctx: Context, cmd: Command): CommandResult {
         val started = now()
-        val r: Triple<Int, String, String> = try {
+        val r: Outcome = try {
             when (cmd.kind) {
-                "ping" -> Triple(0, "pong", "")
+                "ping" -> Outcome(0, "pong")
                 "lock" -> lock(ctx)
                 "message" -> message(ctx, cmd)
-                else -> Triple(-1, "", "unsupported kind: ${cmd.kind}")
+                else -> Outcome(-1, error = "unsupported kind: ${cmd.kind}")
             }
         } catch (e: Exception) {
-            Triple(1, "", "${cmd.kind}: ${e.message ?: e.javaClass.simpleName}")
+            Outcome(1, error = "${cmd.kind}: ${e.message ?: e.javaClass.simpleName}")
         }
         return CommandResult(
-            exitCode = r.first,
-            stdout = r.second,
-            stderr = "",
+            exitCode = r.exit,
+            stdout = r.stdout,
+            stderr = r.stderr,
             startedAt = started,
             finishedAt = now(),
-            error = r.third,
+            error = r.error,
         )
     }
 
-    private fun lock(ctx: Context): Triple<Int, String, String> {
-        if (!AdminReceiver.isActive(ctx)) return Triple(1, "", "device admin not granted")
+    private fun lock(ctx: Context): Outcome {
+        if (!AdminReceiver.isActive(ctx)) return Outcome(1, error = "device admin not granted")
         val dpm = ctx.getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager
         dpm.lockNow()
-        return Triple(0, "locked", "")
+        return Outcome(0, "locked")
     }
 
-    private fun message(ctx: Context, cmd: Command): Triple<Int, String, String> {
+    private fun message(ctx: Context, cmd: Command): Outcome {
         val nm = ctx.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        if (!nm.areNotificationsEnabled()) return Triple(1, "", "notifications disabled")
+        // Like the desktop agents when no notifier is available: the text is still
+        // delivered to the record (stdout, exit 0) and stderr says why it was not shown.
+        if (!nm.areNotificationsEnabled()) return Outcome(0, cmd.text, "notifications disabled")
         val open = PendingIntent.getActivity(
             ctx, 0, Intent(ctx, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE
         )
@@ -62,8 +67,9 @@ object Commands {
             .build()
         // One notification per command id so repeated messages do not replace each other.
         nm.notify(1000 + (cmd.id % 100000).toInt(), n)
-        return Triple(0, "shown", "")
+        return Outcome(0, "shown")
     }
 
-    private fun now(): String = Instant.now().truncatedTo(ChronoUnit.SECONDS).toString()
+    // Millisecond precision so the dashboard can show a real duration.
+    private fun now(): String = Instant.now().truncatedTo(ChronoUnit.MILLIS).toString()
 }

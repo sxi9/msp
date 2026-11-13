@@ -51,16 +51,28 @@ func (s *Store) ListHeartbeats(ctx context.Context, deviceID int64, limit int) (
 	return out, nil
 }
 
-// PruneHeartbeats deletes samples older than olderThan and returns the count.
+// pruneBatch bounds one DELETE so the write lock is released between batches
+// and agent syncs interleave with a large prune.
+const pruneBatch = 5000
+
+// PruneHeartbeats deletes samples older than olderThan in batches of
+// pruneBatch rows (using the heartbeats_at index) and returns the count.
 func (s *Store) PruneHeartbeats(ctx context.Context, olderThan time.Duration) (int64, error) {
 	cutoff := fmtTime(s.Now().Add(-olderThan))
-	res, err := s.db.ExecContext(ctx, `DELETE FROM heartbeats WHERE at < ?`, cutoff)
-	if err != nil {
-		return 0, fmt.Errorf("store: prune heartbeats: %w", err)
+	var total int64
+	for {
+		res, err := s.db.ExecContext(ctx,
+			`DELETE FROM heartbeats WHERE id IN (SELECT id FROM heartbeats WHERE at < ? LIMIT ?)`, cutoff, pruneBatch)
+		if err != nil {
+			return total, fmt.Errorf("store: prune heartbeats: %w", err)
+		}
+		n, err := rowsAffected(res)
+		if err != nil {
+			return total, fmt.Errorf("store: prune heartbeats: %w", err)
+		}
+		total += n
+		if n < pruneBatch {
+			return total, nil
+		}
 	}
-	n, err := rowsAffected(res)
-	if err != nil {
-		return 0, fmt.Errorf("store: prune heartbeats: %w", err)
-	}
-	return n, nil
 }

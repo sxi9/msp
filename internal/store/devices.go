@@ -66,6 +66,43 @@ func (s *Store) getDevice(ctx context.Context, q querier, where string, args ...
 	return d, nil
 }
 
+// PreviousEnrollment describes the device row an enrollment is about to
+// replace: the same (org_id, device_uid) already exists. The server uses it
+// to flag a re-enrollment from a different host (cloned machine-id) in the
+// audit log.
+type PreviousEnrollment struct {
+	DeviceID int64
+	Hostname string
+	Status   string // pending | online | offline, as StatusOf computes it
+	Revoked  bool
+}
+
+// FindEnrollment returns the existing row for (orgID, deviceUID), if any.
+func (s *Store) FindEnrollment(ctx context.Context, orgID int64, deviceUID string) (PreviousEnrollment, bool, error) {
+	var (
+		p        PreviousEnrollment
+		lastSeen sql.NullString
+		interval int
+		revoked  int
+	)
+	err := s.db.QueryRowContext(ctx,
+		`SELECT id, hostname, last_seen_at, interval_s, token_hash IS NULL FROM devices WHERE org_id = ? AND device_uid = ?`,
+		orgID, deviceUID).Scan(&p.DeviceID, &p.Hostname, &lastSeen, &interval, &revoked)
+	if errors.Is(err, sql.ErrNoRows) {
+		return PreviousEnrollment{}, false, nil
+	}
+	if err != nil {
+		return PreviousEnrollment{}, false, fmt.Errorf("store: find enrollment: %w", err)
+	}
+	seen, err := nullTime(lastSeen)
+	if err != nil {
+		return PreviousEnrollment{}, false, err
+	}
+	p.Status = StatusOf(seen, interval, s.Now())
+	p.Revoked = revoked != 0
+	return p, true, nil
+}
+
 // UpsertDevice enrolls a device. A re-enrollment of the same (org_id,
 // device_uid) keeps the row (and its heartbeats, commands and alerts),
 // refreshes the inventory columns and rotates the device token. The
@@ -195,15 +232,12 @@ func (s *Store) RecordSync(ctx context.Context, deviceID int64, ip string, req p
 		v := pct1(float64(m.MemUsedMB), float64(m.MemTotalMB))
 		memPct = &v
 	}
+	// Fullest filesystem that counts (small /boot and EFI mounts are ignored,
+	// see protocol.DiskCounts); the mount is recovered from last_metrics_json
+	// by the alert evaluator.
 	var diskPct *float64
-	for _, d := range m.Disks {
-		if d.TotalGB <= 0 {
-			continue
-		}
-		v := pct1(d.UsedGB, d.TotalGB)
-		if diskPct == nil || v > *diskPct {
-			diskPct = &v
-		}
+	if v, _, ok := protocol.DiskUsedPct(m.Disks); ok {
+		diskPct = &v
 	}
 	var factsJSON *string
 	if req.Facts != nil {

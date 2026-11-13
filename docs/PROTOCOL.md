@@ -49,7 +49,7 @@ result is accepted only from that device's token (D5).
 
 `200 {"ok":true,"version":"0.1.0"}`
 
-### 3.2 `POST /api/agent/v1/enroll` (no auth; rate limit 10 requests/min/IP -> `429 {"error":"rate_limited"}`)
+### 3.2 `POST /api/agent/v1/enroll` (no auth; rate limit 60 requests/min/IP, refilled continuously -> `429 {"error":"rate_limited"}`; the desktop agent retries a 429 up to six times 10 s apart)
 
 Request (fixtures `enroll_linux.json`, `enroll_android.json`):
 
@@ -154,8 +154,10 @@ Request (fixture `command_result.json`):
 - `stdout` / `stderr` each capped at 65536 bytes by the agent (`truncated=true`).
 
 Response `204`. Status becomes `timeout` (error starts with "timeout"), `failed` (error
-non-empty or `exit_code != 0`), else `done`. `404 {"error":"not_found"}` if the command is not
-in status `sent` for this device; `409 {"error":"conflict"}` if already finished. Audit
+non-empty or `exit_code != 0`), else `done`. `404 {"error":"not_found"}` when the command does
+not exist or belongs to another device; `409 {"error":"conflict"}` when it is this device's
+command but not in status `sent` (already finished, lost, or never delivered). Agents treat
+both as final. `started_at` / `finished_at` are stored with millisecond precision. Audit
 `command.finished` actor_type=device.
 
 ## 4. Status and timing
@@ -187,8 +189,9 @@ the shape, `KindSupportedOn(kind, platform)` checks the platform, `KindsFor(plat
 
 Common rules:
 
-- `timeout_s` default 60, clamp 1..3600 (0 means default). On deadline the process group is
-  killed (Linux `Setpgid` + `kill(-pgid)`; Windows `Process.Kill`, tree kill is phase 2).
+- `timeout_s`: 0 means the default 60; otherwise it must be 1..3600 (the dashboard API answers
+  `400 invalid_request` outside that range; agents clamp defensively). On deadline the process
+  group is killed (Linux `Setpgid` + `kill(-pgid)`; Windows `Process.Kill`, tree kill is phase 2).
 - Only admin|operator can queue commands; viewer never can.
 - Every queued command writes audit `command.queued` with `argv`, or `shell` + body sha256 +
   first 200 chars, or `text`. `lock` additionally writes audit `device.lock_requested` with the
@@ -214,7 +217,10 @@ The dir is removed afterwards.
 ### lock (all platforms)
 
 - Linux: run `["loginctl","lock-sessions"]`; if that exits non-zero try
-  `["xdg-screensaver","lock"]`; report the first that succeeds, else failed.
+  `["xdg-screensaver","lock"]`; report the first that succeeds. When loginctl reports that
+  there is no session to lock (headless host, container) the result is exit 0 with stdout
+  `no interactive session`, like Windows. Otherwise `failed` with `error` listing every
+  attempt (`lock failed: loginctl: exit 1: <stderr>; xdg-screensaver: spawn: ...`).
 - Windows: the agent runs as a service in session 0, where `LockWorkStation` does nothing.
   Find the active console session (`WTSGetActiveConsoleSessionId`), `WTSQueryUserToken` for
   it, `CreateProcessAsUser` running `rundll32.exe user32.dll,LockWorkStation` with
@@ -239,7 +245,9 @@ Reply `exit_code 0`, `stdout "pong"`, `stderr ""`, `error ""`.
   result stdout with exit 0.
 - Windows: `msg.exe` via the console session (best effort); exit 0 with the text in stdout
   when no session is available.
-- Android: a high-importance notification with the text; result exit 0.
+- Android: a high-importance notification with the text; result exit 0. When notifications
+  are disabled for the app the text goes to stdout with stderr `notifications disabled`, still
+  exit 0 (same as the desktop agents without a notifier).
 
 ### Android (A1)
 
@@ -262,6 +270,12 @@ insufficient role. Roles: `viewer < operator < admin`.
   `user.login` / `user.login_failed`.
 - `POST /api/v1/logout` -> `204`.
 - `GET /api/v1/me` -> `{"user":{...}}`.
+- `POST /api/v1/me/password {"current_password","new_password"}` (any role, own account;
+  `new_password` >= 10 chars and different from the current one) -> `204`; the user's other
+  sessions are deleted, the calling session stays valid. `400 invalid_request` with a detail
+  (`current password is incorrect`, ...); `429` under the login rate limit (10/min/IP). Audit
+  `user.password_changed` / `user.password_change_failed`. Recovery without the current
+  password is the CLI `msp-server user set-password` (section 9).
 
 ### Summary and orgs
 
@@ -275,6 +289,11 @@ insufficient role. Roles: `viewer < operator < admin`.
   `201 {"token":{...row...},"plaintext":"et_...","install":{"linux":"curl -fsSLo /tmp/msp-install.sh BASE/dl/install.sh && sudo bash /tmp/msp-install.sh --server BASE --token et_...","windows":"irm BASE/dl/install.ps1 -OutFile $env:TEMP\\msp-install.ps1; & $env:TEMP\\msp-install.ps1 -Server BASE -Token et_...","android":"Install BASE/dl/msp-agent.apk, open MSP Agent, enter BASE and the token et_..."}}`
   where `BASE` = `MSP_BASE_URL` or request scheme+host. Audit `token.created`.
 - `POST /api/v1/orgs/{id}/tokens/{tid}/revoke` (admin|operator) -> `204`. Audit `token.revoked`.
+
+`device.enrolled` for an existing `(org_id, device_uid)` carries `re_enrolled: true`,
+`previous_hostname` and `previous_status`; when the hostname differs and the row was not
+revoked it also carries a `warning` (and the server logs one): that is a cloned machine-id,
+the previous agent's token is now invalid.
 
 ### Devices
 
@@ -348,7 +367,8 @@ COMMAND = {"id":7,"device_id":42,"org_id":1,"created_by":1,"created_by_email":"a
 
 ## 7. Audit actions (`audit_log.action`)
 
-`user.login`, `user.login_failed`, `user.created`, `user.disabled`, `org.created`,
+`user.login`, `user.login_failed`, `user.created`, `user.disabled`, `user.password_changed`
+(actor the user, or `system` with detail `via: cli`), `user.password_change_failed`, `org.created`,
 `token.created`, `token.revoked`, `device.enrolled`, `device.revoked`, `device.deleted`,
 `device.lock_requested` **(A1)**, `command.queued`, `command.finished`, `command.lost`,
 `alert.ack`.
@@ -356,15 +376,24 @@ COMMAND = {"id":7,"device_id":42,"org_id":1,"created_by":1,"created_by_email":"a
 ## 8. Alert thresholds
 
 `offline` = status offline (`3*interval_s + 15 s`), severity high; `disk_full` =
-`disk_used_pct >= 90`, medium; `memory_high` = `mem_used_pct >= 95`, low; `battery_low` =
-`battery_pct <= 15` and not charging, low. Each type has at most one open row per device and
-auto-resolves when the condition clears; ack is a flag on the open row.
+`disk_used_pct >= 90`, medium, message `disk 92.5% used on /data`; `memory_high` =
+`mem_used_pct >= 95`, low; `battery_low` = `battery_pct <= 15` and not charging, low. Each type
+has at most one open row per device and auto-resolves when the condition clears; ack is a flag
+on the open row.
+
+`disk_used_pct` (Fleet Disk column, heartbeats, `disk_full`) is the fullest filesystem among
+those that count: at least 2 GB and not `/boot`, `/boot/*` or `/efi` (a separate boot
+partition is small and routinely 90 % full on a healthy host). When no reported filesystem
+counts, the fullest of all of them is used. Every filesystem the agent reports stays visible
+on the device page.
 
 ## 9. CLI contracts
 
 **Server** (`cmd/msp-server`): `msp-server serve`;
 `msp-server user add --email E --role admin|operator|viewer --password-stdin` (reads the
-password from stdin); `msp-server org add --name N` (prints the new org id as a bare integer);
+password from stdin); `msp-server user set-password --email E --password-stdin` (replaces the
+password and ends every session of that user; audit `user.password_changed` actor system);
+`msp-server org add --name N` (prints the new org id as a bare integer);
 `msp-server token new --org ID --label L --max-uses N --ttl 24h` (prints only the plaintext
 token); `msp-server version`.
 Env (flags of the same name override): `MSP_DB` (`./msp.db`), `MSP_LISTEN` (`:8080`),

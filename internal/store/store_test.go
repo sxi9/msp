@@ -68,6 +68,9 @@ func fixture(t *testing.T, s *Store) (Org, User, Device, string) {
 	return org, u, dev, tok
 }
 
+// migrationCount is the number of files in migrations/ (0001_init, 0002_heartbeats_at).
+const migrationCount = 2
+
 func TestOpenMigratesAndReopens(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "msp.db")
 	s, err := Open(path)
@@ -79,7 +82,7 @@ func TestOpenMigratesAndReopens(t *testing.T) {
 		t.Fatalf("CreateOrg: %v", err)
 	}
 	var n int
-	if err := s.db.QueryRow(`SELECT COUNT(*) FROM schema_migrations`).Scan(&n); err != nil || n != 1 {
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM schema_migrations`).Scan(&n); err != nil || n != migrationCount {
 		t.Fatalf("schema_migrations rows = %d, err %v", n, err)
 	}
 	s.Close()
@@ -96,8 +99,12 @@ func TestOpenMigratesAndReopens(t *testing.T) {
 	if err != nil || len(orgs) != 1 || orgs[0].Name != "one" {
 		t.Fatalf("after reopen orgs = %+v, err %v", orgs, err)
 	}
-	if err := s2.db.QueryRow(`SELECT COUNT(*) FROM schema_migrations`).Scan(&n); err != nil || n != 1 {
+	if err := s2.db.QueryRow(`SELECT COUNT(*) FROM schema_migrations`).Scan(&n); err != nil || n != migrationCount {
 		t.Fatalf("schema_migrations rows after reopen = %d, err %v", n, err)
+	}
+	var plan string
+	if err := s2.db.QueryRow(`EXPLAIN QUERY PLAN DELETE FROM heartbeats WHERE id IN (SELECT id FROM heartbeats WHERE at < '2026-01-01T00:00:00Z' LIMIT 5000)`).Scan(new(int), new(int), new(int), &plan); err == nil && strings.Contains(plan, "SCAN heartbeats") && !strings.Contains(plan, "INDEX") {
+		t.Fatalf("heartbeat prune does not use an index: %s", plan)
 	}
 	var fk int
 	if err := s2.db.QueryRow(`PRAGMA foreign_keys`).Scan(&fk); err != nil || fk != 1 {
@@ -706,7 +713,7 @@ func TestCommandsLifecycle(t *testing.T) {
 
 	// Result state machine.
 	start := c.now()
-	res := protocol.CommandResult{ExitCode: 0, Stdout: "a;id\n", StartedAt: start, FinishedAt: start.Add(time.Second)}
+	res := protocol.CommandResult{ExitCode: 0, Stdout: "a;id\n", StartedAt: start, FinishedAt: start.Add(1340 * time.Millisecond)}
 	if _, err := s.CompleteCommand(ctx, exec.ID, dev.ID+1, res); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("wrong device err = %v", err)
 	}
@@ -722,8 +729,8 @@ func TestCommandsLifecycle(t *testing.T) {
 	}
 	got, _ = s.GetCommand(ctx, exec.ID)
 	if got.Status != "done" || got.ExitCode == nil || *got.ExitCode != 0 || got.Stdout != "a;id\n" ||
-		got.StartedAt == nil || got.FinishedAt == nil || !got.FinishedAt.Equal(start.Add(time.Second)) {
-		t.Fatalf("done command = %+v", got)
+		got.StartedAt == nil || got.FinishedAt == nil || !got.FinishedAt.Equal(start.Add(1340*time.Millisecond)) {
+		t.Fatalf("done command = %+v (timestamps must keep milliseconds)", got)
 	}
 	st, _ = s.CompleteCommand(ctx, script.ID, dev.ID, protocol.CommandResult{ExitCode: -1, Error: "timeout after 120s"})
 	if st != "timeout" {

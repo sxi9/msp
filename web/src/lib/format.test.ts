@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { pct, gb, ago, duration, uptime } from './format.ts';
+import { pct, gb, ago, fromNow, duration, uptime } from './format.ts';
 
 test('pct rounds and dashes null', () => {
   assert.equal(pct(50.8), '51%');
@@ -24,6 +24,17 @@ test('ago buckets', () => {
   assert.equal(ago('2026-11-13T07:00:00Z', now), '3 h ago');
   assert.equal(ago('2026-11-11T10:00:00Z', now), '2 d ago');
   assert.equal(ago('2026-11-13T10:00:05Z', now), '0 s ago');
+});
+
+test('fromNow buckets', () => {
+  const now = Date.parse('2026-11-13T10:00:00Z');
+  assert.equal(fromNow(null), '—');
+  assert.equal(fromNow('garbage'), '—');
+  assert.equal(fromNow('2026-11-13T10:00:12Z', now), 'in 12 s');
+  assert.equal(fromNow('2026-11-13T10:05:00Z', now), 'in 5 min');
+  assert.equal(fromNow('2026-11-13T13:00:00Z', now), 'in 3 h');
+  assert.equal(fromNow('2026-11-20T10:00:00Z', now), 'in 7 d');
+  assert.equal(fromNow('2026-11-13T09:59:00Z', now), 'now');
 });
 
 test('duration', () => {

@@ -19,7 +19,7 @@ export function DeviceTable({ devices, grouped = true, empty }: { devices: Devic
   return (
     <table class="grid">
       <thead>
-        <tr><th></th><th>Hostname</th><th>OS</th><th>Version</th><th>Last seen</th><th>CPU</th><th>Memory</th><th>Disk</th><th>Battery</th><th>Alerts</th><th>Agent</th></tr>
+        <tr><th></th><th>Hostname</th><th>OS</th><th>Arch</th><th>Last seen</th><th>CPU</th><th>Memory</th><th>Disk</th><th>Battery</th><th>Alerts</th><th>Agent</th></tr>
       </thead>
       <tbody>
         {groups.map((g) => [
@@ -29,7 +29,7 @@ export function DeviceTable({ devices, grouped = true, empty }: { devices: Devic
               <td data-label="Status"><StatusDot status={d.status} alerting={d.open_alerts > 0} /></td>
               <td data-label="Hostname"><a href={`#/devices/${d.id}`}>{d.hostname}</a>{d.revoked && <span class="chip">revoked</span>}</td>
               <td data-label="OS"><span class="chip">{PLATFORM_SHORT[d.platform] ?? d.platform}</span> {d.os_version}</td>
-              <td data-label="Version" class="muted">{d.arch}</td>
+              <td data-label="Arch" class="muted">{d.arch}</td>
               <td data-label="Last seen">{ago(d.last_seen_at)}</td>
               <td data-label="CPU"><Bar value={d.cpu_pct} /></td>
               <td data-label="Memory"><Bar value={d.mem_used_pct} /></td>

@@ -114,6 +114,11 @@ pre.out { margin: 0; padding: 8px 64px 8px 10px; background: var(--code-bg); bor
 
 @media (max-width: 640px) {
   .page { padding: 12px 16px; }
+  /* The user box wraps onto a second row on phones; the header must grow with it
+     instead of painting that row over the page heading. */
+  .topbar { height: auto; min-height: 48px; padding: 6px 16px; row-gap: 4px; }
+  .userbox { width: 100%; margin-left: 0; justify-content: space-between; }
+  .userbox .email { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
   .cols, .kv.header { grid-template-columns: max-content 1fr; }
   .cols { display: block; }
   .counts { display: none; }

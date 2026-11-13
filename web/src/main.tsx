@@ -13,6 +13,7 @@ import { Orgs } from './views/Orgs.tsx';
 import { Org } from './views/Org.tsx';
 import { Audit } from './views/Audit.tsx';
 import { Users } from './views/Users.tsx';
+import { Account } from './views/Account.tsx';
 
 function page(route: Route, user: User) {
   switch (route.name) {
@@ -23,6 +24,7 @@ function page(route: Route, user: User) {
     case 'org': return <Org id={route.id} user={user} />;
     case 'audit': return <Audit />;
     case 'users': return user.role === 'admin' ? <Users user={user} /> : <p class="error">Admins only.</p>;
+    case 'account': return <Account user={user} />;
     default: return <p class="error">Page not found. <a href="#/">Back to the fleet</a></p>;
   }
 }
