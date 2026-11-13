@@ -6,6 +6,7 @@ import { ago, duration, gb, pct, uptime, when } from '../lib/format.ts';
 import { argvPreview, parseArgv } from '../lib/argv.ts';
 import { loadPresets, presetFill, presetsFor } from '../lib/presets.ts';
 import { notReportedHint, remoteDesktopError, technicianHint } from '../lib/rustdesk.ts';
+import { appsOf, appsSummary, filterApps, type InstalledApp } from '../lib/apps.ts';
 import { COMMAND_DONE, canOperate, isAdmin, type Command, type Device as DeviceT, type NewCommand, type Preset, type RemoteDesktopOpened, type RustdeskInfo, type User } from '../types.ts';
 import { StatusDot } from '../components/StatusDot.tsx';
 import { Sparkline } from '../components/Sparkline.tsx';
@@ -84,6 +85,9 @@ export function Device({ id, user }: { id: number; user: User }) {
   if (!detail.data) return <p class="muted">Loading…</p>;
   const d = detail.data.device;
   const facts = detail.data.facts ?? {};
+  // The installed-apps inventory has its own panel; every other key is a facts row.
+  const apps = appsOf(facts);
+  const factRows = Object.entries(facts).filter(([k]) => k !== 'apps');
   const metrics = detail.data.metrics ?? {};
   const disks = (metrics.disks as { mount: string; total_gb: number; used_gb: number }[] | undefined) ?? [];
   const operator = canOperate(user);
@@ -125,8 +129,8 @@ export function Device({ id, user }: { id: number; user: User }) {
         <div>
           <h2>Facts</h2>
           <dl class="kv">
-            {Object.entries(facts).map(([k, v]) => [<dt key={`k${k}`} title={k}>{FACT_LABELS[k] ?? k}</dt>, <dd key={`v${k}`}>{factText(k, v)}</dd>])}
-            {Object.keys(facts).length === 0 && <dd class="muted">No facts reported yet.</dd>}
+            {factRows.map(([k, v]) => [<dt key={`k${k}`} title={k}>{FACT_LABELS[k] ?? k}</dt>, <dd key={`v${k}`}>{factText(k, v)}</dd>])}
+            {factRows.length === 0 && <dd class="muted">No facts reported yet.</dd>}
           </dl>
         </div>
         <div>
@@ -140,6 +144,7 @@ export function Device({ id, user }: { id: number; user: User }) {
         </div>
       </div>
 
+      {apps && <InstalledApps apps={apps} />}
       {builtins && <BuiltIns device={d} onQueue={queue} />}
       {!d.revoked && <RemoteDesktop device={d} operator={operator} />}
       {operator && d.can_run_commands && <Console device={d} onQueue={queue} />}
@@ -150,6 +155,44 @@ export function Device({ id, user }: { id: number; user: User }) {
       {history.error && <p class="error">{history.error}</p>}
       <History commands={history.data ?? []} />
     </section>
+  );
+}
+
+/**
+ * The installed-apps inventory an Android agent reports in facts.apps (docs/PROTOCOL.md):
+ * count, a label/package search, a system-apps toggle (off by default: a phone lists a few
+ * hundred of them) and a table inside its own scroll box so a long list or a long package
+ * name never widens the page.
+ */
+function InstalledApps({ apps }: { apps: InstalledApp[] }) {
+  const [query, setQuery] = useState('');
+  const [showSystem, setShowSystem] = useState(false);
+  const rows = filterApps(apps, query, showSystem);
+  return (
+    <div class="card apps">
+      <div class="form-row">
+        <h2>Installed apps <span class="muted">{appsSummary(apps)}</span></h2>
+        <input type="search" placeholder="Search label or package" value={query} onInput={(e) => setQuery(e.currentTarget.value)} />
+        <label><input type="checkbox" checked={showSystem} onChange={(e) => setShowSystem(e.currentTarget.checked)} /> Show system apps</label>
+      </div>
+      {apps.length === 0 ? <p class="muted">The agent reported no apps.</p> : rows.length === 0 ? <p class="muted">No app matches{showSystem ? '' : ' (system apps are hidden)'}.</p> : (
+        <div class="apps-scroll">
+          <table class="grid">
+            <thead><tr><th>Label</th><th>Package</th><th>Version</th></tr></thead>
+            <tbody>
+              {rows.map((a) => (
+                <tr key={a.package} class={a.system ? 'system' : ''}>
+                  <td data-label="Label">{a.label}{a.system && <span class="chip">system</span>}</td>
+                  <td data-label="Package"><code>{a.package}</code></td>
+                  <td data-label="Version">{a.version || '—'}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      <p class="muted">{rows.length} of {apps.length} shown. The agent sends the inventory with its facts: on the first sync after start and every 120th sync, non-system apps first, at most 1000 entries.</p>
+    </div>
   );
 }
 

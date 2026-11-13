@@ -21,7 +21,7 @@ Phase 1 features (built and verified on Linux; Windows and Android runtime need 
 | Users | Roles `viewer` (see), `operator` (act), `admin` (manage users, clients, delete devices) |
 | Enrollment | Per-client tokens with label, max uses, expiry and revoke; install one-liners per OS |
 | Fleet | Every device with online/offline/pending, OS, agent version, last seen, CPU, memory, disk, battery, open alerts; filter by client, status, hostname |
-| Device page | Status, metrics, facts (CPU model, memory, kernel, model, serial), disks, command console, command history, Lock, Ping, Message, Remote desktop (Connect), Revoke, Delete |
+| Device page | Status, metrics, facts (CPU model, memory, kernel, model, serial), disks, Installed apps (Android: search, system-apps toggle), command console, command history, Lock, Ping, Message, Remote desktop (Connect), Revoke, Delete |
 | Remote commands | `exec` (argv, no shell), `script` (sh/bash on Linux, PowerShell/cmd on Windows), presets, timeout, output capped at 64 KiB |
 | Remote lock | Built-in command; only for devices enrolled under your server; operator or admin; audited twice |
 | Remote desktop | Official RustDesk client on the device, your own relay (hbbs/hbbr) next to the server, Connect button on the device page, every connection audited (section 8) |
@@ -176,10 +176,20 @@ notification, syncs every 60 s, and shows offline after 195 s without a sync. Ph
 managers can delay syncs; a few false offline alerts on phones are expected in phase 1.
 The phase 1 APK is a debug build that also accepts plain `http://` for lab servers.
 
+**Installed apps.** With its facts (at enrollment, on the first sync after the app starts and
+every 120th sync, i.e. about every two hours) the agent sends the list of installed packages:
+label, package id, version and whether it is a system app, non-system apps first, at most
+1000 entries. The app declares `QUERY_ALL_PACKAGES` for this; no extra grant is needed on
+the phone. The list appears on the device page as **Installed apps**; a change on the phone
+shows up on the next facts sync or after the app is restarted. Desktop agents do not send a
+software inventory in phase 1.
+
 ### 5d. Check it worked
 
 The device appears on **Fleet** under its client within one sync, with a green dot. On the
-device page the **Facts** panel fills on the first sync and metrics update every sync.
+device page the **Facts** panel fills on the first sync and metrics update every sync; an
+Android device also gets the **Installed apps** panel (count, search by label or package,
+"Show system apps" toggle, off by default).
 
 ## 6. Remote commands
 

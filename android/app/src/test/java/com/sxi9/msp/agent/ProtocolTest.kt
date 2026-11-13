@@ -73,6 +73,30 @@ class ProtocolTest {
     }
 
     @Test
+    fun syncWithAppsMatchesFixture() {
+        // The installed-apps inventory rides inside facts as "apps" (sync_android_apps.json).
+        val want = JSONObject(fixture("sync_android_apps.json"))
+        val apps = Apps.toJson(
+            listOf(
+                InstalledApp("com.android.settings", "Settings", "14", true),
+                InstalledApp("com.sxi9.msp.agent", "MSP Agent", "0.1.0", false),
+                InstalledApp("com.example.nolabel", null, null, false),
+                InstalledApp("org.mozilla.firefox", "Firefox", "131.0.3", false),
+                InstalledApp("com.google.android.gms", "Google Play services", "24.38.33", true),
+            )
+        )
+        val got = Protocol.buildSyncJson(345600, sampleMetrics(), sampleFacts().put("apps", apps))
+        assertEquals(keys(want), keys(got))
+        assertEquals(keys(want.getJSONObject("facts")), keys(got.getJSONObject("facts")))
+        val wantApps = want.getJSONObject("facts").getJSONArray("apps")
+        val gotApps = got.getJSONObject("facts").getJSONArray("apps")
+        assertEquals(wantApps.length(), gotApps.length())
+        for (i in 0 until wantApps.length()) {
+            assertEquals(wantApps.getJSONObject(i).toString(), gotApps.getJSONObject(i).toString())
+        }
+    }
+
+    @Test
     fun parsesSyncResponse() {
         assertEquals(30, Protocol.parseSyncResponse(fixture("sync_response.json")))
         // exec/script are desktop kinds; parsing keeps them so the service can reject them.

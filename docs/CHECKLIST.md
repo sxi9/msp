@@ -50,16 +50,16 @@ test or a screenshot in `docs/screenshots/`. Unticked items are not done.
 - [x] `gradle assembleDebug` produces APK in this container (`android/app/build/outputs/apk/debug/app-debug.apk`, 845 782 bytes, from a clean build)
 - [ ] Enrollment screen (paste token + server URL) — Not verified: needs a device or emulator
 - [ ] Foreground service heartbeat: battery, storage, RAM, network type, OS version — Not verified: needs a device or emulator
-- [ ] Installed apps inventory — Not verified: needs a device or emulator (and no package-list code was found in `android/app/src/main`)
+- [x] Installed apps inventory — `AppInventory.kt` (PackageManager, `QUERY_ALL_PACKAGES` in the manifest) + pure `Apps.kt` (`facts.apps`: label / package / version / system, non-system first then by label, cap 1000 entries and 192 KiB, label fallback to package, missing version `""`): JVM `AppsTest` (7 tests: fixture keys, empty inventory, ordering, cap, field limits in bytes, byte budget, fallbacks) and `ProtocolTest.syncWithAppsMatchesFixture` against `sync_android_apps.json`; server `TestAppsInventoryStoredAndServed` / `TestAppsInventoryValidation`; dashboard panel in screenshots 18 and 19 (android devices enrolled through the real agent API: the fixture facts, then a 40-app inventory with the search filter). Not verified: the PackageManager read on a real phone or emulator
 - [ ] Boot receiver restarts service — Not verified: needs a device or emulator
 - [ ] Safe command set: ping, message, inventory, lock (device admin) — Not verified on a device; the server side accepts lock and refuses exec for android devices (e2e)
-- [x] Unit tests for protocol client pass on JVM (`:app:testDebugUnitTest`: ProtocolTest 7, UrlPolicyTest 5, 0 failures)
+- [x] Unit tests for protocol client pass on JVM (`:app:testDebugUnitTest`: ProtocolTest 8, UrlPolicyTest 5, AppsTest 7, 0 failures — 20 tests, see the installed-apps section below)
 
 ## Dashboard
 - [x] Login page (screenshot 01)
 - [x] Clients list and client page with enrollment token button (screenshots 03, 04)
 - [x] Device list with online/offline, OS, last seen, filters (screenshots 02, 13; the org/status/hostname filters are rendered, filtering logic covered by the web unit test `filterDevices by substring, status and org`)
-- [x] Device page: metrics, inventory, software, command history, Run command, Lock (screenshots 05–07). Not verified: software list, not in phase 1
+- [x] Device page: metrics, inventory, software, command history, Run command, Lock (screenshots 05–07; Android "Installed apps" panel with count, search and system toggle in screenshots 18 and 19, `web/src/lib/apps.test.ts`). Not verified: a desktop software list, not in phase 1
 - [x] Alerts page with acknowledge / resolve (screenshots 08, 11, 12: open then acked; resolve is automatic when the device syncs again, `TestOfflineAlertOpensAndResolves`)
 - [x] Audit log page (screenshot 09)
 - [x] Command preset library: file loads, endpoint serves it, dashboard uses it, live reload (live run with `MSP_PRESETS=deploy/presets.example.json`: `GET /api/v1/presets` returned `source: file` with the 10 Linux + 10 Windows entries; picking "Failed services" filled argv and timeout and ran on the agent, screenshots 14, 15; an edit to the file showed up on the next request without restart, a broken file kept the last good set and was logged; `TestPresets*`, `web/src/lib/presets.test.ts`)
@@ -69,6 +69,38 @@ test or a screenshot in `docs/screenshots/`. Unticked items are not done.
 ## Docs
 - [x] README: run, enroll, deploy (the Quickstart commands are the ones the live run used and they worked; deploy points to docs/OPS.md)
 - [x] CI workflow: go build/test, gradle assembleDebug (`.github/workflows/ci.yml` runs the same commands that passed here). Not verified: an actual GitHub Actions run
+
+## Android installed apps inventory (added 2026-11-13)
+
+Verified in the same container with: `CGO_ENABLED=0 go build ./...`, `go vet ./...`, `CGO_ENABLED=0 go test ./... -count=1`
+(agent, e2e, protocol, server, store ok), `make web` (25 web unit tests, tsc, esbuild, server rebuild), `scripts/e2e.sh`
+("E2E OK"), and in `android/` `gradle --no-daemon --max-workers=1 :app:assembleDebug :app:testDebugUnitTest`
+(BUILD SUCCESSFUL, APK 877 055 bytes, 20 JVM tests: AppsTest 7, ProtocolTest 8, UrlPolicyTest 5, 0 failures), then a live
+run for screenshot 18.
+
+- [x] Protocol: `Facts.Apps []App` (`apps,omitempty`), `App{Package, Label, Version, System}`, validation (<= 1000 entries, package 1..256, label <= 256, version <= 64, detail names the index), fixture `sync_android_apps.json` round-trips on both sides (`TestFixturesRoundTrip`, `TestFixtureSemantics`, `TestFactsAppsValidate`; Android `ProtocolTest.syncWithAppsMatchesFixture`); docs/PROTOCOL.md section 3.2a
+- [x] Android app: `AppInventory.kt` reads PackageManager (manifest `QUERY_ALL_PACKAGES` with the reason), pure `Apps.kt` sorts (non-system first, label case-insensitive), caps (1000 entries, 192 KiB), falls back (label -> package, version -> ""), cuts fields to the byte limits; sent inside facts on the existing cadence (`Metrics.facts`); `AppsTest` 6 tests. Not verified: on a real phone (the PackageManager call cannot run on the JVM)
+- [x] Server: apps stored verbatim at enroll and sync, served in `GET /api/v1/devices/{id}` facts, untouched by a sync without facts, invalid inventories 400 on both endpoints, a 1000-entry inventory fits the 256 KiB body limit (`TestAppsInventoryStoredAndServed`, `TestAppsInventoryValidation`)
+- [x] Dashboard: "Installed apps" card (count, search, system toggle off by default, Label / Package / Version in a scroll box), `apps` excluded from the facts rows, `?mock=1` android device carries apps (`web/src/lib/apps.test.ts`: appsOf, sortApps, filterApps, appsSummary; screenshots 18 and 19, scrollWidth 400 at phone width)
+
+### Final verification pass (2026-11-13)
+
+Re-run in the same container: `CGO_ENABLED=0 go build ./...` ok, `go vet ./...` ok, `CGO_ENABLED=0 go test ./... -count=1` ok
+(agent 3.3 s, e2e 7.4 s, protocol, server 27.6 s, store), `GOOS=windows GOARCH=amd64 go build ./...` ok, `make web` (npm ci,
+25 web unit tests pass, `tsc --noEmit`, esbuild `app.js` 69.4 kB, server rebuilt), `scripts/e2e.sh` ends with "E2E OK" (36 PASS
+steps, no FAIL), and in `android/` `gradle --no-daemon --max-workers=1 :app:assembleDebug :app:testDebugUnitTest` BUILD
+SUCCESSFUL (APK 877 055 bytes; the JVM tests re-executed with `--rerun-tasks`: AppsTest 7, ProtocolTest 8, UrlPolicyTest 5,
+20 tests, 0 failures). Then a live run on 127.0.0.1:18099 with a fresh SQLite file, admin/org/token bootstrapped through
+the CLI, and a fake Android device sent with curl (no phone here): enrollment `pixel-7-reception`, platform android,
+arch arm64, Android 14 (34), facts with 40 apps (26 user, 14 system), then one sync with battery 64 % not charging and one
+disk `/data`; the database was deleted afterwards.
+
+- [x] Enroll answered 201 and the sync 200 `{"poll_interval_s":60,"commands":[]}`; `GET /api/v1/devices/1` showed status online, `battery_pct` 64, `battery_charging` false, one `/data` disk, `can_run_commands` false and 40 entries in `facts.apps` (14 system)
+- [x] Device page: "Installed apps 40 apps (14 system)", 26 rows with the system toggle off (default), 40 with it on (14 marked system), 26 again after unticking; `apps` not rendered as a facts row (facts list: CPUs, CPU, IPs, Kernel, Manufacturer, Memory, Model, Serial); Battery 64 %; `/data` in the disks table (screenshot 18, desktop 1280 px and phone 400 px)
+- [x] Search: `chrome` typed into the box leaves one row (Chrome, `com.android.chrome`, 130.0.6723.102), footer "1 of 40 shown"; still 1 with system apps shown (screenshot 19, desktop and phone)
+- [x] Actions row for the android device offers exactly Lock device, Ping and Send message (with the message input); no Run command/script console, no "Run on" button and no preset select on the page
+- [x] Phone width: `document.documentElement.scrollWidth` 400 on both pages; no browser console errors
+- [x] Nothing left behind: server stopped, the live database deleted
 
 ## RD1: remote desktop through our own RustDesk relay (added 2026-11-13, D4 phase A)
 

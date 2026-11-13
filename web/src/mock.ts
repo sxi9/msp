@@ -70,6 +70,21 @@ const presets: { linux: Preset[]; windows: Preset[] } = {
     { label: 'Reboot', kind: 'exec', argv: ['shutdown', '/r', '/t', '0'], timeout_s: 60 },
   ],
 };
+// An Android agent's facts carry the installed-apps inventory (facts.apps, non-system first,
+// then by label), which the device page shows in its own panel.
+const androidFacts = (d: Device) => ({
+  kernel: '5.15.110-android14-11', cpu_model: 'shiba', cpu_count: 9, mem_total_mb: 7634, manufacturer: 'Google', model: d.hostname, serial: '', ips: [d.last_ip],
+  apps: [
+    { package: 'com.example.nolabel', label: 'com.example.nolabel', version: '', system: false },
+    { package: 'org.mozilla.firefox', label: 'Firefox', version: '131.0.3', system: false },
+    { package: 'com.google.android.apps.maps', label: 'Maps', version: '11.145.0101', system: false },
+    { package: 'com.sxi9.msp.agent', label: 'MSP Agent', version: '0.1.0', system: false },
+    { package: 'com.whatsapp', label: 'WhatsApp', version: '2.24.20.81', system: false },
+    { package: 'com.android.chrome', label: 'Chrome', version: '129.0.6668.70', system: true },
+    { package: 'com.google.android.gms', label: 'Google Play services', version: '24.38.33 (190400-676000000)', system: true },
+    { package: 'com.android.settings', label: 'Settings', version: '14', system: true },
+  ],
+});
 let nextId = 100;
 const log = (action: string, target_type: string, target_id: number | null, org_id: number | null, detail: Record<string, unknown> = {}) =>
   audit.unshift({ id: nextId++, at: iso(0), actor_type: 'user', actor_id: me.id, actor_label: me.email, org_id, action, target_type, target_id, ip: '127.0.0.1', detail });
@@ -169,7 +184,7 @@ function route(method: string, path: string, body: unknown): Reply {
     }
     return ok({
       device: d,
-      facts: d.status === 'pending' ? {} : { kernel: '6.8.0-45-generic', cpu_model: 'Intel(R) Core(TM) i5-1345U', cpu_count: 8, mem_total_mb: 16000, manufacturer: 'Dell Inc.', model: 'Latitude 5540', serial: 'ABC123', ips: [d.last_ip] },
+      facts: d.status === 'pending' ? {} : d.platform === 'android' ? androidFacts(d) : { kernel: '6.8.0-45-generic', cpu_model: 'Intel(R) Core(TM) i5-1345U', cpu_count: 8, mem_total_mb: 16000, manufacturer: 'Dell Inc.', model: 'Latitude 5540', serial: 'ABC123', ips: [d.last_ip] },
       metrics: d.status === 'pending' ? {} : { cpu_pct: d.cpu_pct, mem_total_mb: 16000, mem_used_mb: 8120, disks: [{ mount: d.platform === 'windows' ? 'C:' : '/', total_gb: 476, used_gb: 201.3 }], battery_pct: d.battery_pct, ips: [d.last_ip] },
       alerts: alerts.filter((a) => a.device_id === d.id && !a.resolved_at),
       commands: commands.filter((c) => c.device_id === d.id).slice(0, 20).map((c) => ({ ...c, stdout: '', stderr: '' })),

@@ -10,7 +10,7 @@ Every component and feature carries one label. Updated whenever something change
 | `NOT VERIFIED` | Built, but cannot be exercised in the build container (needs a real Windows machine or Android phone). Needs a manual check; see the "Manual test" column. |
 | `PLANNED` | In the plan (phase 2 or 3), not started. |
 
-Last update: 2026-11-13 (RD1 remote desktop, phase A of D4: final verification pass, screenshots 16 and 17, docs/CHECKLIST.md "Remote desktop (RustDesk, phase A)"). Server, Linux agent and dashboard verified in a live run (see docs/screenshots/); the rows below marked WORKING without a screenshot are covered by `go test ./...` (internal/store, internal/server, internal/e2e) and `scripts/e2e.sh` ("E2E OK").
+Last update: 2026-11-13 (Android installed-apps inventory: `facts.apps` end to end, final verification pass with a 40-app inventory, screenshots 18 and 19, docs/CHECKLIST.md "Android installed apps inventory"; before that RD1 remote desktop, phase A of D4, screenshots 16 and 17). Server, Linux agent and dashboard verified in a live run (see docs/screenshots/); the rows below marked WORKING without a screenshot are covered by `go test ./...` (internal/store, internal/server, internal/e2e) and `scripts/e2e.sh` ("E2E OK").
 
 ## Components
 
@@ -36,6 +36,7 @@ Last update: 2026-11-13 (RD1 remote desktop, phase A of D4: final verification p
 | Agent enrollment, device token | Server, Agents | `WORKING` |
 | Sync with metrics and long-poll command delivery | Server, Desktop agent | `WORKING` |
 | Android sync every 60 s (battery, storage, RAM, apps) | Android agent | `NOT VERIFIED` |
+| Android installed apps inventory (`facts.apps`: label, package, version, system flag; non-system first; cap 1000) | Android agent, Server, Dashboard | `WORKING` (app code `Apps.kt` + `AppInventory.kt`, JVM tests `AppsTest` 7 + `ProtocolTest.syncWithAppsMatchesFixture`; server `TestAppsInventoryStoredAndServed`, `TestAppsInventoryValidation`, fixture `sync_android_apps.json`; dashboard "Installed apps" panel, `web/src/lib/apps.test.ts`, screenshots 18 and 19: 40-app inventory, default view and search filter, lock/ping/message only in Actions) / `NOT VERIFIED` (the PackageManager read on a real phone) |
 | Online / offline / pending status | Server, Dashboard | `WORKING` |
 | Facts: OS, kernel, CPU, memory, model, serial | Desktop agent | `WORKING` |
 | Run command (exec, argv, no shell) | Desktop agent, Dashboard | `WORKING` |

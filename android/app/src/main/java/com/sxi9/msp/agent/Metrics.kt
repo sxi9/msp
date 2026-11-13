@@ -13,7 +13,10 @@ import org.json.JSONObject
 import java.net.Inet4Address
 import java.net.NetworkInterface
 
-/** Inventory and health readings in the shapes of enroll_android.json / sync_android.json. */
+/**
+ * Inventory and health readings in the shapes of enroll_android.json / sync_android.json;
+ * facts also carry the installed-apps inventory (sync_android_apps.json).
+ */
 object Metrics {
     private const val MB = 1024L * 1024L
     private const val GB = 1024.0 * 1024.0 * 1024.0
@@ -40,6 +43,9 @@ object Metrics {
         .put("model", Build.MODEL)
         .put("serial", "")
         .put("ips", ips())
+        // Always present: an empty inventory (or a failed PackageManager read) is sent as
+        // "apps":[], which the server stores as no key (docs/PROTOCOL.md 3.2a).
+        .put("apps", Apps.toJson(AppInventory.collect(ctx)))
 
     fun metrics(ctx: Context): JSONObject {
         val mem = memory(ctx)

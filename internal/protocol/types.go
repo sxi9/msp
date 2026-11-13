@@ -61,6 +61,15 @@ const (
 	// MaxRustdeskIDLen caps facts.rustdesk_id (RustDesk ids are 9 digits today;
 	// the column and the validator leave room for longer numeric ids).
 	MaxRustdeskIDLen = 32
+	// Installed-apps inventory (facts.apps, Android only in phase 1). The entry
+	// cap keeps a sync body with 1000 typical entries (~100 bytes each) well
+	// under the 256 KiB agent body limit; the Android agent additionally stops
+	// adding entries at 192 KiB of serialised apps JSON so that even
+	// maximum-length fields cannot push the body over the limit.
+	MaxApps          = 1000
+	MaxAppPackageLen = 256
+	MaxAppLabelLen   = 256
+	MaxAppVersionLen = 64
 )
 
 // RustdeskURIPrefix is the URL scheme the official RustDesk client registers
@@ -91,10 +100,22 @@ type Metrics struct {
 	IPs             []string `json:"ips"`
 }
 
+// App is one installed application in the facts inventory: the package id,
+// the user-visible label (the package id when the app has none), the version
+// name ("" when the package declares none) and whether it is a system app.
+type App struct {
+	Package string `json:"package"`
+	Label   string `json:"label"`
+	Version string `json:"version"`
+	System  bool   `json:"system"`
+}
+
 // Facts is the slow-changing inventory sent at enrollment, on the first sync
-// after start and every 120th sync. RustdeskID is the only optional key: the
+// after start and every 120th sync. Two keys are optional: RustdeskID, the
 // id of the locally installed RustDesk client (digits, <= MaxRustdeskIDLen),
-// omitted when RustDesk is not installed (RD1).
+// omitted when RustDesk is not installed (RD1); and Apps, the installed-apps
+// inventory (at most MaxApps entries, non-system apps first, then by label),
+// sent by the Android agent and omitted by the desktop agents in phase 1.
 type Facts struct {
 	Kernel       string   `json:"kernel"`
 	CPUModel     string   `json:"cpu_model"`
@@ -105,6 +126,7 @@ type Facts struct {
 	Serial       string   `json:"serial"`
 	IPs          []string `json:"ips"`
 	RustdeskID   string   `json:"rustdesk_id,omitempty"`
+	Apps         []App    `json:"apps,omitempty"`
 }
 
 // Rustdesk tells an agent which self-hosted RustDesk relay to use (RD1):
@@ -273,10 +295,32 @@ func ValidRustdeskID(id string) bool {
 }
 
 // Validate checks the optional facts fields; the returned text is the
-// 400 invalid_request detail.
+// 400 invalid_request detail and names the offending apps index.
 func (f Facts) Validate() error {
 	if f.RustdeskID != "" && !ValidRustdeskID(f.RustdeskID) {
 		return fmt.Errorf("facts.rustdesk_id must be 1..%d digits", MaxRustdeskIDLen)
+	}
+	if len(f.Apps) > MaxApps {
+		return fmt.Errorf("facts.apps has %d entries, at most %d are accepted", len(f.Apps), MaxApps)
+	}
+	for i, a := range f.Apps {
+		if err := a.Validate(); err != nil {
+			return fmt.Errorf("facts.apps[%d].%w", i, err)
+		}
+	}
+	return nil
+}
+
+// Validate checks one inventory entry; the error names the field without
+// the "facts.apps[i]." prefix, which Facts.Validate adds.
+func (a App) Validate() error {
+	switch {
+	case a.Package == "" || len(a.Package) > MaxAppPackageLen:
+		return fmt.Errorf("package must be 1..%d bytes", MaxAppPackageLen)
+	case len(a.Label) > MaxAppLabelLen:
+		return fmt.Errorf("label exceeds %d bytes", MaxAppLabelLen)
+	case len(a.Version) > MaxAppVersionLen:
+		return fmt.Errorf("version exceeds %d bytes", MaxAppVersionLen)
 	}
 	return nil
 }

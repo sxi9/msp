@@ -16,7 +16,7 @@ ride on the heartbeat channel.
 
 Every image was taken from a live run in the build container (real server, real Linux agent) and
 carries its label in the top banner. Desktop width shown here; phone-width versions and the full
-set of 34 are in [`docs/screenshots/`](docs/screenshots/README.md). Diagrams are in
+set of 38 are in [`docs/screenshots/`](docs/screenshots/README.md). Diagrams are in
 [`docs/diagrams/`](docs/diagrams/README.md).
 
 **System map.** Agents connect outbound only; one server holds the APIs, queue, alerts, SQLite and the dashboard.
@@ -50,6 +50,10 @@ set of 34 are in [`docs/screenshots/`](docs/screenshots/README.md). Diagrams are
 **Remote desktop.** RustDesk ID reported by the agent; Connect opens the technician's RustDesk client through our own relay.
 
 ![Remote desktop](docs/screenshots/16-device-remote-desktop-desktop.png)
+
+**Android installed apps.** Inventory reported by the Android agent, searchable, system apps hidden by default.
+
+![Android installed apps](docs/screenshots/18-device-android-apps-desktop.png)
 
 **Alerts.** The agent was stopped; the evaluator opened an offline alert, then it was acknowledged.
 

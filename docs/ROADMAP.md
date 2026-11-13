@@ -40,7 +40,7 @@ An unticked box with a note is built but needs real hardware, or is not started.
 ### Android agent
 - [x] Debug APK builds; release signing wired to a keystore; JVM protocol tests pass
 - [x] Enrollment screen, foreground service, boot receiver, device admin for lock, lock/ping/message handling (code complete)
-- [ ] Installed apps inventory — NOT BUILT: no package-listing code in the Android app yet (queued as a fix)
+- [x] Installed apps inventory: `AppInventory.kt` lists packages through PackageManager (`QUERY_ALL_PACKAGES`), `Apps.kt` shapes `facts.apps` (JVM-tested), the server validates and stores it, the device page shows it with search and a system-apps toggle (screenshots 18 and 19, a 40-app inventory sent through the real agent API). Device verification pending: the PackageManager read has not run on a real phone yet
 - [ ] Enroll, sync, lock, message on a real phone — needs a phone
 
 ### Dashboard

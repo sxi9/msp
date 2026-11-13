@@ -54,6 +54,7 @@ func TestFixturesRoundTrip(t *testing.T) {
 		{"sync_response_android.json", &SyncResponse{}},
 		{"sync_rustdesk.json", &SyncRequest{}},
 		{"sync_response_rustdesk.json", &SyncResponse{}},
+		{"sync_android_apps.json", &SyncRequest{}},
 		{"command_result.json", &CommandResult{}},
 		{"error.json", &ErrorResponse{}},
 	}
@@ -153,6 +154,36 @@ func TestFixtureSemantics(t *testing.T) {
 	roundTrip(t, "sync_response_rustdesk.json", &srr)
 	if srr.Rustdesk == nil || srr.Rustdesk.Host != "rmm.example.com" || srr.Rustdesk.Key == "" || len(srr.Commands) != 0 {
 		t.Fatalf("sync_response_rustdesk: %+v", srr)
+	}
+
+	// Installed-apps inventory: an Android sync whose facts carry apps, in
+	// the order the agent sends them (non-system first, then by label). The
+	// plain fixtures carry no apps.
+	var sapps SyncRequest
+	roundTrip(t, "sync_android_apps.json", &sapps)
+	if sapps.Facts == nil || len(sapps.Facts.Apps) != 5 || sapps.Facts.Validate() != nil {
+		t.Fatalf("sync_android_apps facts: %+v", sapps.Facts)
+	}
+	apps := sapps.Facts.Apps
+	if apps[2].Package != "com.sxi9.msp.agent" || apps[2].Label != "MSP Agent" || apps[2].Version != "0.1.0" || apps[2].System {
+		t.Fatalf("apps[2] = %+v", apps[2])
+	}
+	if apps[0].Label != apps[0].Package || apps[0].Version != "" {
+		t.Fatalf("apps[0] must show the label fallback and an empty version: %+v", apps[0])
+	}
+	if !apps[4].System || apps[4].Package != "com.android.settings" {
+		t.Fatalf("apps[4] = %+v", apps[4])
+	}
+	for i := 1; i < len(apps); i++ {
+		if apps[i-1].System && !apps[i].System {
+			t.Fatalf("non-system apps must come first: %+v", apps)
+		}
+		if apps[i-1].System == apps[i].System && strings.ToLower(apps[i-1].Label) > strings.ToLower(apps[i].Label) {
+			t.Fatalf("apps must be sorted by label within a group: %+v", apps)
+		}
+	}
+	if sl.Facts.Apps != nil || sa.Facts != nil || srd.Facts.Apps != nil || el.Facts.Apps != nil || ea.Facts.Apps != nil {
+		t.Fatal("plain fixtures must not carry apps")
 	}
 
 	var res CommandResult
@@ -386,5 +417,61 @@ func TestRustdesk(t *testing.T) {
 	out, _ = json.Marshal(Facts{IPs: []string{}})
 	if strings.Contains(string(out), "rustdesk_id") {
 		t.Fatalf("empty rustdesk_id must be omitted: %s", out)
+	}
+}
+
+func TestFactsAppsValidate(t *testing.T) {
+	app := func(pkg, label, version string, system bool) App {
+		return App{Package: pkg, Label: label, Version: version, System: system}
+	}
+	ok := []Facts{
+		{},
+		{Apps: []App{}},
+		{Apps: []App{app("a", "", "", false)}},
+		{Apps: []App{app(strings.Repeat("p", MaxAppPackageLen), strings.Repeat("l", MaxAppLabelLen), strings.Repeat("v", MaxAppVersionLen), true)}},
+		{Apps: make([]App, MaxApps)},
+	}
+	for i := range ok[4].Apps {
+		ok[4].Apps[i] = app("com.example.a", "A", "1", i%2 == 0)
+	}
+	for i, f := range ok {
+		if err := f.Validate(); err != nil {
+			t.Errorf("ok[%d]: unexpected error %v", i, err)
+		}
+	}
+	tooMany := make([]App, MaxApps+1)
+	for i := range tooMany {
+		tooMany[i] = app("com.example.a", "A", "1", false)
+	}
+	bad := []struct {
+		f    Facts
+		want string
+	}{
+		{Facts{Apps: []App{app("ok", "", "", false), app("", "No package", "1", false)}}, "facts.apps[1].package must be 1..256"},
+		{Facts{Apps: []App{app(strings.Repeat("p", MaxAppPackageLen+1), "", "", false)}}, "facts.apps[0].package must be 1..256"},
+		{Facts{Apps: []App{app("a", "", "", false), app("b", "", "", false), app("c", strings.Repeat("l", MaxAppLabelLen+1), "", false)}}, "facts.apps[2].label exceeds 256"},
+		{Facts{Apps: []App{app("a", "", strings.Repeat("v", MaxAppVersionLen+1), false)}}, "facts.apps[0].version exceeds 64"},
+		{Facts{Apps: tooMany}, "facts.apps has 1001 entries, at most 1000"},
+		{Facts{RustdeskID: "x", Apps: []App{app("", "", "", false)}}, "rustdesk_id"},
+	}
+	for i, b := range bad {
+		err := b.f.Validate()
+		if err == nil {
+			t.Errorf("bad[%d]: expected error containing %q", i, b.want)
+			continue
+		}
+		if !strings.Contains(err.Error(), b.want) {
+			t.Errorf("bad[%d]: error %q does not contain %q", i, err, b.want)
+		}
+	}
+
+	// Omitted when nil or empty; present with exactly the four keys otherwise.
+	out, _ := json.Marshal(Facts{IPs: []string{}, Apps: []App{}})
+	if strings.Contains(string(out), "apps") {
+		t.Fatalf("empty apps must be omitted: %s", out)
+	}
+	out, _ = json.Marshal(App{Package: "com.example", Label: "Example", Version: "1.2.3", System: true})
+	if string(out) != `{"package":"com.example","label":"Example","version":"1.2.3","system":true}` {
+		t.Fatalf("app JSON shape: %s", out)
 	}
 }

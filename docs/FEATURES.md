@@ -22,7 +22,7 @@ P1 = first build. P2 = next. P3 = after that.
 ## Android agent
 - P1 Enroll by pasting or scanning token
 - P1 Heartbeat: battery, storage, RAM, network type, OS version
-- P1 Installed apps inventory
+- P1 Installed apps inventory (built: `facts.apps`, label / package / version / system flag, non-system first, capped at 1000; shown on the device page; not yet verified on a real phone)
 - P1 Survives reboot, battery-optimisation guidance screen
 - P1 Safe command set only: ping, show message, request inventory, lock (device admin)
 - P2 Location reporting with consent
@@ -51,7 +51,7 @@ P1 = first build. P2 = next. P3 = after that.
 - P1 Login, session, role-aware menus
 - P1 Clients list, client page with enrollment token button
 - P1 Device list: online/offline, OS, last seen, filters
-- P1 Device page: live metrics, inventory, software, command history, Lock button
+- P1 Device page: live metrics, inventory, software (Android installed apps panel with search and system toggle; desktop software list is P2), command history, Lock button
 - P1 Run command / saved script on one device or a group
 - P1 Command preset library: server-served dropdown, editable JSON file (`MSP_PRESETS`) with live reload, builtin fallback
 - P1 Alerts page: acknowledge, resolve

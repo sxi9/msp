@@ -67,11 +67,61 @@ Request (fixtures `enroll_linux.json`, `enroll_android.json`):
 - Android: `hostname` = `Settings.Global "device_name"` or `Build.MODEL`; `os_version`
   `"Android 14 (34)"`; `facts.kernel = System.getProperty("os.version")`,
   `cpu_model = Build.HARDWARE`, `serial = ""`.
-- `facts` is always an object (every key present, empty strings allowed), with one optional
-  key **(RD1)**: `rustdesk_id`, the id of the locally installed RustDesk client, 1..32 ASCII
+- `facts` is always an object (every key present, empty strings allowed), with two optional
+  keys. **(RD1)** `rustdesk_id`, the id of the locally installed RustDesk client, 1..32 ASCII
   digits, omitted when RustDesk is not installed (`400 invalid_request`, detail
   `facts.rustdesk_id must be 1..32 digits`, otherwise). The server stores it in
   `devices.rustdesk_id`; an enrollment without it keeps a previously stored id.
+  `apps`, the installed-apps inventory (section 3.2a), sent by the Android agent and
+  omitted by the desktop agents in phase 1.
+
+| facts key      | type     | source (desktop / Android)                                   |
+|----------------|----------|--------------------------------------------------------------|
+| `kernel`       | string   | `uname -r` / `System.getProperty("os.version")`              |
+| `cpu_model`    | string   | `/proc/cpuinfo`, registry / `Build.HARDWARE`                 |
+| `cpu_count`    | int      | logical CPUs                                                 |
+| `mem_total_mb` | int      | total RAM                                                    |
+| `manufacturer` | string   | DMI / `Build.MANUFACTURER`                                   |
+| `model`        | string   | DMI / `Build.MODEL`                                          |
+| `serial`       | string   | DMI serial / `""` on Android                                 |
+| `ips`          | [string] | non-loopback IPv4 addresses                                  |
+| `rustdesk_id`  | string   | optional (RD1): local RustDesk client id, digits, <= 32      |
+| `apps`         | [App]    | optional: installed apps, Android only in phase 1 (3.2a)     |
+
+### 3.2a `facts.apps`: installed-apps inventory
+
+```json
+"apps":[{"package":"org.mozilla.firefox","label":"Firefox","version":"131.0.3","system":false},
+        {"package":"com.android.settings","label":"Settings","version":"14","system":true}]
+```
+
+Go form `protocol.App{Package, Label, Version string; System bool}`, fixture
+`sync_android_apps.json`.
+
+- One entry per installed package from `PackageManager.getInstalledPackages` (the app
+  declares `QUERY_ALL_PACKAGES`, which Android 11+ requires to list every package).
+  `label` is the application label, or the package id when the app has none; `version` is
+  `versionName`, `""` when the package declares none; `system` is
+  `ApplicationInfo.FLAG_SYSTEM`.
+- Order: non-system apps first, each group sorted by label (case-insensitive, then by
+  package). The dashboard sorts again, so the order is a convenience, not a contract.
+- Cap: at most **1000 entries** (`protocol.MaxApps`); entries past the cap are dropped from
+  the end, so system apps go first. The Android agent additionally stops at 192 KiB of
+  serialised apps JSON: with every field at its maximum length 1000 entries would be ~630 KiB,
+  over the 256 KiB agent body limit, whereas typical entries are ~100 bytes (1000 of them
+  ~100 KiB). Validation: `package` 1..256 bytes, `label` <= 256 bytes, `version` <= 64 bytes,
+  at most 1000 entries; otherwise `400 invalid_request` with a detail naming the index
+  (`facts.apps[3].package must be 1..256 bytes`, `facts.apps has 1001 entries, at most
+  1000 are accepted`). The agent cuts its fields to the same limits before sending.
+- Sent whenever facts are sent (enrollment, the first sync after start, every 120th sync);
+  stored verbatim inside `facts_json`, returned inside `facts` by `GET /api/v1/devices/{id}`
+  (no separate endpoint); facts without the key replace a stored inventory with none. The
+  Android agent sends an empty array (`"apps":[]`) when it has nothing to report or the
+  PackageManager read failed; the server re-marshals facts, so an empty array is stored as
+  no key at all (`omitempty`) and the dashboard shows no Installed apps panel until the
+  next facts sync carries entries.
+- Desktop agents do not send `apps` in phase 1 (installed-software inventory on desktops is
+  on the roadmap).
 
 Response `201 {"device_id":42,"device_token":"dt_...","poll_interval_s":30}`, plus
 `"rustdesk":{"host":"rmm.example.com","key":"<id_ed25519.pub line>"}` **(RD1)** when the
@@ -102,6 +152,8 @@ Request (fixtures `sync_linux.json`, `sync_android.json`):
 - `facts` is present only on the first sync after start and every 120th sync (the server
   replaces `facts_json` when present, and `devices.rustdesk_id` when the facts carry
   `rustdesk_id`; invalid `rustdesk_id` -> `400 invalid_request`, fixture `sync_rustdesk.json`).
+  The Android agent's facts carry the installed-apps inventory `apps` (section 3.2a, fixture
+  `sync_android_apps.json`; an invalid entry -> `400 invalid_request` naming the index).
 - `interval_s` = the agent's configured interval (desktop 30, android 60, e2e 2); clamped 1..3600.
 - `wait_s` = how long the server may hold the request; the server clamps it to 0..25.
   Android sends 0.
@@ -327,7 +379,9 @@ revoked: it gates the free-form exec/script console. **(A1)** The built-in kinds
 message are available for every non-revoked device regardless of `can_run_commands`; the
 dashboard decides from `platform` which controls to show.
 
-- `GET /api/v1/devices/{id}` -> `{"device":DEVICE,"facts":{...facts object...},"metrics":{...last metrics object...},"alerts":[open ALERT...],"commands":[last 20 COMMAND without stdout/stderr]}`
+- `GET /api/v1/devices/{id}` -> `{"device":DEVICE,"facts":{...facts object...},"metrics":{...last metrics object...},"alerts":[open ALERT...],"commands":[last 20 COMMAND without stdout/stderr]}`.
+  `facts` is the last facts object the agent sent, verbatim, so for an Android device it
+  carries the `apps` array (section 3.2a); the dashboard shows it as the "Installed apps" panel.
 - `GET /api/v1/devices/{id}/heartbeats?limit=120` -> `{"heartbeats":[{"at":"...","cpu_pct":12.5,"mem_used_pct":50.8,"disk_used_pct":42.3,"battery_pct":null,"uptime_s":86400}]}` oldest first.
 - `POST /api/v1/devices/{id}/commands` (admin|operator) with one of
   `{"kind":"exec","argv":["uname","-a"],"timeout_s":60}`,
@@ -515,6 +569,7 @@ Config file JSON `{"server_url","device_token","device_id","interval_s","ca_file
 | `sync_response_android.json`  | SyncResponse      | poll 60; lock, ping, message (A1 kinds)                    |
 | `sync_rustdesk.json`          | SyncRequest       | like `sync_linux.json` with `facts.rustdesk_id` (RD1)      |
 | `sync_response_rustdesk.json` | SyncResponse      | poll 30, no commands, `rustdesk` host + key (RD1)          |
+| `sync_android_apps.json`      | SyncRequest       | like `sync_android.json` with facts and `facts.apps` (5 entries: 3 user apps incl. a label fallback and an empty version, then 2 system apps) |
 | `command_result.json`         | CommandResult     | exit 0, RFC3339 UTC times                                  |
 | `error.json`                  | ErrorResponse     | `invalid_device_token`, no detail                          |
 
