@@ -10,17 +10,17 @@ Every component and feature carries one label. Updated whenever something change
 | `NOT VERIFIED` | Built, but cannot be exercised in the build container (needs a real Windows machine or Android phone). Needs a manual check; see the "Manual test" column. |
 | `PLANNED` | In the plan (phase 2 or 3), not started. |
 
-Last update: 2026-11-13 (build in progress, nothing verified yet).
+Last update: 2026-11-13 04:10 UTC. Server, Linux agent and dashboard verified in a live run (see docs/screenshots/). Integration, review and fix passes still running.
 
 ## Components
 
 | Component | Path | Label | Manual test needed |
 |---|---|---|---|
-| Server (Go, SQLite, embedded dashboard) | `cmd/msp-server`, `internal/server`, `internal/store` | `BUILDING` | none; verified here |
-| Desktop agent, Linux | `cmd/msp-agent`, `internal/agent` | `BUILDING` | none; verified here |
-| Desktop agent, Windows | `internal/agent/*_windows.go`, `deploy/install.ps1` | `BUILDING` | install on a Windows 10/11 PC, confirm service starts, device shows online, run a command, lock |
-| Android agent | `android/` | `BUILDING` | install the debug APK, enroll, grant device admin, confirm sync, lock, message |
-| Web dashboard | `web/` | `BUILDING` | none; screenshots taken here |
+| Server (Go, SQLite, embedded dashboard) | `cmd/msp-server`, `internal/server`, `internal/store` | `WORKING` | none; verified here |
+| Desktop agent, Linux | `cmd/msp-agent`, `internal/agent` | `WORKING` | none; verified here |
+| Desktop agent, Windows | `internal/agent/*_windows.go`, `deploy/install.ps1` | `NOT VERIFIED` | install on a Windows 10/11 PC, confirm service starts, device shows online, run a command, lock |
+| Android agent | `android/` | `NOT VERIFIED` | install the debug APK, enroll, grant device admin, confirm sync, lock, message |
+| Web dashboard | `web/` | `WORKING` | none; screenshots taken here |
 | Ops: Docker, compose, Caddy, CI | `deploy/`, `.github/workflows` | `BUILDING` | bring the compose stack up on a real host with a domain |
 | Docs: plan, protocol, decisions, diagrams | `docs/` | `WORKING` | none |
 
@@ -28,28 +28,28 @@ Last update: 2026-11-13 (build in progress, nothing verified yet).
 
 | Feature | Component | Label |
 |---|---|---|
-| Multi-tenant: MSP → client orgs → devices | Server | `BUILDING` |
-| Users and roles: admin, operator, viewer | Server, Dashboard | `BUILDING` |
-| Login, session cookie, CSRF header, rate limits | Server, Dashboard | `BUILDING` |
-| Enrollment tokens: label, max uses, expiry, revoke | Server, Dashboard | `BUILDING` |
-| Agent enrollment, device token | Server, Agents | `BUILDING` |
-| Sync with metrics and long-poll command delivery | Server, Desktop agent | `BUILDING` |
-| Android sync every 60 s (battery, storage, RAM, apps) | Android agent | `BUILDING` |
-| Online / offline / pending status | Server, Dashboard | `BUILDING` |
-| Facts: OS, kernel, CPU, memory, model, serial | Desktop agent | `BUILDING` |
-| Run command (exec, argv, no shell) | Desktop agent, Dashboard | `BUILDING` |
+| Multi-tenant: MSP → client orgs → devices | Server | `WORKING` |
+| Users and roles: admin, operator, viewer | Server, Dashboard | `WORKING` |
+| Login, session cookie, CSRF header, rate limits | Server, Dashboard | `WORKING` |
+| Enrollment tokens: label, max uses, expiry, revoke | Server, Dashboard | `WORKING` |
+| Agent enrollment, device token | Server, Agents | `WORKING` |
+| Sync with metrics and long-poll command delivery | Server, Desktop agent | `WORKING` |
+| Android sync every 60 s (battery, storage, RAM, apps) | Android agent | `NOT VERIFIED` |
+| Online / offline / pending status | Server, Dashboard | `WORKING` |
+| Facts: OS, kernel, CPU, memory, model, serial | Desktop agent | `WORKING` |
+| Run command (exec, argv, no shell) | Desktop agent, Dashboard | `WORKING` |
 | Run script (sh, bash, PowerShell, cmd) | Desktop agent, Dashboard | `BUILDING` |
-| Remote lock, managed devices only, audited | All agents, Server, Dashboard | `BUILDING` |
-| Ping and message commands | All agents | `BUILDING` |
-| Command history with output, exit code, status | Server, Dashboard | `BUILDING` |
+| Remote lock, managed devices only, audited | All agents, Server, Dashboard | `WORKING` (queue, delivery, audit, role and tenant checks) / `NOT VERIFIED` (the lock itself: needs a real Ubuntu desktop, Windows PC or Android phone; on the headless build host it reports failed, see known issues) |
+| Ping and message commands | All agents | `WORKING` |
+| Command history with output, exit code, status | Server, Dashboard | `WORKING` |
 | Lost-command sweeper | Server | `BUILDING` |
-| Alerts: offline, disk_full, memory_high, battery_low | Server, Dashboard | `BUILDING` |
-| Alert acknowledge and auto-resolve | Server, Dashboard | `BUILDING` |
-| Audit log of every user, device and system action | Server, Dashboard | `BUILDING` |
+| Alerts: offline, disk_full, memory_high, battery_low | Server, Dashboard | `WORKING` |
+| Alert acknowledge and auto-resolve | Server, Dashboard | `WORKING` |
+| Audit log of every user, device and system action | Server, Dashboard | `WORKING` |
 | Heartbeat retention and pruning | Server | `BUILDING` |
 | systemd unit install (Linux) | Desktop agent | `BUILDING` |
-| Windows service install | Desktop agent | `BUILDING` |
-| Android foreground service, boot receiver, device admin | Android agent | `BUILDING` |
+| Windows service install | Desktop agent | `NOT VERIFIED` |
+| Android foreground service, boot receiver, device admin | Android agent | `NOT VERIFIED` |
 | Agent downloads and install one-liners at /dl/ | Server | `BUILDING` |
 | Dockerfile, docker-compose, Caddy TLS example | Ops | `BUILDING` |
 | CI: go build/test, web build, Android APK | Ops | `BUILDING` |
@@ -71,3 +71,8 @@ Last update: 2026-11-13 (build in progress, nothing verified yet).
 | macOS and iOS agents | 3 | `PLANNED` |
 | Service desk, billing, PSA integrations | 3 | `PLANNED` |
 | SSO, mutual TLS, compliance packs | 3 | `PLANNED` |
+
+## Known issues found in the live run
+
+1. Lock on a Linux host with no desktop session reports `failed` ("xdg-screensaver not found") instead of a clean "no interactive session" result like the Windows path. Fix queued: treat "no sessions to lock" as exit 0 with that message.
+2. CPU chart on the device page shows "no samples yet" until the second minute, because CPU needs two samples and heartbeat rows are stored once per minute. Cosmetic.
