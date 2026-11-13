@@ -174,7 +174,7 @@ On the phone:
 The app runs as a foreground service with a permanent "Managed by your IT provider"
 notification, syncs every 60 s, and shows offline after 195 s without a sync. Phone battery
 managers can delay syncs; a few false offline alerts on phones are expected in phase 1.
-The phase 1 APK is a debug build that also accepts plain `http://` for lab servers.
+Publish the signed release APK (`make android-release` with your keystore, see `docs/OPS.md` section 3); the debug APK from `make android` is for lab use only and is the one that accepts plain `http://`.
 
 **Installed apps.** With its facts (at enrollment, on the first sync after the app starts and
 every 120th sync, i.e. about every two hours) the agent sends the list of installed packages:
