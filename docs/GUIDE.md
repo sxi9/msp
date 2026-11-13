@@ -224,7 +224,7 @@ and `script` presets exist; lock, ping and message stay in the Actions row.
 **Timeout**: 1 to 3600 s (default 60). On timeout the agent kills the whole process group and
 reports `timeout` with exit code -1.
 
-What happens after **Run on <host>**:
+What happens after **Run on** (the button names the device):
 
 | Status | Meaning |
 |---|---|
