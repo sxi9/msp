@@ -119,16 +119,27 @@ func (s *Store) CreateCommand(ctx context.Context, p CreateCommandParams) (Comma
 		shell, body, bodySHA = p.Shell, p.Body, hex.EncodeToString(sum[:])
 	case protocol.KindMessage:
 		text = p.Text
+	case protocol.KindShell:
+		// Interactive remote shell (RS1, decision D3): the shell name reaches
+		// the agent in the command JSON (empty = platform default), the initial
+		// terminal size is not persisted (the browser's first resize control
+		// frame is authoritative), and timeout_s is the max session duration,
+		// clamped on a longer scale than the one-shot kinds below.
+		shell = p.Shell
 	case protocol.KindLock, protocol.KindPing:
 	default:
 		return Command{}, fmt.Errorf("store: create command: unknown kind %q", p.Kind)
+	}
+	timeoutS := protocol.ClampTimeout(p.TimeoutS)
+	if p.Kind == protocol.KindShell {
+		timeoutS = protocol.ClampShellTimeout(p.TimeoutS)
 	}
 	res, err := s.db.ExecContext(ctx,
 		`INSERT INTO commands (device_id, org_id, created_by, kind, argv_json, shell, body, body_sha256, text,
 		                       timeout_s, status, created_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?)`,
 		p.DeviceID, p.OrgID, p.CreatedBy, p.Kind, argvJSON, shell, body, bodySHA, text,
-		protocol.ClampTimeout(p.TimeoutS), fmtTime(s.Now()))
+		timeoutS, fmtTime(s.Now()))
 	if err != nil {
 		return Command{}, fmt.Errorf("store: create command: %w", err)
 	}

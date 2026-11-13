@@ -21,15 +21,16 @@ Phase 1 features (built and verified on Linux; Windows and Android runtime need 
 | Users | Roles `viewer` (see), `operator` (act), `admin` (manage users, clients, delete devices) |
 | Enrollment | Per-client tokens with label, max uses, expiry and revoke; install one-liners per OS |
 | Fleet | Every device with online/offline/pending, OS, agent version, last seen, CPU, memory, disk, battery, open alerts; filter by client, status, hostname |
-| Device page | Status, metrics, facts (CPU model, memory, kernel, model, serial), disks, Installed apps (Android: search, system-apps toggle), command console, command history, Lock, Ping, Message, Remote desktop (Connect), Revoke, Delete |
+| Device page | Status, metrics, facts (CPU model, memory, kernel, model, serial), disks, Installed apps (Android: search, system-apps toggle), command console, command history, Lock, Ping, Message, Remote desktop (Connect), Remote shell, Revoke, Delete |
 | Remote commands | `exec` (argv, no shell), `script` (sh/bash on Linux, PowerShell/cmd on Windows), presets, timeout, output capped at 64 KiB |
 | Remote lock | Built-in command; only for devices enrolled under your server; operator or admin; audited twice |
 | Remote desktop | Official RustDesk client on the device, your own relay (hbbs/hbbr) next to the server, Connect button on the device page, every connection audited (section 8) |
+| Remote shell | Interactive browser terminal to a desktop device over a server WebSocket relay; operator or admin; opened, connected and closed are audited and the output is transcribed (section 9) |
 | Alerts | `offline`, `disk_full` (≥ 90 %), `memory_high` (≥ 95 %), `battery_low` (≤ 15 %, not charging); acknowledge; auto-resolve |
 | Audit | Every login, token, enrollment, command, lock, alert ack and user change, with actor and IP; never pruned |
 | Ops | Docker compose, Caddy TLS example, systemd unit, Windows service, Android foreground service, health endpoint |
 
-Later phases (planned, not built): interactive remote shell in the browser, the branded
+Later phases (planned, not built): the branded
 RustDesk client with the relay compiled in (`docs/RUSTDESK-BRANDING.md`), patching,
 software deployment, notifications by email/SMS/Slack, reports, Android device-owner mode
 (wipe, kiosk, app push), macOS/iOS agents, ticketing. See `docs/FEATURES.md` and
@@ -322,7 +323,34 @@ the session and what happened on screen are not recorded by the MSP server in ph
 RustDesk clients keep their own connection logs, and session recording is a RustDesk client
 setting.
 
-## 9. Alerts
+## 9. Remote shell
+
+The **Remote shell** button on a desktop device page (admin|operator; hidden for viewer and for
+offline or Android devices) opens an interactive terminal to the device, right in the browser.
+
+**How to open one.** Click **Remote shell**. The dashboard asks the server to open the session,
+the agent on the device starts a shell on a real PTY (bash or sh on Linux, PowerShell on Windows)
+and the terminal connects. A status line shows *waiting for agent*, then *connected*. Type as you
+would in any terminal; resizing the panel resizes the remote terminal. Click **Close** (or leave
+the page) to end the session. The panel scrolls inside its own box and does not disturb the rest
+of the layout.
+
+**Audited and transcribed.** Opening, connecting and closing each write an audit row
+(`shell.opened`, `shell.connected`, `shell.closed`) with your user, the device and the byte
+counts, visible on the Audit page. The server records the terminal output (what the device sent
+back) as a **transcript**, reachable from the **Transcript** link on a finished shell command in
+the device's command history. Your keystrokes are counted but not recorded, so a password typed at
+a prompt is not stored; the transcript is capped at 1 MiB (longer sessions are marked truncated).
+Terminal contents are never written to the server or agent logs.
+
+**Limits.** One shell per device at a time (a second open is refused *shell busy*), at most 20
+concurrent shells across the whole server (*too many shells*), a 30-minute idle timeout and a
+maximum session length of 4 hours (up to 8). The connection is same-origin only; if the device
+goes offline or the agent cannot open a terminal the session fails with the reason. A reverse
+proxy in front of the server must allow WebSocket upgrades and long-lived connections
+(`docs/OPS.md`).
+
+## 10. Alerts
 
 Alerts are evaluated by the server on every sync and by a sweeper every 15 s. No separate
 monitoring process.
@@ -339,7 +367,7 @@ There is one open alert per device and type. **Alerts** page: Open or All, filte
 (`DiskPct`, `MemPct`, `BatteryPct` in `internal/server`). Email, SMS and Slack notifications
 are phase 2.
 
-## 10. Users, roles, audit
+## 11. Users, roles, audit
 
 - **Users** (admin only): add technicians with email, password (10+ characters) and role;
   disable them when they leave. Sessions are cookies; the dashboard sends a CSRF header on
@@ -350,7 +378,7 @@ are phase 2.
 - **Audit** page: every action with time, actor (user email, `device:<id>` or `system`),
   action name, client and device, and the client IP. Append-only, never pruned.
 
-## 11. Housekeeping
+## 12. Housekeeping
 
 - **Token hygiene**: one token per rollout, short expiry, revoke after use. The server keeps
   only a hash and the first 10 characters.
@@ -364,7 +392,7 @@ are phase 2.
 - **Firewall**: agents need outbound HTTPS to the server only. The server needs 443 inbound
   (80 + 443 with Caddy). Restrict the dashboard to your own addresses at the proxy.
 
-## 12. Troubleshooting
+## 13. Troubleshooting
 
 | Symptom | Check |
 |---|---|
@@ -381,7 +409,7 @@ are phase 2.
 | Connect does nothing on your PC | Your own RustDesk client is not installed or not registered for `rustdesk://` links; open it and enter the id by hand (Copy button) |
 | Your client says the id is unknown / cannot connect | Your client and the device must use the same ID server, relay and key; check Settings > Network on both; relay ports open on the server host? |
 
-## 13. Where to look in the repository
+## 14. Where to look in the repository
 
 | Path | What |
 |---|---|

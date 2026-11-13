@@ -146,7 +146,7 @@ MSP hosts. What that changes:
   CSRF-protected, and answers only for a device that is enrolled on this server and not
   revoked (404 otherwise: the same scope rule as lock). Staff accounts are not scoped to an
   org: every operator and admin of the MSP can reach every org's devices, as for every other
-  action, until the org-scoped logins of section 10 exist. The MSP server never joins the
+  action, until the org-scoped logins of section 11 exist. The MSP server never joins the
   session: it hands the technician's browser `rustdesk://connect/<id>` and the technician's
   own client, configured for the same relay and key, does the rest. Possession of a staff
   account plus the device password is what opens a screen; neither alone does.
@@ -177,17 +177,53 @@ MSP hosts. What that changes:
   `up -d` starts neither, so a deployment that never configured remote desktop has nothing
   listening on 21115-21119.
 
-## 9. Audit
+## 9. Remote shell (RS1)
+
+Feature RS1 (decision D3) adds an interactive terminal relayed through the server. Unlike remote
+desktop, the MSP server is on the path, so the controls are the server's to enforce.
+
+- **Who.** Only admin|operator may open a shell (viewer never), CSRF header required, and the
+  target device must be in the caller's org set, desktop, online and not revoked. Android and
+  revoked devices are refused (`unsupported_on_platform` / `unsupported_on_device`).
+- **Two credentials, two legs.** The browser leg is authenticated by the staff **session cookie**
+  plus a **single-use ticket**: a 43-character base64url value, bound to one command, consumed on
+  the handshake and rejected once used or older than 60 s (constant-time compared). The agent leg
+  is authenticated by the device bearer token (`dt_`) exactly like sync, and the server refuses a
+  second agent socket for the same command (`409`).
+- **Origin pinning.** The browser WebSocket handshake requires the `Origin` host to equal the
+  request `Host` (a missing or cross-origin `Origin` is `403`), so a page on another origin cannot
+  open a relay with a stolen cookie. The dashboard CSP's `connect-src 'self'` already confines the
+  terminal's own connection to the same origin.
+- **Single, bounded relay.** The server keeps at most 20 concurrent shells and one relay goroutine
+  set per session (in memory, keyed by command id under a mutex). Each session ends on the first
+  of: either leg closing, 30 min idle (no browser input), the `timeout_s` max duration (default
+  4 h, max 8 h), or server shutdown; the agent enforces its own idle timeout as a backstop and
+  runs a single shell at a time.
+- **Transcript retention.** The server records the agent→browser output to a transcript capped at
+  1 MiB (then `transcript_truncated` is set and recording stops while relaying continues), flushed
+  once to the `shell_sessions` row on close and served by `GET /api/v1/shell/{id}/transcript` to
+  admin|operator under the same org rule. Keystrokes (browser→agent) are counted but never
+  recorded, so a password typed at a prompt is not stored. The transcript lives in the database
+  and is removed with the command (cascade) and your retention of the DB; treat it as sensitive.
+- **Output is never logged.** Neither the server nor the agent writes terminal bytes to its logs;
+  the relay copies frames without logging their contents. Logs carry only metadata (command id,
+  device, byte counts, close reason).
+- **Completion and audit.** Every open writes `shell.opened` (actor user), every agent attach
+  `shell.connected` (actor device) and every close `shell.closed` (actor the user for a
+  technician-closed session, else system; detail duration, byte counts and close reason). The
+  three rows bound the whole session in the append-only audit.
+
+## 10. Audit
 
 `audit_log` is append-only: the store exposes insert and list only, there is no update or
 delete path, and it is never pruned. Each row names the actor type (`user`, `device`, `system`),
 the actor, the org, the action, the target and the client IP. Actions: logins (success and
 failure), user and org changes, token creation and revocation, enrollment, revocation and
 deletion of devices, command queued/finished/lost, lock requests, remote desktop sessions
-opened, alert acknowledgements.
+opened, remote shell opened/connected/closed, alert acknowledgements.
 Export it with your backups; SIEM forwarding is phase 2.
 
-## 10. Preconditions before scaling to many clients (phase 2)
+## 11. Preconditions before scaling to many clients (phase 2)
 
 The phase-1 controls are adequate for a pilot with a handful of trusted technicians. Before
 the Nth client, in this order:
@@ -200,7 +236,7 @@ the Nth client, in this order:
    allowlisting at the proxy.
 5. Windows job-object process-tree kill and a reviewed script library.
 
-## 11. Reporting a vulnerability
+## 12. Reporting a vulnerability
 
 Report privately to the maintainers of this repository (open a security advisory on the
 repository, or e-mail the address listed in its README once published). Please include the

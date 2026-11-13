@@ -189,6 +189,25 @@ func Run(ctx context.Context, cfg Config, version string, log *slog.Logger) erro
 		}
 
 		for _, cmd := range resp.Commands {
+			// A kind shell command (RS1, decision D3) is an interactive relay
+			// that can live for hours; it is dispatched outside the two-slot
+			// sem so it never starves the one-shot commands, and RunShell's own
+			// atomic guard still enforces a single live shell per agent. The
+			// server completes a shell command when the relay closes, so a
+			// result is posted only for the two refuse cases (shell busy; PTY
+			// could not open) that RunShell signals with refused == true.
+			if cmd.Kind == protocol.KindShell {
+				wg.Add(1)
+				go func(cmd protocol.Command) {
+					defer wg.Done()
+					log.Info("command received", "id", cmd.ID, "kind", cmd.Kind)
+					if res, refused := client.RunShell(ctx, cmd, log); refused {
+						log.Info("command finished", "id", cmd.ID, "exit_code", res.ExitCode, "error", res.Error)
+						postResult(ctx, client, cmd.ID, res, log)
+					}
+				}(cmd)
+				continue
+			}
 			wg.Add(1)
 			go func(cmd protocol.Command) {
 				defer wg.Done()

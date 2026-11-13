@@ -146,3 +146,25 @@ config file were deleted afterwards.
 - [ ] An actual screen session technician -> device — Not verified: RustDesk cannot run in the build container (no display, no client); needs a technician PC with the official client and a device with the client installed (docs/STATUS.md manual test 5)
 - [ ] The relay containers `hbbs`/`hbbr` running — Not verified: no Docker daemon here; only `docker compose config` validates the two services (docs/STATUS.md manual test 1)
 - [ ] The installers `--with-rustdesk` / `-WithRustDesk` on a real Ubuntu desktop and Windows PC — Not verified: only `bash -n` here and the stub-client tests; needs the published packages and a real machine (docs/STATUS.md manual tests 2 to 4)
+
+## RS1: interactive remote shell over a WebSocket relay (added 2026-11-13, decision D3)
+
+Verified in the cloud build container (no display, no Windows host, no Docker daemon) with, in order:
+`CGO_ENABLED=0 go build ./...` (exit 0), `go vet ./...` (exit 0), `CGO_ENABLED=0 go test ./... -count=1`
+(all packages ok: agent, e2e, protocol, server, store; the previously skipped `TestShellBusy` and
+`TestShellEndToEnd` now run and pass, and the new `internal/e2e` `TestRemoteShellEndToEnd` passes,
+also under `go test -race`), `GOOS=windows GOARCH=amd64 go build ./...` (exit 0, ConPTY path cross-builds),
+`make web` (npm ci, 33 web unit tests incl. `web/src/lib/shell.test.ts`, `tsc --noEmit`, esbuild `app.js`
++ `app.css` 13.8 kB with the xterm stylesheet bundled in, server rebuilt), and `scripts/e2e.sh` ("E2E OK").
+
+- [x] Protocol: `KindShell`, cols/rows/timeout clamps (`ClampShellCols`/`Rows`/`Timeout`), control frames (`resize`/`exit`/`status` via `ControlFrame`/`ParseControlFrame`), close reasons, `ShellSession` block (`internal/protocol` tests)
+- [x] Store: `CreateCommand` accepts `kind shell` (shell persisted, `ClampShellTimeout` for the max-duration scale), migration `0003_shell_sessions` (kind CHECK rebuilt to include `shell`, `shell_sessions` table), `CreateShellSession` / `SetShellConnected` / `FinishShellSession` / `GetShellSession` (`internal/store` shell tests)
+- [x] Server: `POST /api/v1/devices/{id}/shell` (role, CSRF, order device→revoked→platform→shape→offline→busy→cap, single-use 43-char ticket, audit `shell.opened`), browser leg `GET /api/v1/shell/{id}/ws` (session cookie, Origin==Host, ticket consumed once, 60 s), agent leg `GET /api/agent/v1/shell/{id}` (Bearer `dt_`, kind+status checks, 409 second agent), verbatim relay with `bytes_in`/`bytes_out`, 1 MiB transcript, idle/max/agent-connect/shutdown deadlines, completion on close, `GET /api/v1/shell/{id}/transcript` (`TestShell*` incl. `TestShellEndToEnd`, `TestShellBusy`, origin/ticket/cap/relay tests)
+- [x] Command JSON carries the `shell_session` block for shell commands, null until the session row exists (`enrichCommand` on `GET /commands/{id}` and the device command list)
+- [x] Agent dispatch: a `kind shell` command is handled outside the two-slot semaphore and guarded by an atomic single-shell flag; `RunShell` posts a result only on its two refuse cases, else the server completes the command on relay close (`internal/agent` shell tests; `agent.go` Run loop)
+- [x] Agent Linux PTY: `/dev/ptmx` open/unlock/getptn (`golang.org/x/sys/unix` ioctls, `Setsid`/`Setctty`/`Ctty`), window size, resize frames, exit frame; platform-neutral copy loop behind the `ptySession` interface; shell output never logged (`pty_linux.go`, exercised by `TestRemoteShellEndToEnd` against a real bash)
+- [ ] Agent Windows ConPTY (`CreatePseudoConsole`/`ResizePseudoConsole`, `golang.org/x/sys/windows`) — Not verified: cross-builds only (`GOOS=windows GOARCH=amd64 go build ./...`); needs a Windows host (docs/STATUS.md)
+- [x] Dashboard: Remote shell button (operator+, hidden for viewer/offline/android), `@xterm/xterm` terminal with fit/resize and a status line, Close, Transcript link on finished shell commands, `?mock=1` echo shell, pure helpers in `web/src/lib/shell.ts` with `node --test`; xterm CSS routed into `dist/app.css` via `styles.css` (`shell.test.ts`, `make web`). Not verified: a live browser screenshot of the terminal
+- [x] CSP: `connect-src 'self'` already permits the same-origin WebSocket; no directive change needed (`middleware.go`; asserted by the e2e CSP check)
+- [x] End-to-end proof: `internal/e2e/shell_test.go` `TestRemoteShellEndToEnd` — real server + real Linux agent + a real coder/websocket browser client opens a bash shell, relays `echo RS1OK`, sends a resize, closes, and asserts the command is `done`, the audit has `shell.opened`/`shell.connected`/`shell.closed` and `GET …/transcript` contains `RS1OK` (passes under `-count=3` and `-race`)
+- [x] Docs: PROTOCOL (kind, both WS legs, control frames, transcript, audit actions), ARCHITECTURE (relay + dependency rule for `github.com/coder/websocket`), SECURITY (ticket + Origin + single relay + transcript retention + output never logged), GUIDE (Remote shell section), OPS (proxy WebSocket upgrades + long-lived + 20-shell cap), FEATURES, STATUS (WORKING Linux / NOT VERIFIED Windows ConPTY), ROADMAP

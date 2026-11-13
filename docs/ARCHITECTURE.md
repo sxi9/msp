@@ -72,8 +72,8 @@ wire contract; this file explains the pieces, how they talk and which package ma
 ```
 internal/protocol   <- imports: stdlib only
 internal/store      <- protocol, database/sql, modernc.org/sqlite
-internal/server     <- protocol, store, web, golang.org/x/crypto/bcrypt
-internal/agent      <- protocol, golang.org/x/sys          (never store or server)
+internal/server     <- protocol, store, web, golang.org/x/crypto/bcrypt, github.com/coder/websocket
+internal/agent      <- protocol, golang.org/x/sys, github.com/coder/websocket  (never store or server)
 internal/e2e        <- server, store, agent, protocol      (tests only)
 cmd/msp-server      <- server, store
 cmd/msp-agent       <- agent
@@ -82,8 +82,9 @@ web                 <- embed only (package web; FS embed.FS)
 
 - `protocol <- store <- server`: every SQL statement lives in `internal/store`; the server
   never touches `database/sql`. Postgres in phase 2 is a second store implementation.
-- The agent imports only `internal/protocol`, the standard library and `golang.org/x/sys`.
-  It must never import `internal/store` or `internal/server`.
+- The agent imports `internal/protocol`, the standard library, `golang.org/x/sys` and, from
+  RS1 (phase 2), `github.com/coder/websocket` to dial the remote-shell relay. It must never
+  import `internal/store` or `internal/server`.
 - `internal/server` is one Go package with two owners (WP2 core/agent API, WP3 dashboard
   files). Dashboard files register through `dashboardRoutes` in `init()` and use WP2's helper
   names (`writeJSON`, `writeError`, `readJSON`, `pathInt`, `clientIP`, `sessionAuth`,
@@ -95,8 +96,9 @@ web                 <- embed only (package web; FS embed.FS)
   `Uninstall`, `IsService`, `RunAsService`, `setSysProcAttr`, `killProcess`, `shellArgv`).
 - The Android app shares nothing with Go but the contract: `docs/PROTOCOL.md` and
   `internal/protocol/fixtures`, which both test suites round-trip.
-- Only three third-party Go modules exist in the whole build (`modernc.org/sqlite`,
-  `golang.org/x/crypto`, `golang.org/x/sys`); nothing else may be added in phase 1.
+- Phase 1 used only three third-party Go modules (`modernc.org/sqlite`,
+  `golang.org/x/crypto`, `golang.org/x/sys`). Phase 2's RS1 adds one, `github.com/coder/websocket`
+  (the remote-shell relay on both the server and the agent legs); nothing else may be added.
 
 ## Shared contract: internal/protocol
 
@@ -141,8 +143,9 @@ client, so MFA, command signing and IP allowlisting are phase-2 preconditions fo
 
 ## Reserved for later phases (names kept stable)
 
-Phase 2: remote shell over a WebSocket relay, Postgres store, command ack, token rotation,
-MFA, per-org alert thresholds with email/webhooks, agent self-update. Phase 3: Android
+Phase 2: Postgres store, command ack, token rotation, MFA, per-org alert thresholds with
+email/webhooks, agent self-update (remote shell over a WebSocket relay shipped as RS1, below).
+Phase 3: Android
 device-owner mode; remote desktop phase B (the branded RustDesk client,
 `docs/RUSTDESK-BRANDING.md`).
 
@@ -162,3 +165,41 @@ opens the returned `rustdesk://connect/<id>` in the technician's own client. The
 session runs client-to-client through hbbs/hbbr; the MSP server is never in that path.
 Package rules are unchanged: `internal/agent` shells out to the RustDesk binary and imports
 nothing new.
+
+## Remote shell (RS1, D3 phase 2)
+
+An interactive browser terminal over a server-brokered WebSocket relay, desktop only. Unlike
+remote desktop it is a new transport inside `msp-server`, not an external one; the MSP server
+is on the path and records the whole session.
+
+```
+ browser ──ws (cookie+ticket)──► msp-server relay ──ws (Bearer dt_)──► agent ──► PTY/ConPTY ── shell
+   xterm.js  binary=keystrokes      counts bytes_in/out,     GET /api/agent/v1   /dev/ptmx (Linux)
+             text =resize/exit      records transcript,      /shell/{id}         ConPTY (Windows)
+                                    enforces idle/max/cap
+```
+
+- **Open**: the dashboard POSTs `/api/v1/devices/{id}/shell`; the server queues a `kind shell`
+  command (`internal/store`, the sixth kind), reserves a single-use 60 s browser ticket, audits
+  `shell.opened` and wakes the device's parked sync. The command's `timeout_s` is the max session
+  duration (default 4 h, max 8 h), clamped with `ClampShellTimeout`.
+- **Two legs**: the browser leg (`GET /api/v1/shell/{id}/ws?ticket=`, session cookie, Origin must
+  equal Host) and the agent leg (`GET /api/agent/v1/shell/{id}`, `Authorization: Bearer dt_`).
+  The relay copies binary frames (raw terminal bytes) verbatim between the legs and passes the
+  text control frames through (`resize` browser→agent, `exit` agent→browser, `status`
+  server→browser).
+- **Server state** (`internal/server/shell.go`, `shell_relay.go`, `dashboard_shell.go`,
+  `api_agent_shell.go`): live sessions are kept in RAM keyed by command id under a mutex, with a
+  per-`Server` manager held in a package-level registry (no field added to `Server`). The store is
+  touched only three times — `CreateShellSession`, `SetShellConnected`, `FinishShellSession` — and
+  the agent→browser transcript is buffered in memory (cap 1 MiB) and flushed once on close. The
+  relay enforces the four deadlines (agent-never-connected 60 s, idle 30 min, max duration
+  `timeout_s`, server shutdown) and completes the command on close (`done` on a clean exit or a
+  technician closing a live session, else `failed` with the close reason).
+- **Agent** (`internal/agent/shell.go` + the build-tagged `pty_linux.go` / `pty_windows.go` /
+  `pty_other.go`): a `kind shell` command is dispatched outside the two-slot command semaphore
+  (it can live for hours) and guarded by an atomic single-shell flag. The PTY sits behind a small
+  `ptySession` interface so the copy loop is platform-neutral and unit-testable with a fake; the
+  agent never writes shell output to its logs. The agent posts a result only for its two refuse
+  cases (a shell already running, or a PTY that will not open); otherwise the server completes the
+  command when the relay closes.

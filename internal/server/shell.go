@@ -26,10 +26,10 @@ import (
 // Relay limits and timers (RS1 section B). These are the production defaults;
 // newShellManager copies them into per-Server fields the in-package tests tune.
 const (
-	shellMaxConcurrent   = 20                       // at most 20 concurrent shells per server
-	shellTicketTTL       = 60 * time.Second         // browser ticket is single-use and younger than 60 s
-	shellAgentConnectTTL = 60 * time.Second         // agent must attach within 60 s of the POST
-	shellIdleTimeout     = 30 * time.Minute         // 30 min without browser input closes the shell
+	shellMaxConcurrent   = 20               // at most 20 concurrent shells per server
+	shellTicketTTL       = 60 * time.Second // browser ticket is single-use and younger than 60 s
+	shellAgentConnectTTL = 60 * time.Second // agent must attach within 60 s of the POST
+	shellIdleTimeout     = 30 * time.Minute // 30 min without browser input closes the shell
 	shellTranscriptCap   = protocol.MaxTranscriptBytes
 	shellWriteTimeout    = 15 * time.Second // per-frame write deadline
 	shellReadLimit       = 1 << 20          // max single WebSocket message (1 MiB)

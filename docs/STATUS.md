@@ -10,7 +10,7 @@ Every component and feature carries one label. Updated whenever something change
 | `NOT VERIFIED` | Built, but cannot be exercised in the build container (needs a real Windows machine or Android phone). Needs a manual check; see the "Manual test" column. |
 | `PLANNED` | In the plan (phase 2 or 3), not started. |
 
-Last update: 2026-11-13 (Android installed-apps inventory: `facts.apps` end to end, final verification pass with a 40-app inventory, screenshots 18 and 19, docs/CHECKLIST.md "Android installed apps inventory"; before that RD1 remote desktop, phase A of D4, screenshots 16 and 17). Server, Linux agent and dashboard verified in a live run (see docs/screenshots/); the rows below marked WORKING without a screenshot are covered by `go test ./...` (internal/store, internal/server, internal/e2e) and `scripts/e2e.sh` ("E2E OK").
+Last update: 2026-11-13 (RS1 interactive remote shell, decision D3: the WebSocket relay, the Linux PTY agent, the xterm.js dashboard terminal and the store migration, proven end to end by `internal/e2e` `TestRemoteShellEndToEnd` — real server + real Linux agent + a real browser WebSocket client — plus `go test ./...` and `scripts/e2e.sh`; Windows ConPTY cross-builds but is NOT VERIFIED here. Before that: Android installed-apps inventory `facts.apps`, screenshots 18 and 19; RD1 remote desktop, phase A of D4, screenshots 16 and 17). Server, Linux agent and dashboard verified in a live run (see docs/screenshots/); the rows below marked WORKING without a screenshot are covered by `go test ./...` (internal/store, internal/server, internal/e2e) and `scripts/e2e.sh` ("E2E OK").
 
 ## Components
 
@@ -77,11 +77,23 @@ Last update: 2026-11-13 (Android installed-apps inventory: `facts.apps` end to e
 
 Manual test for the `NOT VERIFIED` rows, in order: (1) on a host with Docker, first confirm that a plain `docker compose -f deploy/docker-compose.yml up -d` starts only `server` (`docker compose ps` lists no hbbs/hbbr, nothing listens on 21116), then `MSP_RUSTDESK_HOST=<public name> docker compose -f deploy/docker-compose.yml --profile rustdesk up -d`, confirm `deploy/rustdesk-data/id_ed25519.pub` exists and ports 21115-21117/tcp and 21116/udp are open; set `MSP_RUSTDESK_HOST`/`MSP_RUSTDESK_KEY`, restart the server, `GET /api/v1/rustdesk` says `enabled:true`. (2) Publish `rustdesk-1.5.3-x86_64.deb` and `rustdesk-1.5.3-x86_64.exe` at `/dl/` (`scripts/build-agents.sh --sums-only`). (3) On an Ubuntu desktop run the install one-liner with `--with-rustdesk`: expect the `.deb` installed, `/root/.config/rustdesk/RustDesk2.toml` holding the relay keys, the password printed, the id printed, and within a minute the device page showing the id (if the relay does not take in the RustDesk UI, re-run `msp-agent rustdesk setup --config-string <exported from Settings > Network>`). (4) Same on a Windows 10/11 PC with `-WithRustDesk` (check `%ProgramFiles%\RustDesk\rustdesk.exe`, the service, the LocalService `RustDesk2.toml`), and once more on a second PC with `msp-agent.exe install` + `msp-agent.exe rustdesk setup` by hand from an elevated prompt: `icacls %ProgramData%\msp-agent %ProgramData%\msp-agent\rustdesk-password` must show SYSTEM and Administrators only, and `type` of the file as a standard user must be denied. (5) On a technician PC with the official client set to the same host and key, press **Connect** on the device page: the browser hands `rustdesk://connect/<id>` to the client, the client asks the permanent password, the screen appears; the Audit page shows `device.remote_desktop_opened` with your user and IP. (6) Disable: unset both variables, restart; the card says not configured and Connect is gone.
 
+## RS1: interactive remote shell over a WebSocket relay (decision D3)
+
+| Part | Component | Label |
+|---|---|---|
+| Store: `kind shell` accepted (`CreateCommand`, `ClampShellTimeout`), migration `0003_shell_sessions` (kind CHECK + `shell_sessions` table), `CreateShellSession`/`SetShellConnected`/`FinishShellSession`/`GetShellSession` | Store | `WORKING` (`internal/store` shell tests; `go test ./...`) |
+| Server relay: `POST /devices/{id}/shell` (role, CSRF, validation order, ticket, audit `shell.opened`), browser leg `GET /shell/{id}/ws` (cookie, Origin, single-use ticket), agent leg `GET /api/agent/v1/shell/{id}` (Bearer, 409 on second agent), verbatim relay with byte counts, 1 MiB transcript, idle/max/agent-connect/shutdown deadlines, `GET /shell/{id}/transcript` | Server | `WORKING` (`internal/server` shell tests incl. `TestShellEndToEnd`, `TestShellBusy`) |
+| Protocol: `KindShell`, cols/rows/timeout clamps, control frames (`resize`/`exit`/`status`), close reasons, `ShellSession` block | Protocol | `WORKING` (`internal/protocol` tests) |
+| Agent, Linux: PTY via `/dev/ptmx` (`golang.org/x/sys/unix` ioctls), platform-neutral relay behind the `ptySession` interface, single-shell atomic guard, resize + exit frame, output never logged | Desktop agent | `WORKING` (`internal/agent` shell tests; `TestRemoteShellEndToEnd` runs a real bash PTY) |
+| Agent, Windows: ConPTY (`CreatePseudoConsole`/`ResizePseudoConsole`, `golang.org/x/sys/windows`) | Desktop agent | `NOT VERIFIED` (`GOOS=windows GOARCH=amd64 go build ./...` passes; no Windows host to run it) |
+| Dashboard: Remote shell button, `@xterm/xterm` terminal + fit/resize, status line, Close, Transcript link on finished shell commands, `?mock=1` echo shell, xterm CSS bundled into `app.css` | Dashboard | `WORKING` (`web/src/lib/shell.test.ts`; `make web` typecheck + build) / `NOT VERIFIED` (a live browser screenshot of the terminal) |
+| End-to-end: real server + real Linux agent + real browser WebSocket client, `echo RS1OK`, resize, close, command `done`, audit `shell.opened`/`connected`/`closed`, transcript contains the output | All | `WORKING` (`internal/e2e` `TestRemoteShellEndToEnd`) |
+
 ## Later phases
 
 | Feature | Phase | Label |
 |---|---|---|
-| Interactive remote shell over WebSocket relay | 2 | `PLANNED` |
+| Interactive remote shell over WebSocket relay | 2 | `WORKING` (Linux, RS1 table above) / `NOT VERIFIED` (Windows ConPTY) |
 | Patch management, software deployment, file transfer | 2 | `PLANNED` |
 | Notifications: email, SMS, Slack; escalation; maintenance windows | 2 | `PLANNED` |
 | Script library, automations, policy groups, bulk actions | 2 | `PLANNED` |

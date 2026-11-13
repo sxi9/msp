@@ -302,25 +302,23 @@ func (ss *shellSession) teardown(reason string) {
 	bg := context.Background()
 	now := ss.srv.now()
 
-	// Complete the command: done when a 0 exit arrived or the technician closed
-	// a live session; failed otherwise. CompleteCommand derives done only from
-	// (exit 0, no error), so a done close is written as exit 0 / no error and a
-	// failed close as the real-or--1 exit code plus the close reason as error.
+	// Complete the command (RS1 section B): done when a 0 exit arrived or the
+	// technician closed a live session, failed otherwise. exit_code is the exit
+	// frame's code or -1 (so a technician-closed live session with no exit frame
+	// is done with exit_code -1), stdout empty, error the close reason unless
+	// done. CompleteShellCommand sets the status directly rather than deriving it.
 	done := (exitArrived && exitCode == 0) || (reason == protocol.CloseTechnicianClosed && connectedAt != nil)
-	res := protocol.CommandResult{FinishedAt: now}
-	if connectedAt != nil {
-		res.StartedAt = *connectedAt
-	}
+	status := store.StatusFailed
+	errText := commandErrorText(reason)
 	if done {
-		res.ExitCode = 0
-	} else {
-		res.ExitCode = -1
-		if exitArrived {
-			res.ExitCode = exitCode
-		}
-		res.Error = commandErrorText(reason)
+		status = store.StatusDone
+		errText = ""
 	}
-	if _, err := ss.srv.st.CompleteCommand(bg, ss.cmdID, ss.deviceID, res); err != nil {
+	code := -1
+	if exitArrived {
+		code = exitCode
+	}
+	if err := ss.srv.st.CompleteShellCommand(bg, ss.cmdID, ss.deviceID, status, code, errText, connectedAt, now); err != nil {
 		// ErrConflict means the command was never claimed (still queued) or was
 		// already completed; the shell_sessions row and audit are still written.
 		ss.srv.log.Error("shell: complete command", "command", ss.cmdID, "err", err)

@@ -10,7 +10,7 @@ P1 = first build. P2 = next. P3 = after that.
 - P1 Run commands and scripts, capture output, timeout
 - P1 Remote lock (built-in command, managed devices only)
 - P1 Reconnect with backoff, offline tolerant
-- P2 Interactive remote shell over WebSocket relay (PTY / ConPTY), audited
+- RS1 (built) Interactive remote shell over WebSocket relay (PTY / ConPTY), audited and transcribed; Windows ConPTY cross-builds but is not runtime-verified
 - P2 Patch status and install (Windows Update, apt)
 - P2 Software deployment, file transfer
 - P2 Service and process watchlists, event log forwarding
@@ -39,7 +39,7 @@ P1 = first build. P2 = next. P3 = after that.
 - P1 Alert rules and alert state machine
 - P1 Metrics retention (raw 7 days, hourly 90 days)
 - P1 Docker compose, TLS via reverse proxy, backups by file copy
-- P2 WebSocket relay for remote shell
+- RS1 (built) WebSocket relay for remote shell (single-use ticket + Origin check, 20-shell cap, 1 MiB transcript, `shell.opened`/`connected`/`closed` audit)
 - P2 Postgres option, API keys, webhooks
 - P2 Email, SMS, Slack notifications, escalation, maintenance windows
 - P2 Two-factor auth, device token rotation
@@ -56,7 +56,7 @@ P1 = first build. P2 = next. P3 = after that.
 - P1 Command preset library: server-served dropdown, editable JSON file (`MSP_PRESETS`) with live reload, builtin fallback
 - P1 Alerts page: acknowledge, resolve
 - P1 Audit log view
-- P2 Browser terminal for remote shell
+- RS1 (built) Browser terminal for remote shell (`@xterm/xterm`, resize, status line, Transcript link on finished shell commands)
 - P2 Script library, scheduled automations, policy groups
 - P2 Reports: uptime, disk trends, patch compliance, exports
 - P2 Client portal with limited self-service view

@@ -65,6 +65,16 @@ long-poll) and should have an idle timeout above 40 s (the agent's HTTP timeout)
 defaults are fine. Set `MSP_TRUST_PROXY=1` only when the server port is not reachable except
 through that proxy, otherwise clients can spoof their IP for rate limits and the audit log.
 
+A proxy in front of the **dashboard** must additionally allow **WebSocket upgrades** and
+**long-lived connections** for the remote shell (RS1): both relay legs are WebSockets under
+`/api/v1/shell/{id}/ws` (browser) and `/api/agent/v1/shell/{command_id}` (agent), and a session
+may stay open up to the per-session maximum (default 4 h, up to 8 h). Caddy's reverse proxy
+passes the `Upgrade`/`Connection` headers and holds the connection open by default; if you set an
+explicit read/idle timeout on the proxy, keep it above the shell's max duration or add a
+longer-timeout rule for the two `/shell/` paths, otherwise the proxy cuts active terminals. The
+server itself caps concurrent shells at **20 per server** (further opens get `429 too_many_shells`);
+raise capacity by running more server replicas behind the proxy rather than lifting the cap.
+
 ## 3. Publishing agents
 
 The dashboard prints an install one-liner next to every enrollment token; it downloads from

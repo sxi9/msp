@@ -66,7 +66,7 @@ An unticked box with a note is built but needs real hardware, or is not started.
 - [ ] A real screen session between two machines — needs two real machines
 
 ## Phase 2 — Operations
-- [ ] Interactive remote shell in the browser over a WebSocket relay (PTY / ConPTY), audited
+- [x] Interactive remote shell in the browser over a WebSocket relay (PTY / ConPTY), audited and transcribed (RS1, decision D3; Linux verified end to end by `internal/e2e` `TestRemoteShellEndToEnd`; Windows ConPTY cross-builds but needs a Windows host)
 - [ ] Per-technician org scoping and client-level permissions
 - [ ] Patch status and install: Windows Update, apt
 - [ ] Software deployment and file transfer

@@ -280,6 +280,51 @@ func TestShellOpenValidation(t *testing.T) {
 	}
 }
 
+// TestShellOpenCrossOrg confirms staff are not org-scoped (docs/SECURITY.md
+// section 4, as for remote desktop): opening a shell on a device in another org
+// reaches the online check (409 device_offline), not a 403/404 org gate.
+func TestShellOpenCrossOrg(t *testing.T) {
+	e := newTestEnv(t)
+	ctx := context.Background()
+	org2, err := e.st.CreateOrg(ctx, "Beta Corp")
+	if err != nil {
+		t.Fatalf("CreateOrg: %v", err)
+	}
+	dev, _, err := e.st.UpsertDevice(ctx, store.UpsertDeviceParams{
+		OrgID: org2.ID, DeviceUID: "beta-1", Hostname: "beta-ws", Platform: protocol.PlatformLinux,
+		Arch: "amd64", IntervalS: 30, FactsJSON: "{}",
+	})
+	if err != nil {
+		t.Fatalf("UpsertDevice: %v", err)
+	}
+	operator := dashUser(e, "operator@example.com", RoleOperator)
+	path := "/api/v1/devices/" + strconv.FormatInt(dev.ID, 10) + "/shell"
+	if resp, b := e.do(http.MethodPost, path, map[string]any{}, withCookie(operator, csrfHeader)); resp.StatusCode != 409 || errorCode(t, b) != "device_offline" {
+		t.Fatalf("cross-org open: %d %s", resp.StatusCode, b)
+	}
+}
+
+// TestShellBusy covers the shell_busy guard; it skips until the store can create
+// a shell command (WP-STORE gap).
+func TestShellBusy(t *testing.T) {
+	e := newTestEnv(t)
+	devID, token := e.enroll("uid-1", protocol.PlatformLinux)
+	operator := dashUser(e, "operator@example.com", RoleOperator)
+	if st, _, b := e.sync(token, syncRequest(0)); st != 200 {
+		t.Fatalf("sync: %d %s", st, b)
+	}
+	if _, err := e.st.CreateCommand(context.Background(), store.CreateCommandParams{
+		DeviceID: devID, OrgID: e.org.ID, CreatedBy: e.admin.ID,
+		Kind: protocol.KindShell, Shell: "bash", TimeoutS: protocol.DefaultShellTimeoutS,
+	}); err != nil {
+		t.Skipf("store.CreateCommand does not accept kind shell yet (WP-STORE gap): %v", err)
+	}
+	path := "/api/v1/devices/" + strconv.FormatInt(devID, 10) + "/shell"
+	if resp, b := e.do(http.MethodPost, path, map[string]any{}, withCookie(operator, csrfHeader)); resp.StatusCode != 409 || errorCode(t, b) != "shell_busy" {
+		t.Fatalf("busy open: %d %s", resp.StatusCode, b)
+	}
+}
+
 func TestShellBrowserLegOriginAndTranscript404(t *testing.T) {
 	e := newTestEnv(t)
 	devID, _ := e.enroll("uid-1", protocol.PlatformLinux)
@@ -299,6 +344,37 @@ func TestShellBrowserLegOriginAndTranscript404(t *testing.T) {
 	// Transcript of an unknown command -> 404.
 	if resp, _ := e.do(http.MethodGet, "/api/v1/shell/88888/transcript", nil, withCookie(operator, nil)); resp.StatusCode != 404 {
 		t.Fatalf("transcript of unknown command: %d", resp.StatusCode)
+	}
+}
+
+// TestWebSocketUpgradeThroughMiddleware proves a WebSocket can be hijacked
+// through the exact production middleware chain (recover -> request log ->
+// security headers -> body limit), i.e. that the statusWriter wrapper's Unwrap
+// reaches the hijacker. The real shell WS handlers run behind this chain.
+func TestWebSocketUpgradeThroughMiddleware(t *testing.T) {
+	e := newTestEnv(t)
+	base := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
+		if err != nil {
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		_ = conn.Write(ctx, websocket.MessageBinary, []byte("up"))
+		cancel()
+		conn.Close(websocket.StatusNormalClosure, "")
+	})
+	var h http.Handler = base
+	h = e.srv.bodyLimit(h)
+	h = e.srv.securityHeaders(h)
+	h = e.srv.requestLog(h)
+	h = e.srv.recoverPanic(h)
+	ts := httptest.NewServer(h)
+	defer ts.Close()
+
+	conn := dialWS(t, wsURL(ts.URL, "/ws"), nil)
+	defer conn.Close(websocket.StatusNormalClosure, "")
+	if got := readBinary(t, conn); string(got) != "up" {
+		t.Fatalf("upgrade through middleware: got %q", got)
 	}
 }
 
@@ -391,7 +467,10 @@ func TestShellRelayPipesBytesAndCloses(t *testing.T) {
 	if sess.TranscriptTruncated {
 		t.Fatal("transcript unexpectedly truncated")
 	}
-	if got := e.command(cmd.ID); got.ExitCode == nil || *got.ExitCode != 0 || got.Error != "" {
+	// A technician-closed live session is done, but no exit frame arrived, so
+	// exit_code is -1 (RS1 section B: "exit_code from the exit message or -1");
+	// store.CompleteShellCommand sets the status directly so done can carry -1.
+	if got := e.command(cmd.ID); got.ExitCode == nil || *got.ExitCode != -1 || got.Error != "" {
 		t.Fatalf("done command exit=%v error=%q", got.ExitCode, got.Error)
 	}
 

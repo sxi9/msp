@@ -222,7 +222,15 @@ non-empty or `exit_code != 0`), else `done`. `404 {"error":"not_found"}` when th
 not exist or belongs to another device; `409 {"error":"conflict"}` when it is this device's
 command but not in status `sent` (already finished, lost, or never delivered). Agents treat
 both as final. `started_at` / `finished_at` are stored with millisecond precision. Audit
-`command.finished` actor_type=device.
+`command.finished` actor_type=device. A `kind shell` command (RS1) is the exception: the agent
+posts a result here only for its two refuse cases; otherwise the server completes it when the
+relay closes.
+
+### 3.5 `GET /api/agent/v1/shell/{command_id}` (Bearer `dt_`) — remote-shell agent leg **(RS1)**
+
+The agent leg of the interactive remote-shell relay: a WebSocket upgrade (`101`) the agent dials
+after it claims a `kind shell` command. Checks and framing are specified in section 6, "Remote
+shell"; the PTY/ConPTY side is in section 5, "shell".
 
 ## 4. Status and timing
 
@@ -238,9 +246,10 @@ both as final. `started_at` / `finished_at` are stored with millisecond precisio
 
 ## 5. Commands **(A1)**
 
-Command kinds are exactly `exec`, `script`, `lock`, `ping`, `message`. The Go form is
-`protocol.Command{ID, Kind, Argv, Shell, Body, Text, TimeoutS}`; `Command.Validate()` checks
-the shape, `KindSupportedOn(kind, platform)` checks the platform, `KindsFor(platform)` and
+Command kinds are exactly `exec`, `script`, `lock`, `ping`, `message`, `shell` **(RS1, D3)**.
+The Go form is `protocol.Command{ID, Kind, Argv, Shell, Body, Text, TimeoutS, Cols, Rows,
+ShellSession}` (the last three belong to `shell`); `Command.Validate()` checks the shape,
+`KindSupportedOn(kind, platform)` checks the platform, `KindsFor(platform)` and
 `ShellsFor(platform)` drive the UI.
 
 | kind      | platforms               | fields                         | agent behaviour                                   |
@@ -250,6 +259,7 @@ the shape, `KindSupportedOn(kind, platform)` checks the platform, `KindsFor(plat
 | `lock`    | linux, windows, android | none                           | locks the interactive session(s)                   |
 | `ping`    | linux, windows, android | none                           | exit 0, stdout `pong`                              |
 | `message` | linux, windows, android | `text` (non-empty, <= 4096 bytes) | shows the text to the logged-in user            |
+| `shell`   | linux, windows          | `shell` (optional), `cols`/`rows` (optional), `timeout_s` = max duration | opens a PTY/ConPTY and relays it over a WebSocket (section 7) |
 
 Common rules:
 
@@ -312,6 +322,26 @@ Reply `exit_code 0`, `stdout "pong"`, `stderr ""`, `error ""`.
 - Android: a high-importance notification with the text; result exit 0. When notifications
   are disabled for the app the text goes to stdout with stderr `notifications disabled`, still
   exit 0 (same as the desktop agents without a notifier).
+
+### shell (desktop only, RS1 — interactive relay)
+
+An interactive remote terminal, not a one-shot result. The agent-facing command JSON is
+`{"id":N,"kind":"shell","shell":"bash"|"sh"|"powershell"|"cmd","cols":120,"rows":32,"timeout_s":14400}`:
+
+- `shell` optional; default `bash` if on PATH else `sh` (Linux), `powershell` (Windows).
+- `cols`/`rows` optional, default 120×32, clamped 20..500 / 5..200. They are the initial PTY
+  size only; the browser's first `resize` control frame (section 6, "Remote shell") is
+  authoritative, so they are not persisted by the store and may be omitted from the command JSON.
+- `timeout_s` is the **maximum session duration** here (not a one-shot deadline): default 14400
+  (4 h), max 28800 (8 h), clamped with `ClampShellTimeout` — the single exception to the 1..3600
+  rule above.
+
+The agent does not post a `CommandResult` on the normal path: the server completes the command
+when the relay closes (section 6, "Remote shell"). The agent posts a result only for its two
+refuse cases — a shell is already running (`exit_code -1`, `error "shell busy"`) or the PTY/ConPTY
+will not open (`exit_code -1`, the platform reason; on an unsupported OS `"shell not supported on
+this platform"`). The relay transport, both WebSocket legs and the agent leg endpoint
+`GET /api/agent/v1/shell/{command_id}` are specified under section 6, "Remote shell".
 
 ### Android (A1)
 
@@ -431,6 +461,52 @@ COMMAND = {"id":7,"device_id":42,"org_id":1,"created_by":1,"created_by_email":"a
   device, org, client IP, detail `hostname`, `platform`, `rustdesk_id`, `host`); refused
   requests write nothing.
 
+### Remote shell (RS1, D3)
+
+An interactive browser terminal brokered by the server over a WebSocket relay (desktop only).
+
+- `POST /api/v1/devices/{id}/shell` (admin|operator; CSRF header; body `{"shell":"bash","cols":120,"rows":32}`,
+  every field optional) -> `201 {"command":COMMAND,"ticket":"<43-char base64url>","ws_path":"/api/v1/shell/{id}/ws"}`.
+  The command is queued as `kind shell`; `ticket` is a single-use browser credential valid 60 s.
+  Validation order: device exists (`404`) -> not revoked (`400 unsupported_on_device`) ->
+  desktop platform (`400 unsupported_on_platform`, i.e. android) -> body shape
+  (`400 invalid_request`) -> online (`409 device_offline`) -> no other `queued|sent` shell for the
+  device (`409 shell_busy`) -> under the 20-shell server cap (`429 too_many_shells`). Audit
+  `shell.opened` (actor user; detail hostname, platform, shell, cols, rows, command_id), then
+  `Notify(device)`.
+- The `COMMAND` JSON for a shell command gains a `shell_session` block (null until the relay's
+  session row exists): `{"bytes_in":N,"bytes_out":N,"close_reason":"<reason>|","transcript_truncated":bool,"connected_at":ts|null}`.
+- `GET /api/v1/shell/{id}/ws?ticket=...` (**browser leg**; session cookie, same role rule as the
+  POST) -> `101`. The `Origin` header host must equal `Host` (case-insensitive; missing Origin ->
+  `403`); the ticket must match the one issued for this command, be unused and younger than 60 s
+  (consumed on handshake). The browser may connect before the agent and then receives
+  `status waiting_for_agent`; its bytes are dropped until the agent attaches.
+- `GET /api/agent/v1/shell/{command_id}` (**agent leg**; `Authorization: Bearer dt_...`, no cookie,
+  no CSRF) -> `101`. The server checks a valid device token, the command belongs to that device,
+  is `kind shell` and status `sent`, and no agent socket is already attached (else `409`). On
+  attach the command stays `sent`, `connected_at` is set, audit `shell.connected` (actor device),
+  and a waiting browser gets `status connected`.
+- **Framing** (identical on both legs): **binary** frames are raw terminal bytes
+  (browser→agent = keystrokes to PTY stdin; agent→browser = PTY output); **text** frames are JSON
+  control — browser→agent `{"type":"resize","cols":N,"rows":N}`; agent→browser `{"type":"exit","code":N}`
+  just before it closes; server→browser only `{"type":"status","state":"waiting_for_agent"|"connected"|"closed","reason":"<close_reason>"}`.
+- **Relay**: frames are copied verbatim; the server counts `bytes_in` (browser→agent) and
+  `bytes_out` (agent→browser), appends agent→browser bytes to the transcript (cap 1 MiB, then
+  `transcript_truncated=true` and recording stops while relaying continues), and resets the idle
+  timer on browser input. Close reasons: `technician_closed` / `agent_closed` (a leg closed),
+  `idle_timeout` (30 min no browser input), `max_duration` (`timeout_s`), `server_shutdown`,
+  `agent_never_connected` (no agent within 60 s of the POST). On close the server completes the
+  command `done` (an exit 0 arrived, or the technician closed a live session) else `failed`
+  (`exit_code` from the exit frame or -1, `error` = close reason), writes the `shell_sessions` row
+  and audits `shell.closed` (actor user for `technician_closed`, else system; detail duration_s,
+  bytes_in, bytes_out, reason). At most 20 concurrent shells per server.
+- `GET /api/v1/shell/{id}/transcript` (admin|operator, same org rule) -> `200 text/plain; charset=utf-8`,
+  the recorded agent→browser bytes (served from the live buffer while open, from the flushed row
+  after close). `404` when the command is not a shell command.
+
+The dashboard CSP (`connect-src 'self'`, section 6 "Other paths and headers") already permits the
+same-origin WebSocket; no `ws:`/`wss:` source is added.
+
 ### Presets
 
 - `GET /api/v1/presets` (any role) ->
@@ -500,7 +576,8 @@ good set keeps being served.
 `user.login`, `user.login_failed`, `user.created`, `user.disabled`, `user.password_changed`
 (actor the user, or `system` with detail `via: cli`), `user.password_change_failed`, `org.created`,
 `token.created`, `token.revoked`, `device.enrolled`, `device.revoked`, `device.deleted`,
-`device.lock_requested` **(A1)**, `device.remote_desktop_opened` **(RD1)**, `command.queued`,
+`device.lock_requested` **(A1)**, `device.remote_desktop_opened` **(RD1)**,
+`shell.opened`, `shell.connected`, `shell.closed` **(RS1)**, `command.queued`,
 `command.finished`, `command.lost`, `alert.ack`.
 
 ## 8. Alert thresholds

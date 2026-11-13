@@ -118,6 +118,55 @@ func (s *Store) FinishShellSession(ctx context.Context, commandID int64, p Finis
 	return nil
 }
 
+// CompleteShellCommand records the terminal state of a shell command on relay
+// close. Unlike CompleteCommand it does not derive the status from the exit
+// code: the relay has already decided it (RS1 section B), so a session the
+// technician closed while it was live is `done` with exit_code -1 (no exit
+// frame) — a combination ResultStatus cannot express. stdout is always empty;
+// error is "" when done, the close reason otherwise. ErrNotFound when the
+// command does not exist or belongs to another device; ErrConflict unless it is
+// in status sent.
+func (s *Store) CompleteShellCommand(ctx context.Context, id, deviceID int64, status string, exitCode int, errText string, started *time.Time, finished time.Time) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("store: complete shell command: %w", err)
+	}
+	defer tx.Rollback()
+
+	var (
+		cur   string
+		owner int64
+	)
+	err = tx.QueryRowContext(ctx, `SELECT status, device_id FROM commands WHERE id = ?`, id).Scan(&cur, &owner)
+	if errors.Is(err, sql.ErrNoRows) || (err == nil && owner != deviceID) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("store: complete shell command: %w", err)
+	}
+	if cur != StatusSent {
+		return ErrConflict
+	}
+
+	var startedVal any
+	if started != nil && !started.IsZero() {
+		startedVal = fmtTimeMs(*started)
+	}
+	fin := finished
+	if fin.IsZero() {
+		fin = s.Now()
+	}
+	_, err = tx.ExecContext(ctx,
+		`UPDATE commands SET status = ?, exit_code = ?, stdout = '', stderr = '', truncated = 0, error = ?,
+		        started_at = ?, finished_at = ?
+		  WHERE id = ? AND status = 'sent'`,
+		status, exitCode, errText, startedVal, fmtTimeMs(fin), id)
+	if err != nil {
+		return fmt.Errorf("store: complete shell command: %w", err)
+	}
+	return tx.Commit()
+}
+
 // GetShellSession reads a session row, transcript included. ErrNotFound when no
 // row exists for the command.
 func (s *Store) GetShellSession(ctx context.Context, commandID int64) (ShellSession, error) {

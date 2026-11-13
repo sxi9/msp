@@ -1,8 +1,10 @@
 package server
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net/http"
 
@@ -124,6 +126,45 @@ func (s *Server) handleCreateCommand(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, map[string]any{"command": created})
 }
 
+// commandWithShell is a command JSON enriched with the shell_session block a
+// kind shell command carries (RS1 section A). The embedded store.Command's
+// fields are promoted, so the object is a plain command with one added
+// shell_session field; it is null until the shell_sessions row exists.
+type commandWithShell struct {
+	store.Command
+	ShellSession *protocol.ShellSession `json:"shell_session"`
+}
+
+// enrichCommand returns the JSON value for one command: a kind shell command
+// carries its shell_session block (null until the relay creates the session
+// row), every other kind is returned unchanged. The live byte counters are
+// flushed to the row on close, so a finished shell shows accurate totals; while
+// a shell is live the browser reads the relay directly rather than this JSON.
+func (s *Server) enrichCommand(ctx context.Context, cmd store.Command) any {
+	if cmd.Argv == nil {
+		cmd.Argv = []string{}
+	}
+	if cmd.Kind != protocol.KindShell {
+		return cmd
+	}
+	out := commandWithShell{Command: cmd}
+	switch sess, err := s.st.GetShellSession(ctx, cmd.ID); {
+	case err == nil:
+		out.ShellSession = &protocol.ShellSession{
+			BytesIn:             sess.BytesIn,
+			BytesOut:            sess.BytesOut,
+			CloseReason:         sess.CloseReason,
+			TranscriptTruncated: sess.TranscriptTruncated,
+			ConnectedAt:         sess.ConnectedAt,
+		}
+	case errors.Is(err, store.ErrNotFound):
+		// No session row yet: shell_session stays null (RS1 section A).
+	default:
+		s.log.Error("shell: get session for command json", "command", cmd.ID, "err", err)
+	}
+	return out
+}
+
 // handleListCommands is GET /api/v1/devices/{id}/commands?limit=50, newest first.
 func (s *Server) handleListCommands(w http.ResponseWriter, r *http.Request) {
 	id, ok := pathInt(r, "id")
@@ -142,10 +183,11 @@ func (s *Server) handleListCommands(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal", "")
 		return
 	}
-	if cmds == nil {
-		cmds = []store.Command{}
+	out := make([]any, len(cmds))
+	for i, c := range cmds {
+		out[i] = s.enrichCommand(ctx, c)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"commands": cmds})
+	writeJSON(w, http.StatusOK, map[string]any{"commands": out})
 }
 
 // handleGetCommand is GET /api/v1/commands/{id}.
@@ -160,8 +202,5 @@ func (s *Server) handleGetCommand(w http.ResponseWriter, r *http.Request) {
 		s.dashStoreError(w, err, "get command")
 		return
 	}
-	if cmd.Argv == nil {
-		cmd.Argv = []string{}
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"command": cmd})
+	writeJSON(w, http.StatusOK, map[string]any{"command": s.enrichCommand(r.Context(), cmd)})
 }
