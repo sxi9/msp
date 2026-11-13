@@ -186,5 +186,21 @@ e2e, protocol, server, store — including the new `internal/e2e` `TestOrgScopin
 - [x] Role-change edge: a scoped user promoted to admin becomes all-orgs at once (the rule keys off role); a demoted admin keeps `all_orgs=1` until an admin scopes them — handled by the resolution logic (no role-change endpoint in this codebase), covered by a store test that flips role via SQL
 - [x] Dashboard: Users-page "Edit access" dialog (All-clients toggle + per-client checklist, `OrgChecklist` component), the same control on the create-user form, "Add client" hidden for non-admins, `accessOf` helper, `?mock=1` scoped operator (`web/src/lib/orgscope.test.ts`; `make web` typecheck + build)
 - [x] End-to-end proof: `internal/e2e/orgscope_test.go` `TestOrgScoping` — real server over httptest, two orgs A/B each with a device, an open alert and audit history, an operator scoped to A: sees only A in `GET /orgs`/`/devices`/`/alerts`/`/audit`/`/summary`; 404 (no new command/alert/audit row, alert still unacked) on `GET /orgs/{B}`, `GET /devices/{Bdev}`, `POST …/commands`, `POST …/shell`, `POST …/lock` (command), `POST …/remote-desktop`, `GET …/transcript`, `POST /alerts/{Balert}/ack`; admin `PUT /users/{id}/orgs` grants B and the operator then sees B; the admin is unaffected
-- [ ] Screenshots: the Edit-access dialog and a scoped operator's reduced Fleet — Not produced here: the headless-browser screenshot tooling is not available in this build container; the behaviour is covered by the tests above (docs/STATUS.md)
+- [x] Screenshots: the Edit-access dialog and a scoped operator's reduced Fleet — produced in a live run (two orgs "Acme Dental" and "Riverside Clinic", the real Linux agent on Acme and a curl-enrolled device on Riverside, an operator `tech@example.com` scoped to Acme only): the admin's Users-page Edit-access dialog with the "All clients" toggle off and the Acme-ticked / Riverside-unticked checklist (`docs/screenshots/22-user-client-access-{desktop,phone}.png`), and the same operator's Fleet listing only Acme Dental (org filter and counts reduced, Riverside and its device absent) (`23-scoped-operator-fleet-{desktop,phone}.png`); the label banners were prepended before capture and phone `scrollWidth` was 400 on both pages
 - [x] Docs: PROTOCOL (`all_orgs`/`org_ids`, `PUT /users/{id}/orgs`, the visible-org rule, device-scoped 404-across-orgs, `user.orgs_changed`), SECURITY (two-layer tenant isolation, the 404-not-403 rule, section 11 item 4 done), GUIDE ("Client access per technician"), ARCHITECTURE, FEATURES, STATUS (RS2 table), ROADMAP, CHECKLIST
+
+### Final verification pass (2026-11-13)
+
+Re-run in the cloud build container (Go 1.24, Node 22, no display): `CGO_ENABLED=0 go build ./...` ok, `go vet ./...`
+ok, `CGO_ENABLED=0 go test ./... -count=1` ok (agent 3.2 s, e2e 9.95 s incl. `TestOrgScoping`, protocol, server 47.4 s,
+store 0.33 s), `GOOS=windows GOARCH=amd64 go build ./...` ok, `make web` (npm ci, 38 web unit tests pass, `tsc --noEmit`,
+esbuild `app.js` 418.3 kB + `app.css` 14.2 kB, server rebuilt), `scripts/e2e.sh` ends with "E2E OK" (36 PASS, 0 FAIL).
+Then a live run on 127.0.0.1:18110 with a fresh SQLite file: admin, two orgs "Acme Dental" and "Riverside Clinic"
+and a token each via the CLI; the real `bin/msp-agent` enrolled on Acme (device `vm`, interval 2 s) and a
+curl-enrolled fake device on Riverside (`reception-pc`); an operator `tech@example.com` created scoped to Acme only
+(`POST /api/v1/users` with `all_orgs:false, org_ids:[1]`). Playwright (chromium, deviceScaleFactor 2, light theme)
+then captured screenshots 22 (admin Users Edit-access dialog) and 23 (the scoped operator's Fleet, showing only
+Acme Dental) at 1280 px and 400 px; the operator's org filter listed only "All orgs" and "Acme Dental" and its Fleet
+held no Riverside device, confirming the isolation. The server and agent were stopped and the live database deleted.
+
+- [x] Live run confirms a scoped operator sees only their assigned client in the real dashboard: Fleet, org filter and header counts reduced to Acme Dental, Riverside (visible to the admin) absent; admin Edit-access dialog edits the per-client checklist; phone `scrollWidth` 400 on all four pages; database deleted afterwards
