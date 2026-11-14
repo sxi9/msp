@@ -21,13 +21,37 @@ const (
 )
 
 // Command kinds (AMENDMENT A1). exec and script run only on desktop agents;
-// lock, ping and message are built-in and allowed on every platform.
+// lock, ping and message are built-in and allowed on every platform. patch
+// (PM1) is desktop only, like exec, script and shell (KindShell, shell.go).
 const (
 	KindExec    = "exec"
 	KindScript  = "script"
 	KindLock    = "lock"
 	KindPing    = "ping"
 	KindMessage = "message"
+	KindPatch   = "patch"
+)
+
+// Patch command fields (PM1). action defaults to install, mode to security and
+// reboot to never; a scan re-collects the report and ignores mode/ids/reboot.
+const (
+	PatchActionScan    = "scan"
+	PatchActionInstall = "install"
+
+	PatchModeAll      = "all"
+	PatchModeSecurity = "security"
+	PatchModeIDs      = "ids"
+
+	PatchRebootNever      = "never"
+	PatchRebootIfRequired = "if_required"
+)
+
+// Patch report managers (PM1): apt on Linux, Windows Update on Windows, none
+// when no supported package manager is found.
+const (
+	PatchManagerApt  = "apt"
+	PatchManagerWU   = "wu"
+	PatchManagerNone = "none"
 )
 
 // Shells accepted for kind script.
@@ -70,6 +94,17 @@ const (
 	MaxAppPackageLen = 256
 	MaxAppLabelLen   = 256
 	MaxAppVersionLen = 64
+	// Patch report (facts.patches, PM1). The updates list is capped at 500
+	// entries (security first then name) and each field is length-bounded;
+	// Validate rejects anything larger with a 400 invalid_request naming the
+	// index. MaxPatchTimeoutS is the ceiling for the patch command's timeout_s
+	// (default 3600), higher than MaxTimeoutS because an install can be slow.
+	MaxPatchUpdates      = 500
+	MaxPatchNameLen      = 256
+	MaxPatchVersionLen   = 128
+	MaxPatchSourceLen    = 256
+	DefaultPatchTimeoutS = 3600
+	MaxPatchTimeoutS     = 14400
 )
 
 // RustdeskURIPrefix is the URL scheme the official RustDesk client registers
@@ -129,6 +164,38 @@ type Facts struct {
 	Apps         []App    `json:"apps,omitempty"`
 }
 
+// PatchUpdate is one pending OS update in a PatchReport (PM1): the package
+// name, its installed (Current) and candidate (New) versions, whether it is a
+// security update and the apt/WU source it comes from. Every field is
+// length-bounded (name <= MaxPatchNameLen, versions <= MaxPatchVersionLen,
+// source <= MaxPatchSourceLen); the agent cuts its fields to the same limits
+// before sending.
+type PatchUpdate struct {
+	Name     string `json:"name"`
+	Current  string `json:"current"`
+	New      string `json:"new"`
+	Security bool   `json:"security"`
+	Source   string `json:"source"`
+}
+
+// PatchReport is the pending-updates report an agent collects periodically and
+// sends as the optional top-level "patches" field on the sync and enroll
+// request, beside facts (PM1). Manager is apt, wu or none (none = no supported
+// package manager, the report still carries CheckedAt and an empty list).
+// Error non-empty means the scan failed (e.g. apt lock held) and the agent
+// keeps re-sending the last good list. Count and SecurityCount are the agent's
+// own totals; Updates is capped at MaxPatchUpdates entries, security first then
+// name.
+type PatchReport struct {
+	CheckedAt      time.Time     `json:"checked_at"`
+	Manager        string        `json:"manager"`
+	RebootRequired bool          `json:"reboot_required"`
+	Count          int           `json:"count"`
+	SecurityCount  int           `json:"security_count"`
+	Error          string        `json:"error"`
+	Updates        []PatchUpdate `json:"updates"`
+}
+
 // Rustdesk tells an agent which self-hosted RustDesk relay to use (RD1):
 // Host is the bare public hostname or IP of the hbbs/hbbr host (no port: the
 // ID server is reached on 21116 and the relay on 21117, the defaults of both
@@ -166,6 +233,9 @@ type EnrollRequest struct {
 	AgentVersion    string `json:"agent_version"`
 	IntervalS       int    `json:"interval_s"`
 	Facts           Facts  `json:"facts"`
+	// PatchReport (PM1) is the optional pending-updates report, sent beside
+	// facts; omitted by Android, which has no desktop package management.
+	PatchReport *PatchReport `json:"patches,omitempty"`
 }
 
 // EnrollResponse is the 201 body of POST /api/agent/v1/enroll.
@@ -185,18 +255,30 @@ type SyncRequest struct {
 	UptimeS      int64   `json:"uptime_s"`
 	Metrics      Metrics `json:"metrics"`
 	Facts        *Facts  `json:"facts,omitempty"`
+	// PatchReport (PM1) is the optional pending-updates report; the agent sends
+	// it on the first sync after start, every 6 h and right after an install or
+	// scan, independently of Facts (patches scan slower). Android never sends it.
+	PatchReport *PatchReport `json:"patches,omitempty"`
 }
 
 // Command is one unit of work delivered to an agent inside a SyncResponse.
 // Argv is set for exec, Shell+Body for script, Text for message; lock and ping
 // carry only id, kind and timeout_s.
 type Command struct {
-	ID       int64    `json:"id"`
-	Kind     string   `json:"kind"`
-	Argv     []string `json:"argv,omitempty"`
-	Shell    string   `json:"shell,omitempty"`
-	Body     string   `json:"body,omitempty"`
-	Text     string   `json:"text,omitempty"`
+	ID    int64    `json:"id"`
+	Kind  string   `json:"kind"`
+	Argv  []string `json:"argv,omitempty"`
+	Shell string   `json:"shell,omitempty"`
+	Body  string   `json:"body,omitempty"`
+	Text  string   `json:"text,omitempty"`
+	// Action, Mode, IDs and Reboot belong to kind patch (PM1): action is scan
+	// or install (default install), mode is all, security or ids (default
+	// security), IDs names the packages for mode ids, and reboot is never or
+	// if_required (default never). They are omitted for every other kind.
+	Action   string   `json:"action,omitempty"`
+	Mode     string   `json:"mode,omitempty"`
+	IDs      []string `json:"ids,omitempty"`
+	Reboot   string   `json:"reboot,omitempty"`
 	TimeoutS int      `json:"timeout_s"`
 	// Cols, Rows and ShellSession belong to kind shell (RS1, decision D3).
 	// Cols/Rows are the initial terminal size; they are omitted (hence 0,
@@ -334,6 +416,69 @@ func (a App) Validate() error {
 	return nil
 }
 
+// ValidPatchManager reports whether m is apt, wu or none.
+func ValidPatchManager(m string) bool {
+	switch m {
+	case PatchManagerApt, PatchManagerWU, PatchManagerNone:
+		return true
+	}
+	return false
+}
+
+// ValidPatchAction reports whether a is scan or install.
+func ValidPatchAction(a string) bool {
+	return a == PatchActionScan || a == PatchActionInstall
+}
+
+// ValidPatchMode reports whether m is all, security or ids.
+func ValidPatchMode(m string) bool {
+	switch m {
+	case PatchModeAll, PatchModeSecurity, PatchModeIDs:
+		return true
+	}
+	return false
+}
+
+// ValidPatchReboot reports whether r is never or if_required.
+func ValidPatchReboot(r string) bool {
+	return r == PatchRebootNever || r == PatchRebootIfRequired
+}
+
+// Validate checks a patch report: the manager must be apt, wu or none, the
+// updates list is capped at MaxPatchUpdates entries and each entry's fields are
+// length-bounded. The returned text is the 400 invalid_request detail and names
+// the offending updates index.
+func (r PatchReport) Validate() error {
+	if !ValidPatchManager(r.Manager) {
+		return fmt.Errorf("patches.manager must be one of apt, wu, none")
+	}
+	if len(r.Updates) > MaxPatchUpdates {
+		return fmt.Errorf("patches.updates has %d entries, at most %d are accepted", len(r.Updates), MaxPatchUpdates)
+	}
+	for i, u := range r.Updates {
+		if err := u.Validate(); err != nil {
+			return fmt.Errorf("patches.updates[%d].%w", i, err)
+		}
+	}
+	return nil
+}
+
+// Validate checks one update entry; the error names the field without the
+// "patches.updates[i]." prefix, which PatchReport.Validate adds.
+func (u PatchUpdate) Validate() error {
+	switch {
+	case u.Name == "" || len(u.Name) > MaxPatchNameLen:
+		return fmt.Errorf("name must be 1..%d bytes", MaxPatchNameLen)
+	case len(u.Current) > MaxPatchVersionLen:
+		return fmt.Errorf("current exceeds %d bytes", MaxPatchVersionLen)
+	case len(u.New) > MaxPatchVersionLen:
+		return fmt.Errorf("new exceeds %d bytes", MaxPatchVersionLen)
+	case len(u.Source) > MaxPatchSourceLen:
+		return fmt.Errorf("source exceeds %d bytes", MaxPatchSourceLen)
+	}
+	return nil
+}
+
 // RustdeskConnectURL is the URL that opens a remote-control session to a
 // RustDesk id in the installed client: rustdesk://connect/<id>. The id must
 // have passed ValidRustdeskID.
@@ -398,7 +543,7 @@ func ClampTimeout(n int) int {
 // ValidKind reports whether k is one of the command kinds (RS1 added shell).
 func ValidKind(k string) bool {
 	switch k {
-	case KindExec, KindScript, KindLock, KindPing, KindMessage, KindShell:
+	case KindExec, KindScript, KindLock, KindPing, KindMessage, KindShell, KindPatch:
 		return true
 	}
 	return false
@@ -426,13 +571,14 @@ func ShellsFor(platform string) []string {
 }
 
 // KindsFor returns the command kinds a platform accepts: exec, script, lock,
-// ping, message and shell on desktop platforms, only lock, ping and message on
-// android, none for an unknown platform. shell (RS1) is desktop only, so the
-// server answers 400 unsupported_on_platform for a shell on android.
+// ping, message, shell and patch on desktop platforms, only lock, ping and
+// message on android, none for an unknown platform. shell (RS1) and patch (PM1)
+// are desktop only, so the server answers 400 unsupported_on_platform for
+// either on android.
 func KindsFor(platform string) []string {
 	switch platform {
 	case PlatformLinux, PlatformWindows:
-		return []string{KindExec, KindScript, KindLock, KindPing, KindMessage, KindShell}
+		return []string{KindExec, KindScript, KindLock, KindPing, KindMessage, KindShell, KindPatch}
 	case PlatformAndroid:
 		return []string{KindLock, KindPing, KindMessage}
 	}
@@ -454,11 +600,15 @@ func KindSupportedOn(kind, platform string) bool {
 // platform (use KindSupportedOn for that). The returned error text is what the
 // server sends as the 400 invalid_request detail.
 func (c Command) Validate() error {
-	// kind shell allows a far longer session (MaxShellTimeoutS); every other
-	// kind is capped at MaxTimeoutS.
+	// kind shell allows a far longer session (MaxShellTimeoutS) and kind patch
+	// a longer install (MaxPatchTimeoutS); every other kind is capped at
+	// MaxTimeoutS.
 	maxTimeout := MaxTimeoutS
-	if c.Kind == KindShell {
+	switch c.Kind {
+	case KindShell:
 		maxTimeout = MaxShellTimeoutS
+	case KindPatch:
+		maxTimeout = MaxPatchTimeoutS
 	}
 	if c.TimeoutS < 0 || c.TimeoutS > maxTimeout {
 		return fmt.Errorf("timeout_s must be 0 (default) or 1..%d", maxTimeout)
@@ -519,8 +669,33 @@ func (c Command) Validate() error {
 		if len(c.Argv) != 0 || c.Body != "" || c.Text != "" {
 			return fmt.Errorf("shell must not set argv, body or text")
 		}
+	case KindPatch:
+		// action/mode/reboot are optional; "" means the defaults install,
+		// security and never. A scan ignores mode/ids/reboot, so the shape
+		// check validates the fields independently and leaves the subset check
+		// (ids must be a subset of the pending list) to the agent.
+		if c.Action != "" && !ValidPatchAction(c.Action) {
+			return fmt.Errorf("patch action must be empty (default install) or one of scan, install")
+		}
+		if c.Mode != "" && !ValidPatchMode(c.Mode) {
+			return fmt.Errorf("patch mode must be empty (default security) or one of all, security, ids")
+		}
+		if c.Reboot != "" && !ValidPatchReboot(c.Reboot) {
+			return fmt.Errorf("patch reboot must be empty (default never) or one of never, if_required")
+		}
+		if len(c.IDs) > MaxPatchUpdates {
+			return fmt.Errorf("patch ids has %d entries, at most %d are accepted", len(c.IDs), MaxPatchUpdates)
+		}
+		for i, id := range c.IDs {
+			if id == "" || len(id) > MaxPatchNameLen {
+				return fmt.Errorf("patch ids[%d] must be 1..%d bytes", i, MaxPatchNameLen)
+			}
+		}
+		if len(c.Argv) != 0 || c.Shell != "" || c.Body != "" || c.Text != "" {
+			return fmt.Errorf("patch must not set argv, shell, body or text")
+		}
 	default:
-		return fmt.Errorf("unknown kind %q (expected exec, script, lock, ping or message)", c.Kind)
+		return fmt.Errorf("unknown kind %q (expected exec, script, lock, ping, message, shell or patch)", c.Kind)
 	}
 	return nil
 }

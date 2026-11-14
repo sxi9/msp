@@ -56,6 +56,7 @@ func TestFixturesRoundTrip(t *testing.T) {
 		{"sync_rustdesk.json", &SyncRequest{}},
 		{"sync_response_rustdesk.json", &SyncResponse{}},
 		{"sync_android_apps.json", &SyncRequest{}},
+		{"sync_patches.json", &SyncRequest{}},
 		{"command_result.json", &CommandResult{}},
 		{"command_shell.json", &Command{}},
 		{"sync_response_shell.json", &SyncResponse{}},
@@ -152,6 +153,9 @@ func TestFixtureSemantics(t *testing.T) {
 	}
 	if sl.Facts.RustdeskID != "" || sr.Rustdesk != nil || sra.Rustdesk != nil {
 		t.Fatal("plain fixtures must not carry rustdesk fields")
+	}
+	if sl.PatchReport != nil || sa.PatchReport != nil || el.PatchReport != nil || ea.PatchReport != nil {
+		t.Fatal("plain fixtures must not carry a patch report")
 	}
 	var srr SyncResponse
 	roundTrip(t, "sync_response_rustdesk.json", &srr)
@@ -253,8 +257,11 @@ func TestPlatformTables(t *testing.T) {
 	if got := ShellsFor(PlatformAndroid); len(got) != 0 {
 		t.Fatalf("android shells %v", got)
 	}
-	if got := KindsFor(PlatformLinux); !reflect.DeepEqual(got, []string{"exec", "script", "lock", "ping", "message", "shell"}) {
+	if got := KindsFor(PlatformLinux); !reflect.DeepEqual(got, []string{"exec", "script", "lock", "ping", "message", "shell", "patch"}) {
 		t.Fatalf("linux kinds %v", got)
+	}
+	if got := KindsFor(PlatformWindows); !reflect.DeepEqual(got, []string{"exec", "script", "lock", "ping", "message", "shell", "patch"}) {
+		t.Fatalf("windows kinds %v", got)
 	}
 	if got := KindsFor(PlatformAndroid); !reflect.DeepEqual(got, []string{"lock", "ping", "message"}) {
 		t.Fatalf("android kinds %v", got)
@@ -262,7 +269,7 @@ func TestPlatformTables(t *testing.T) {
 	if KindsFor("darwin") != nil || KindSupportedOn(KindPing, "darwin") {
 		t.Fatal("unknown platform must support nothing")
 	}
-	for _, k := range []string{KindExec, KindScript, KindLock, KindPing, KindMessage, KindShell} {
+	for _, k := range []string{KindExec, KindScript, KindLock, KindPing, KindMessage, KindShell, KindPatch} {
 		if !ValidKind(k) {
 			t.Errorf("ValidKind(%s)", k)
 		}
@@ -276,6 +283,13 @@ func TestPlatformTables(t *testing.T) {
 	}
 	if KindSupportedOn(KindShell, PlatformAndroid) {
 		t.Fatal("shell must not be supported on android")
+	}
+	// patch (PM1) is desktop only.
+	if !KindSupportedOn(KindPatch, PlatformLinux) || !KindSupportedOn(KindPatch, PlatformWindows) {
+		t.Fatal("patch must be supported on desktop platforms")
+	}
+	if KindSupportedOn(KindPatch, PlatformAndroid) {
+		t.Fatal("patch must not be supported on android")
 	}
 }
 
@@ -299,6 +313,13 @@ func TestCommandValidate(t *testing.T) {
 		// cols/rows are clamped by the server, never rejected, so even an
 		// out-of-range or negative size is a valid command shape.
 		{Kind: KindShell, Shell: ShellSh, Cols: 9000, Rows: -3},
+		// patch (PM1): every field optional (defaults install/security/never),
+		// and timeout_s may go up to MaxPatchTimeoutS.
+		{Kind: KindPatch},
+		{Kind: KindPatch, Action: PatchActionScan},
+		{Kind: KindPatch, Action: PatchActionInstall, Mode: PatchModeAll, Reboot: PatchRebootIfRequired},
+		{Kind: KindPatch, Action: PatchActionInstall, Mode: PatchModeSecurity, Reboot: PatchRebootNever, TimeoutS: DefaultPatchTimeoutS},
+		{Kind: KindPatch, Action: PatchActionInstall, Mode: PatchModeIDs, IDs: []string{"openssl", "curl"}, TimeoutS: MaxPatchTimeoutS},
 	}
 	for i, c := range ok {
 		if err := c.Validate(); err != nil {
@@ -335,6 +356,14 @@ func TestCommandValidate(t *testing.T) {
 		{Command{Kind: KindShell, Text: "x"}, "shell must not set argv"},
 		{Command{Kind: KindShell, Shell: "zsh"}, "shell must be empty"},
 		{Command{Kind: KindShell, TimeoutS: MaxShellTimeoutS + 1}, "timeout_s"},
+		{Command{Kind: KindPatch, Action: "upgrade"}, "patch action must be"},
+		{Command{Kind: KindPatch, Mode: "all-security"}, "patch mode must be"},
+		{Command{Kind: KindPatch, Reboot: "always"}, "patch reboot must be"},
+		{Command{Kind: KindPatch, IDs: []string{"openssl", ""}}, "patch ids[1] must be"},
+		{Command{Kind: KindPatch, IDs: []string{strings.Repeat("p", MaxPatchNameLen+1)}}, "patch ids[0] must be"},
+		{Command{Kind: KindPatch, Argv: []string{"ls"}}, "patch must not set"},
+		{Command{Kind: KindPatch, Text: "x"}, "patch must not set"},
+		{Command{Kind: KindPatch, TimeoutS: MaxPatchTimeoutS + 1}, "timeout_s"},
 		{Command{Kind: "telnet", Argv: []string{"ls"}}, "unknown kind"},
 		{Command{}, "unknown kind"},
 	}
@@ -591,6 +620,126 @@ func TestShellSessionJSON(t *testing.T) {
 	out, _ = json.Marshal(Command{ID: 42, Kind: KindShell, Shell: ShellBash, TimeoutS: DefaultShellTimeoutS})
 	if string(out) != `{"id":42,"kind":"shell","shell":"bash","timeout_s":14400}` {
 		t.Fatalf("shell command without session: %s", out)
+	}
+}
+
+func TestPatches(t *testing.T) {
+	// Enum helpers.
+	for _, m := range []string{PatchManagerApt, PatchManagerWU, PatchManagerNone} {
+		if !ValidPatchManager(m) {
+			t.Errorf("ValidPatchManager(%q) must be true", m)
+		}
+	}
+	for _, m := range []string{"", "yum", "snap"} {
+		if ValidPatchManager(m) {
+			t.Errorf("ValidPatchManager(%q) must be false", m)
+		}
+	}
+	if !ValidPatchAction(PatchActionScan) || !ValidPatchAction(PatchActionInstall) || ValidPatchAction("") || ValidPatchAction("upgrade") {
+		t.Fatal("ValidPatchAction")
+	}
+	if !ValidPatchMode(PatchModeAll) || !ValidPatchMode(PatchModeSecurity) || !ValidPatchMode(PatchModeIDs) || ValidPatchMode("") || ValidPatchMode("some") {
+		t.Fatal("ValidPatchMode")
+	}
+	if !ValidPatchReboot(PatchRebootNever) || !ValidPatchReboot(PatchRebootIfRequired) || ValidPatchReboot("") || ValidPatchReboot("always") {
+		t.Fatal("ValidPatchReboot")
+	}
+
+	// Report validation: a well-formed report, then field/length/manager fails
+	// that name the offending index exactly like Facts.Validate does.
+	update := func(name, cur, next string, sec bool) PatchUpdate {
+		return PatchUpdate{Name: name, Current: cur, New: next, Security: sec, Source: "src"}
+	}
+	okReports := []PatchReport{
+		{Manager: PatchManagerNone},
+		{Manager: PatchManagerApt, Updates: []PatchUpdate{}},
+		{Manager: PatchManagerWU, Updates: []PatchUpdate{update("openssl", "3.0.1", "3.0.2", true)}},
+		{Manager: PatchManagerApt, Error: "apt lock held"},
+		{Manager: PatchManagerApt, Updates: []PatchUpdate{update(strings.Repeat("n", MaxPatchNameLen), strings.Repeat("c", MaxPatchVersionLen), strings.Repeat("v", MaxPatchVersionLen), false)}},
+		{Manager: PatchManagerApt, Updates: make([]PatchUpdate, MaxPatchUpdates)},
+	}
+	for i := range okReports[5].Updates {
+		okReports[5].Updates[i] = update("pkg", "1", "2", false)
+	}
+	for i, r := range okReports {
+		if err := r.Validate(); err != nil {
+			t.Errorf("okReports[%d]: unexpected error %v", i, err)
+		}
+	}
+	tooMany := make([]PatchUpdate, MaxPatchUpdates+1)
+	for i := range tooMany {
+		tooMany[i] = update("pkg", "1", "2", false)
+	}
+	badReports := []struct {
+		r    PatchReport
+		want string
+	}{
+		{PatchReport{Manager: ""}, "patches.manager must be one of apt, wu, none"},
+		{PatchReport{Manager: "snap"}, "patches.manager must be one of apt, wu, none"},
+		{PatchReport{Manager: PatchManagerApt, Updates: []PatchUpdate{update("ok", "1", "2", false), update("", "1", "2", false)}}, "patches.updates[1].name must be 1..256"},
+		{PatchReport{Manager: PatchManagerApt, Updates: []PatchUpdate{update(strings.Repeat("n", MaxPatchNameLen+1), "1", "2", false)}}, "patches.updates[0].name must be 1..256"},
+		{PatchReport{Manager: PatchManagerApt, Updates: []PatchUpdate{update("a", strings.Repeat("c", MaxPatchVersionLen+1), "2", false)}}, "patches.updates[0].current exceeds 128"},
+		{PatchReport{Manager: PatchManagerApt, Updates: []PatchUpdate{update("a", "1", strings.Repeat("v", MaxPatchVersionLen+1), false)}}, "patches.updates[0].new exceeds 128"},
+		{PatchReport{Manager: PatchManagerApt, Updates: []PatchUpdate{{Name: "a", Source: strings.Repeat("s", MaxPatchSourceLen+1)}}}, "patches.updates[0].source exceeds 256"},
+		{PatchReport{Manager: PatchManagerApt, Updates: tooMany}, "patches.updates has 501 entries, at most 500"},
+	}
+	for i, b := range badReports {
+		err := b.r.Validate()
+		if err == nil {
+			t.Errorf("badReports[%d]: expected error containing %q", i, b.want)
+			continue
+		}
+		if !strings.Contains(err.Error(), b.want) {
+			t.Errorf("badReports[%d]: error %q does not contain %q", i, err, b.want)
+		}
+	}
+
+	// JSON shape: the request omits patches when nil and emits every report key
+	// when present.
+	out, _ := json.Marshal(SyncRequest{IntervalS: 30, Metrics: Metrics{Disks: []Disk{}, IPs: []string{}}})
+	if strings.Contains(string(out), "patches") {
+		t.Fatalf("nil patch report must be omitted: %s", out)
+	}
+	out, _ = json.Marshal(PatchUpdate{Name: "openssl", Current: "3.0.1", New: "3.0.2", Security: true, Source: "noble-security"})
+	if string(out) != `{"name":"openssl","current":"3.0.1","new":"3.0.2","security":true,"source":"noble-security"}` {
+		t.Fatalf("PatchUpdate JSON shape: %s", out)
+	}
+	at := time.Date(2026, 11, 13, 10, 0, 1, 0, time.UTC)
+	out, _ = json.Marshal(PatchReport{CheckedAt: at, Manager: PatchManagerNone, Updates: []PatchUpdate{}})
+	if string(out) != `{"checked_at":"2026-11-13T10:00:01Z","manager":"none","reboot_required":false,"count":0,"security_count":0,"error":"","updates":[]}` {
+		t.Fatalf("PatchReport JSON shape: %s", out)
+	}
+
+	// Fixture: a Linux sync carrying the patch report (security first then name).
+	var sp SyncRequest
+	roundTrip(t, "sync_patches.json", &sp)
+	if sp.PatchReport == nil {
+		t.Fatal("sync_patches must carry a patch report")
+	}
+	pr := sp.PatchReport
+	if pr.Manager != PatchManagerApt || !pr.RebootRequired || pr.Count != 3 || pr.SecurityCount != 1 || pr.Error != "" {
+		t.Fatalf("patch report header: %+v", pr)
+	}
+	if pr.CheckedAt.Location().String() != "UTC" || pr.CheckedAt.IsZero() {
+		t.Fatalf("checked_at: %v", pr.CheckedAt)
+	}
+	if err := pr.Validate(); err != nil {
+		t.Fatalf("fixture report must validate: %v", err)
+	}
+	if len(pr.Updates) != 3 || !pr.Updates[0].Security || pr.Updates[0].Name != "openssl" {
+		t.Fatalf("fixture updates: %+v", pr.Updates)
+	}
+	sec := 0
+	for i, u := range pr.Updates {
+		if u.Security {
+			sec++
+			if i != 0 {
+				t.Fatalf("security updates must come first: %+v", pr.Updates)
+			}
+		}
+	}
+	if sec != pr.SecurityCount || len(pr.Updates) != pr.Count {
+		t.Fatalf("fixture counts: sec %d/%d count %d/%d", sec, pr.SecurityCount, len(pr.Updates), pr.Count)
 	}
 }
 

@@ -127,6 +127,13 @@ pre.out { margin: 0; padding: 8px 64px 8px 10px; background: var(--code-bg); bor
 .apps-scroll td { white-space: normal; overflow-wrap: anywhere; }
 .apps-scroll td .chip { margin-left: 6px; }
 .apps tr.system td { color: var(--muted); }
+/* Updates panel (PM1): header counts, the reboot badge and the scrollable list
+   (reusing .apps-scroll). A security row is tinted to stand out. */
+.updates h2 { margin: 0; }
+.updates .form-row { align-items: center; }
+.updates dl.kv { margin: 8px 0; }
+.updates tr.security td { background: color-mix(in srgb, var(--warn) 10%, transparent); }
+.updates tr.security code { color: var(--text); }
 /* Remote shell: the xterm viewport scrolls inside its own fixed-height box, so a
    long session never grows the page and the fit addon keeps cols within width. */
 .shell-card h2 { margin: 0; }

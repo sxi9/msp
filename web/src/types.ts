@@ -4,8 +4,12 @@
 export type Role = 'admin' | 'operator' | 'viewer';
 export type Platform = 'linux' | 'windows' | 'android';
 export type DeviceStatus = 'online' | 'offline' | 'pending';
-export type CommandKind = 'exec' | 'script' | 'lock' | 'ping' | 'message' | 'shell';
+export type CommandKind = 'exec' | 'script' | 'lock' | 'ping' | 'message' | 'shell' | 'patch';
 export type CommandStatus = 'queued' | 'sent' | 'done' | 'failed' | 'timeout' | 'lost' | 'cancelled';
+/** Patch command fields (PM1). */
+export type PatchAction = 'scan' | 'install';
+export type PatchMode = 'all' | 'security' | 'ids';
+export type PatchReboot = 'never' | 'if_required';
 export type Severity = 'low' | 'medium' | 'high';
 
 export interface User {
@@ -47,6 +51,14 @@ export interface Device {
   open_alerts: number; can_run_commands: boolean;
   /** RustDesk id the agent last reported in its facts; null until the RustDesk client is installed (RD1). */
   rustdesk_id: string | null;
+  /**
+   * Patch status denormalised from the last patches report (PM1): the pending
+   * count and, of those, the security count drive the fleet Updates column;
+   * reboot_required and patches_checked_at round out the device page. The full
+   * update list is the `patches` object on the device-detail response, not here.
+   */
+  pending_patches: number; security_patches: number; reboot_required: boolean;
+  patches_checked_at: string | null;
 }
 
 /** Body of GET /api/v1/rustdesk: the self-hosted relay, enabled only when the server has host and key. */
@@ -68,6 +80,8 @@ export interface Command {
   truncated: boolean; error: string;
   /** Present only for kind `shell` once the relay session row exists; null before that (RS1 A). */
   shell_session?: ShellSession | null;
+  /** Present only for kind `patch` (PM1): what the command asked the agent to do. */
+  action?: PatchAction; mode?: PatchMode; ids?: string[]; reboot?: PatchReboot;
 }
 
 /** The shell_session block a kind `shell` command carries (RS1 A). */
@@ -87,6 +101,13 @@ export interface ShellOpened { command: Command; ticket: string; ws_path: string
 
 /** Body of POST /api/v1/devices/{id}/commands; only the keys of the kind are sent. */
 export interface NewCommand { kind: CommandKind; argv?: string[]; shell?: string; body?: string; text?: string; timeout_s: number }
+
+/**
+ * Body of POST /api/v1/devices/{id}/patch (PM1): every field optional. action
+ * defaults to install, mode to security, reboot to never. A scan ignores
+ * mode/ids/reboot; ids is the package list for mode `ids`.
+ */
+export interface NewPatch { action?: PatchAction; mode?: PatchMode; ids?: string[]; reboot?: PatchReboot; timeout_s?: number }
 
 /** One entry of GET /api/v1/presets: argv for exec, shell + body for script; timeout_s always filled in. */
 export interface Preset { label: string; kind: 'exec' | 'script'; argv?: string[]; shell?: string; body?: string; timeout_s: number }
@@ -112,6 +133,8 @@ export interface DeviceDetail {
   metrics: Record<string, unknown>;
   alerts: Alert[];
   commands: Command[];
+  /** The full patches report (PM1); {} or absent when the device has never reported. Parse with lib/patches.patchReportOf. */
+  patches?: Record<string, unknown>;
 }
 
 // --- NS1 alert notifications -------------------------------------------------

@@ -66,12 +66,16 @@ func dashKeys(m map[string]any) []string {
 	return keys
 }
 
-// dashDeviceKeys is the exact DEVICE key set from docs/PROTOCOL.md.
+// dashDeviceKeys is the exact DEVICE key set from docs/PROTOCOL.md. The four
+// patch fields (PM1) are denormalised onto every DEVICE row for the fleet column
+// and the device page; the full report is a sibling "patches" object on the
+// device-detail response, not part of DEVICE.
 var dashDeviceKeys = []string{
 	"agent_version", "arch", "battery_charging", "battery_pct", "can_run_commands", "cpu_pct",
 	"device_uid", "disk_used_pct", "enrolled_at", "hostname", "id", "interval_s", "last_ip",
-	"last_seen_at", "mem_used_pct", "open_alerts", "org_id", "org_name", "os_version", "platform",
-	"revoked", "rustdesk_id", "status", "uptime_s",
+	"last_seen_at", "mem_used_pct", "open_alerts", "org_id", "org_name", "os_version",
+	"patches_checked_at", "pending_patches", "platform", "reboot_required", "revoked",
+	"rustdesk_id", "security_patches", "status", "uptime_s",
 }
 
 func TestDashboardAuthAndRoles(t *testing.T) {

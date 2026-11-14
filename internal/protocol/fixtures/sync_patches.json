@@ -1,0 +1,28 @@
+{
+  "agent_version": "0.1.0",
+  "interval_s": 30,
+  "wait_s": 25,
+  "uptime_s": 86400,
+  "metrics": {
+    "cpu_pct": 12.5,
+    "mem_total_mb": 16000,
+    "mem_used_mb": 8120,
+    "disks": [
+      {"mount": "/", "total_gb": 476.0, "used_gb": 201.3}
+    ],
+    "ips": ["10.0.0.12"]
+  },
+  "patches": {
+    "checked_at": "2026-11-13T10:00:01Z",
+    "manager": "apt",
+    "reboot_required": true,
+    "count": 3,
+    "security_count": 1,
+    "error": "",
+    "updates": [
+      {"name": "openssl", "current": "3.0.1", "new": "3.0.2", "security": true, "source": "Ubuntu:24.04/noble-security"},
+      {"name": "curl", "current": "8.5.0", "new": "8.5.1", "security": false, "source": "Ubuntu:24.04/noble-updates"},
+      {"name": "vim", "current": "9.1.0016", "new": "9.1.0101", "security": false, "source": "Ubuntu:24.04/noble-updates"}
+    ]
+  }
+}

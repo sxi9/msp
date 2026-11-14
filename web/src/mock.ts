@@ -2,7 +2,7 @@
 // (add &role=viewer|operator to try a weaker role). Lets the dashboard be
 // developed and demoed without a backend. Nothing here ships to the server.
 import type {
-  Alert, AuditEntry, Command, Device, EnrollmentToken, MaintenanceWindow, NewCommand, NewShell,
+  Alert, AuditEntry, Command, Device, EnrollmentToken, MaintenanceWindow, NewCommand, NewPatch, NewShell,
   NotificationDelivery, NotifyChannel, NotifyRule, Org, Preset, User,
 } from './types.ts';
 import type { ShellSocket } from './lib/shell.ts';
@@ -33,20 +33,37 @@ const dev = (id: number, org_id: number, hostname: string, platform: Device['pla
   last_ip: status === 'pending' ? '' : `10.0.${org_id}.${id}`, revoked: false,
   cpu_pct: status === 'pending' ? null : 12.5, mem_used_pct: status === 'pending' ? null : 50.8, disk_used_pct: status === 'pending' ? null : 42.3,
   battery_pct: null, battery_charging: null, uptime_s: status === 'pending' ? null : 86400 * 3 + 4000, open_alerts: 0,
-  can_run_commands: platform !== 'android', rustdesk_id: null, ...extra,
+  can_run_commands: platform !== 'android', rustdesk_id: null,
+  pending_patches: 0, security_patches: 0, reboot_required: false, patches_checked_at: null, ...extra,
 });
 // The mock relay; add &rustdesk=0 to the URL to see the "not configured" card.
 const rustdesk = new URLSearchParams(location.search).get('rustdesk') === '0'
   ? { enabled: false, host: '', key: '' }
   : { enabled: true, host: 'rmm.example.com', key: 'OeVuKk5nlHiXp+7qsR6CbcHBGxhU4PJkNbvoX3P5X0k=' };
 const devices: Device[] = [
-  dev(1, 1, 'ws-reception-01', 'linux', 'online', { rustdesk_id: '123456789' }),
+  // A device with pending updates including a security one (PM1).
+  dev(1, 1, 'ws-reception-01', 'linux', 'online', { rustdesk_id: '123456789', pending_patches: 3, security_patches: 1, patches_checked_at: iso(3600e3) }),
   dev(2, 1, 'ws-xray', 'windows', 'online', { disk_used_pct: 93.1, open_alerts: 1, rustdesk_id: '987654321' }),
   dev(3, 1, 'Pixel 8', 'android', 'online', { battery_pct: 12, battery_charging: false, open_alerts: 1 }),
   dev(4, 1, 'ws-backoffice', 'linux', 'offline', { open_alerts: 1 }),
-  dev(5, 2, 'LAPTOP-7Q2', 'windows', 'online', { cpu_pct: 71 }),
+  // A reboot-required device: everything installed, a reboot is pending (PM1).
+  dev(5, 2, 'LAPTOP-7Q2', 'windows', 'online', { cpu_pct: 71, reboot_required: true, patches_checked_at: iso(7200e3) }),
   dev(6, 2, 'srv-files', 'linux', 'pending'),
 ];
+// The full patches report keyed by device id (PM1); the device-detail response
+// serves patchReports[id] ?? {} as its `patches` object. Devices absent here
+// have never reported (the panel shows "No patch report yet").
+const patchReports: Record<number, Record<string, unknown>> = {
+  1: {
+    checked_at: iso(3600e3), manager: 'apt', reboot_required: false, count: 3, security_count: 1, error: '',
+    updates: [
+      { name: 'openssl', current: '3.0.13-0ubuntu3.1', new: '3.0.13-0ubuntu3.4', security: true, source: 'noble-security' },
+      { name: 'curl', current: '8.5.0-2ubuntu10.1', new: '8.5.0-2ubuntu10.6', security: false, source: 'noble-updates' },
+      { name: 'vim', current: '2:9.1.0016-1ubuntu7', new: '2:9.1.0016-1ubuntu7.9', security: false, source: 'noble-updates' },
+    ],
+  },
+  5: { checked_at: iso(7200e3), manager: 'wu', reboot_required: true, count: 0, security_count: 0, error: '', updates: [] },
+};
 const alerts: Alert[] = [
   { id: 1, org_id: 1, org_name: 'Acme Dental', device_id: 4, hostname: 'ws-backoffice', type: 'offline', severity: 'high', message: 'no sync for 6h', opened_at: iso(3600e3 * 5), resolved_at: null, acknowledged_by: null, acknowledged_at: null },
   { id: 2, org_id: 1, org_name: 'Acme Dental', device_id: 2, hostname: 'ws-xray', type: 'disk_full', severity: 'medium', message: 'disk 93% used', opened_at: iso(3600e3), resolved_at: null, acknowledged_by: null, acknowledged_at: null },
@@ -154,6 +171,12 @@ function finish(c: Command) {
     const out: Record<string, string> = { exec: `${c.argv.join(' ')}: simulated output\n`, script: 'simulated script output\n', ping: 'pong', lock: 'locked 1 session', message: 'shown' };
     if (c.kind === 'exec' && c.argv[0] === 'sleep') { c.status = 'timeout'; c.exit_code = -1; c.error = `timeout after ${c.timeout_s}s`; }
     else if (c.kind === 'exec' && c.argv[0] === 'false') { c.status = 'failed'; c.exit_code = 1; c.stderr = 'simulated failure\n'; }
+    else if (c.kind === 'patch') {
+      c.status = 'done'; c.exit_code = 0;
+      c.stdout = c.action === 'scan'
+        ? 'Reading package lists...\nscan complete: 3 updates pending (1 security)\n'
+        : `Reading package lists...\nThe following packages will be upgraded:\n  ${c.mode === 'security' ? 'openssl' : 'openssl curl vim'}\nSetting up openssl ...\ndone.\n`;
+    }
     else { c.status = 'done'; c.exit_code = 0; c.stdout = out[c.kind]; }
     c.finished_at = iso(-700);
   }, 1500);
@@ -236,6 +259,7 @@ function route(method: string, path: string, body: unknown): Reply {
       metrics: d.status === 'pending' ? {} : { cpu_pct: d.cpu_pct, mem_total_mb: 16000, mem_used_mb: 8120, disks: [{ mount: d.platform === 'windows' ? 'C:' : '/', total_gb: 476, used_gb: 201.3 }], battery_pct: d.battery_pct, ips: [d.last_ip] },
       alerts: alerts.filter((a) => a.device_id === d.id && !a.resolved_at),
       commands: commands.filter((c) => c.device_id === d.id).slice(0, 20).map((c) => ({ ...c, stdout: '', stderr: '' })),
+      patches: patchReports[d.id] ?? {},
     });
   }
   if ((x = m(/^\/api\/v1\/devices\/(\d+)\/heartbeats$/))) {
@@ -299,6 +323,41 @@ function route(method: string, path: string, body: unknown): Reply {
     commands.unshift(c); log('command.queued', 'command', c.id, d.org_id, { kind: c.kind });
     if (c.kind === 'lock') log('device.lock_requested', 'device', d.id, d.org_id);
     if (d.status !== 'offline') setTimeout(() => finish(c), 400);
+    return ok({ command: c }, 201);
+  }
+  if ((x = m(/^\/api\/v1\/devices\/(\d+)\/patch$/))) {
+    const r = needRole('operator'); if (r) return r;
+    const d = devices.find((d) => d.id === Number(x![1])); if (!d) return err(404, 'not_found');
+    if (d.revoked) return err(400, 'unsupported_on_device');
+    if (d.platform === 'android') return err(400, 'unsupported_on_platform');
+    const np = b as unknown as NewPatch;
+    const action = np.action ?? 'install';
+    if (action !== 'scan' && action !== 'install') return err(400, 'invalid_request', 'patch action must be scan or install');
+    const mode = action === 'scan' ? undefined : (np.mode ?? 'security');
+    const reboot = action === 'scan' ? undefined : (np.reboot ?? 'never');
+    const ids = action === 'scan' ? undefined : (np.ids ?? []);
+    if (mode && !['all', 'security', 'ids'].includes(mode)) return err(400, 'invalid_request', 'patch mode must be all, security or ids');
+    // Server-side ids subset check where a report exists (PM1).
+    if (action === 'install' && mode === 'ids') {
+      const rep = patchReports[d.id];
+      const updates = (rep?.updates as { name: string }[] | undefined) ?? [];
+      if (updates.length) {
+        const pending = new Set(updates.map((u) => u.name));
+        const unknown = (ids ?? []).filter((id) => !pending.has(id)).sort();
+        if (unknown.length) return err(400, 'invalid_request', `unknown package(s) not in the pending list: ${unknown.join(', ')}`);
+      }
+    }
+    if (d.status !== 'online') return err(409, 'device_offline');
+    const c: Command = {
+      id: nextId++, device_id: d.id, org_id: d.org_id, created_by: me.id, created_by_email: me.email, kind: 'patch',
+      argv: [], shell: '', body: '', text: '', timeout_s: np.timeout_s || 3600, status: 'queued',
+      created_at: iso(0), sent_at: null, started_at: null, finished_at: null, exit_code: null, stdout: '', stderr: '', truncated: false, error: '',
+      action, mode, ids, reboot,
+    };
+    commands.unshift(c);
+    log(action === 'scan' ? 'patch.scan_requested' : 'patch.install_requested', 'command', c.id, d.org_id,
+      action === 'scan' ? { action, hostname: d.hostname } : { action, mode, reboot, hostname: d.hostname, ...(mode === 'ids' ? { ids } : {}) });
+    setTimeout(() => finish(c), 400); // the device is online here (checked above)
     return ok({ command: c }, 201);
   }
   if (p === '/api/v1/presets') return ok({ presets, source: 'builtin', path: '' });

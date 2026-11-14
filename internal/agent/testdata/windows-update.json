@@ -1,0 +1,34 @@
+{
+  "reboot_required": true,
+  "error": "",
+  "updates": [
+    {
+      "name": "2026-10 Cumulative Update for Windows 11 Version 24H2 for x64-based Systems (KB5044284)",
+      "kb": "KB5044284",
+      "categories": ["Security Updates"],
+      "msrc_severity": "Critical",
+      "is_security": true
+    },
+    {
+      "name": "2026-10 Security Update for .NET 8.0.10 (KB5044030)",
+      "kb": "KB5044030",
+      "categories": ["Security Updates"],
+      "msrc_severity": "Important",
+      "is_security": true
+    },
+    {
+      "name": "Windows Malicious Software Removal Tool x64 - v5.129 (KB890830)",
+      "kb": "KB890830",
+      "categories": ["Update Rollups"],
+      "msrc_severity": "",
+      "is_security": false
+    },
+    {
+      "name": "Intel Corporation - System - 10.1.0.0",
+      "kb": "",
+      "categories": ["Drivers"],
+      "msrc_severity": "",
+      "is_security": false
+    }
+  ]
+}

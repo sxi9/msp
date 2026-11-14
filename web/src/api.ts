@@ -2,7 +2,7 @@
 // ?mock=1 in the URL every call is answered in-memory by mock.ts instead.
 import type {
   Alert, AuditEntry, ChannelUpdate, Command, Device, DeviceDetail, EnrollmentToken, Heartbeat,
-  MaintenanceWindow, NewChannel, NewCommand, NewRule, NewShell, NewWindow, NotificationDelivery,
+  MaintenanceWindow, NewChannel, NewCommand, NewPatch, NewRule, NewShell, NewWindow, NotificationDelivery,
   NotifyChannel, NotifyRule, Org, OrgAssignment, PresetLibrary, RemoteDesktopOpened, RuleUpdate,
   RustdeskInfo, ShellOpened, Summary, TokenCreated, User,
 } from './types.ts';
@@ -87,6 +87,10 @@ export const api = {
   // The recorded agent->browser transcript of a finished shell command
   // (text/plain). Opened as a link, not fetched through request().
   transcriptUrl: (commandId: number) => `/api/v1/shell/${commandId}/transcript`,
+  // Queues a patch command (PM1): a scan re-collects the report, an install
+  // applies updates (mode all/security/ids). 201 with the queued command; the
+  // install log lands on the command result like exec/script.
+  queuePatch: (deviceId: number, p: NewPatch) => request<{ command: Command }>('POST', `/api/v1/devices/${deviceId}/patch`, p),
   presets: () => request<PresetLibrary>('GET', '/api/v1/presets'),
   rustdesk: () => request<RustdeskInfo>('GET', '/api/v1/rustdesk'),
   remoteDesktop: (deviceId: number) => request<RemoteDesktopOpened>('POST', `/api/v1/devices/${deviceId}/remote-desktop`),

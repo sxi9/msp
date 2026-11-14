@@ -69,8 +69,9 @@ func fixture(t *testing.T, s *Store) (Org, User, Device, string) {
 }
 
 // migrationCount is the number of files in migrations/ (0001_init,
-// 0002_heartbeats_at, 0003_shell_sessions, 0004_user_orgs, 0005_notifications).
-const migrationCount = 5
+// 0002_heartbeats_at, 0003_shell_sessions, 0004_user_orgs, 0005_notifications,
+// 0006_device_patches).
+const migrationCount = 6
 
 func TestOpenMigratesAndReopens(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "msp.db")
@@ -1037,7 +1038,8 @@ func TestDeviceJSONShape(t *testing.T) {
 	}
 	want := []string{"id", "org_id", "org_name", "device_uid", "hostname", "platform", "arch", "os_version", "agent_version",
 		"interval_s", "status", "enrolled_at", "last_seen_at", "last_ip", "revoked", "cpu_pct", "mem_used_pct", "disk_used_pct",
-		"battery_pct", "battery_charging", "uptime_s", "open_alerts", "can_run_commands", "rustdesk_id"}
+		"battery_pct", "battery_charging", "uptime_s", "open_alerts", "can_run_commands", "rustdesk_id",
+		"pending_patches", "security_patches", "reboot_required", "patches_checked_at"}
 	var got []string
 	for k := range m {
 		got = append(got, k)
@@ -1050,10 +1052,14 @@ func TestDeviceJSONShape(t *testing.T) {
 	if m["cpu_pct"] != nil || m["battery_pct"] != nil || m["status"] != "online" || m["uptime_s"] != float64(5) || m["rustdesk_id"] != nil {
 		t.Fatalf("DEVICE values: %s", b)
 	}
+	// A device that has never reported patches: zero counts, no reboot, no check.
+	if m["pending_patches"] != float64(0) || m["security_patches"] != float64(0) || m["reboot_required"] != false || m["patches_checked_at"] != nil {
+		t.Fatalf("DEVICE patch defaults: %s", b)
+	}
 	if ts, _ := m["last_seen_at"].(string); ts != "2026-11-13T10:00:00Z" {
 		t.Fatalf("last_seen_at = %q (want RFC3339 UTC second precision)", ts)
 	}
-	if strings.Contains(string(b), "facts_json") || strings.Contains(string(b), "last_metrics_json") {
+	if strings.Contains(string(b), "facts_json") || strings.Contains(string(b), "last_metrics_json") || strings.Contains(string(b), "patches_json") {
 		t.Fatalf("raw JSON columns leaked: %s", b)
 	}
 }

@@ -78,8 +78,18 @@ type Device struct {
 	OpenAlerts      int        `json:"open_alerts"`
 	CanRunCommands  bool       `json:"can_run_commands"`
 	RustdeskID      *string    `json:"rustdesk_id"`
-	FactsJSON       string     `json:"-"`
-	LastMetricsJSON string     `json:"-"`
+	// Patch status (PM1), denormalised from the last patch report by
+	// RecordPatches. PendingPatches and SecurityPatches drive the fleet column;
+	// RebootRequired and PatchesCheckedAt round out the device page. The full
+	// report is kept in PatchesJSON (not marshalled into DEVICE, like FactsJSON)
+	// and the device-detail handler emits it as the sibling "patches" object.
+	PendingPatches   int        `json:"pending_patches"`
+	SecurityPatches  int        `json:"security_patches"`
+	RebootRequired   bool       `json:"reboot_required"`
+	PatchesCheckedAt *time.Time `json:"patches_checked_at"`
+	FactsJSON        string     `json:"-"`
+	LastMetricsJSON  string     `json:"-"`
+	PatchesJSON      string     `json:"-"`
 }
 
 // Heartbeat is one throttled metrics sample (at most one per device per
@@ -193,6 +203,12 @@ type UpsertDeviceParams struct {
 
 // CreateCommandParams is a validated command to queue. Argv for exec, Shell
 // and Body for script, Text for message; TimeoutS 0 means the default (60).
+//
+// Action/Mode/IDs/Reboot belong to kind patch (PM1): action is scan or install,
+// mode is all/security/ids, IDs names the packages for mode ids, reboot is
+// never or if_required. The dashboard patch endpoint fills them;
+// CreateCommand's KindPatch case (WP-STORE) persists them and ClaimQueuedCommands
+// emits them in the agent command JSON. They are zero for every other kind.
 type CreateCommandParams struct {
 	DeviceID  int64
 	OrgID     int64
@@ -202,5 +218,9 @@ type CreateCommandParams struct {
 	Shell     string
 	Body      string
 	Text      string
+	Action    string
+	Mode      string
+	IDs       []string
+	Reboot    string
 	TimeoutS  int
 }

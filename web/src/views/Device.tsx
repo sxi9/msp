@@ -7,7 +7,8 @@ import { argvPreview, parseArgv } from '../lib/argv.ts';
 import { loadPresets, presetFill, presetsFor } from '../lib/presets.ts';
 import { notReportedHint, remoteDesktopError, technicianHint } from '../lib/rustdesk.ts';
 import { appsOf, appsSummary, filterApps, type InstalledApp } from '../lib/apps.ts';
-import { COMMAND_DONE, canOperate, isAdmin, type Command, type Device as DeviceT, type NewCommand, type Preset, type RemoteDesktopOpened, type RustdeskInfo, type User } from '../types.ts';
+import { patchReportOf, rebootBadge, sortUpdates, summarisePatches } from '../lib/patches.ts';
+import { COMMAND_DONE, canOperate, isAdmin, type Command, type Device as DeviceT, type NewCommand, type NewPatch, type Preset, type RemoteDesktopOpened, type RustdeskInfo, type User } from '../types.ts';
 import { RemoteShell, ShellResult } from './Shell.tsx';
 import { StatusDot } from '../components/StatusDot.tsx';
 import { Sparkline } from '../components/Sparkline.tsx';
@@ -45,11 +46,16 @@ export function describe(c: Command): string {
     case 'script': return `${c.shell}: ${c.body.split('\n')[0].slice(0, 80)}`;
     case 'message': return c.text;
     case 'shell': return c.shell ? `interactive shell (${c.shell})` : 'interactive shell';
+    case 'patch': {
+      if (c.action === 'scan') return 'patch: scan';
+      const mode = c.mode ?? 'security';
+      return `patch: install ${mode}${mode === 'ids' && c.ids?.length ? ` (${c.ids.join(', ')})` : ''}`;
+    }
     default: return '';
   }
 }
 
-const KIND_CHIP: Record<string, string> = { exec: 'chip', script: 'chip', lock: 'chip chip-lock', ping: 'chip', message: 'chip' };
+const KIND_CHIP: Record<string, string> = { exec: 'chip', script: 'chip', lock: 'chip chip-lock', ping: 'chip', message: 'chip', patch: 'chip' };
 export const KindChip = ({ kind }: { kind: string }) => <span class={KIND_CHIP[kind] ?? 'chip'}>{kind}</span>;
 export const StatusBadge = ({ status }: { status: string }) => <span class={`badge st-${status}`}>{status}</span>;
 
@@ -68,6 +74,19 @@ export function Device({ id, user }: { id: number; user: User }) {
     } catch (e) {
       const t = errorText(e);
       setError(t.startsWith('unsupported_on_platform') ? 'This command kind is not supported on this platform.' : t.startsWith('unsupported_on_device') ? 'This device is revoked; re-enroll it first.' : t);
+    }
+  };
+  const queuePatch = async (p: NewPatch) => {
+    setError('');
+    try {
+      setTracked((await api.queuePatch(id, p)).command);
+      history.reload();
+      detail.reload();
+    } catch (e) {
+      const t = errorText(e);
+      setError(t.startsWith('device_offline') ? 'The device is offline; it must be online to patch.'
+        : t.startsWith('unsupported_on_platform') ? 'Patching is not supported on this platform.'
+        : t.startsWith('unsupported_on_device') ? 'This device is revoked; re-enroll it first.' : t);
     }
   };
   // 1 s polling of the command just queued until it reaches a final status.
@@ -147,6 +166,7 @@ export function Device({ id, user }: { id: number; user: User }) {
       </div>
 
       {apps && <InstalledApps apps={apps} />}
+      {d.platform !== 'android' && <Updates device={d} patches={detail.data.patches} canPatch={operator && !d.revoked && d.status === 'online'} onPatch={queuePatch} />}
       {builtins && <BuiltIns device={d} onQueue={queue} />}
       <RemoteShell device={d} user={user} />
       {!d.revoked && <RemoteDesktop device={d} operator={operator} />}
@@ -195,6 +215,67 @@ function InstalledApps({ apps }: { apps: InstalledApp[] }) {
         </div>
       )}
       <p class="muted">{rows.length} of {apps.length} shown. The agent sends the inventory with its facts: on the first sync after start and every 120th sync, non-system apps first, at most 1000 entries.</p>
+    </div>
+  );
+}
+
+/**
+ * Pending OS updates (PM1): last checked, a reboot-required badge, the counts
+ * (pending, of which security), the update list (name, current -> new, a
+ * "security" chip) and, for an operator on an online, non-revoked device, the
+ * Install security / Install all / Rescan buttons (confirmed in-page). The queued
+ * command's result shows in the command history/output below. The list scrolls in
+ * its own box so a long list never widens the page.
+ */
+function Updates({ device, patches, canPatch, onPatch }: { device: DeviceT; patches?: Record<string, unknown>; canPatch: boolean; onPatch: (p: NewPatch) => Promise<void> }) {
+  const report = patchReportOf(patches ?? {});
+  const summary = report ? summarisePatches(report) : null;
+  const updates = report ? sortUpdates(report.updates) : [];
+  const badge = report ? rebootBadge(report) : (device.reboot_required ? 'Reboot required' : null);
+  // Fall back to the denormalised DEVICE counts when the full report is absent
+  // (e.g. the detail has only the columns, not the list yet).
+  const pending = summary ? summary.pending : device.pending_patches;
+  const security = summary ? summary.security : device.security_patches;
+  return (
+    <div class="card updates">
+      <div class="form-row">
+        <h2>Updates{summary?.unmanaged ? <span class="muted"> no package manager</span> : pending > 0 ? <span class="muted"> {pending} pending{security > 0 ? <>, <span class="warn">{security} security</span></> : ''}</span> : summary?.clean ? <span class="ok"> up to date</span> : ''}</h2>
+        {badge && <span class="badge badge-amber">{badge}</span>}
+        {canPatch && (
+          <span class="right">
+            <ConfirmButton label="Install security" question={`Install ${security} security update${security === 1 ? '' : 's'} on ${device.hostname}?`} disabled={security === 0} onConfirm={() => onPatch({ action: 'install', mode: 'security', reboot: 'never' })} />
+            <ConfirmButton label="Install all" question={`Install all ${pending} pending update${pending === 1 ? '' : 's'} on ${device.hostname}? This may include non-security changes.`} danger disabled={pending === 0} onConfirm={() => onPatch({ action: 'install', mode: 'all', reboot: 'never' })} />
+            <button type="button" class="btn btn-sm" onClick={() => onPatch({ action: 'scan' })}>Rescan</button>
+          </span>
+        )}
+      </div>
+      <dl class="kv">
+        <dt>Last checked</dt><dd>{report?.checked_at ? ago(report.checked_at) : device.patches_checked_at ? ago(device.patches_checked_at) : <span class="muted">never</span>}</dd>
+        <dt>Pending</dt><dd>{pending} {security > 0 && <span class="chip chip-lock">{security} security</span>}</dd>
+        {summary && summary.manager !== 'none' && <><dt>Source</dt><dd class="muted">{summary.manager === 'apt' ? 'apt' : summary.manager === 'wu' ? 'Windows Update' : summary.manager}</dd></>}
+      </dl>
+      {report?.error && <p class="warn">Last scan failed: {report.error}. Showing the last good list.</p>}
+      {!canPatch && device.status !== 'online' && <p class="muted">The device must be online to scan or install.</p>}
+      {summary?.unmanaged ? <p class="muted">No supported package manager was found on this host.</p>
+        : updates.length === 0 ? <p class="muted">{summary ? 'No pending updates.' : 'No patch report yet.'} {canPatch && 'Use Rescan to collect one.'}</p> : (
+          <div class="apps-scroll">
+            <table class="grid">
+              <thead><tr><th>Package</th><th>Installed</th><th></th><th>Candidate</th><th></th></tr></thead>
+              <tbody>
+                {updates.map((u) => (
+                  <tr key={u.name} class={u.security ? 'security' : ''}>
+                    <td data-label="Package"><code>{u.name}</code>{u.security && <span class="chip chip-lock">security</span>}</td>
+                    <td data-label="Installed" class="muted">{u.current || '—'}</td>
+                    <td data-label="" class="muted">→</td>
+                    <td data-label="Candidate">{u.new || '—'}</td>
+                    <td data-label="Source" class="muted">{u.source || ''}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      {updates.length > 0 && <p class="muted">Installing is a role-gated, tenant-scoped, audited command; the result (the install log) appears in the command history below.</p>}
     </div>
   );
 }
