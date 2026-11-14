@@ -1,8 +1,10 @@
 // fetch() wrapper for /api/v1 plus one typed function per endpoint. With
 // ?mock=1 in the URL every call is answered in-memory by mock.ts instead.
 import type {
-  Alert, AuditEntry, Command, Device, DeviceDetail, EnrollmentToken, Heartbeat, NewCommand, NewShell,
-  Org, OrgAssignment, PresetLibrary, RemoteDesktopOpened, RustdeskInfo, ShellOpened, Summary, TokenCreated, User,
+  Alert, AuditEntry, ChannelUpdate, Command, Device, DeviceDetail, EnrollmentToken, Heartbeat,
+  MaintenanceWindow, NewChannel, NewCommand, NewRule, NewShell, NewWindow, NotificationDelivery,
+  NotifyChannel, NotifyRule, Org, OrgAssignment, PresetLibrary, RemoteDesktopOpened, RuleUpdate,
+  RustdeskInfo, ShellOpened, Summary, TokenCreated, User,
 } from './types.ts';
 import { mockRequest } from './mock.ts';
 
@@ -102,4 +104,28 @@ export const api = {
   // all_orgs is false (admins cannot be scoped).
   setUserOrgs: (id: number, access: OrgAssignment) => request<void>('PUT', `/api/v1/users/${id}/orgs`, access),
   disableUser: (id: number) => request<void>('POST', `/api/v1/users/${id}/disable`),
+
+  // --- NS1 alert notifications (/api/v1/notify) ---
+  // Channels. GET needs viewer; writes need operator (admin for a global
+  // org_id-null row). The secret is write-only: it is sent on create/update when
+  // present and never returned — a channel row carries only `secret_set`. On
+  // update, omitting `secret` keeps the stored one; sending `""` is rejected.
+  listNotifyChannels: () => request<{ channels: NotifyChannel[] }>('GET', '/api/v1/notify/channels'),
+  createNotifyChannel: (c: NewChannel) => request<{ channel: NotifyChannel }>('POST', '/api/v1/notify/channels', c),
+  updateNotifyChannel: (id: number, c: ChannelUpdate) => request<{ channel: NotifyChannel }>('PUT', `/api/v1/notify/channels/${id}`, c),
+  deleteNotifyChannel: (id: number) => request<void>('DELETE', `/api/v1/notify/channels/${id}`),
+  // Enqueues a `test` delivery immediately and returns it; the dispatcher sends it.
+  testNotifyChannel: (id: number) => request<{ delivery: NotificationDelivery }>('POST', `/api/v1/notify/channels/${id}/test`),
+  // Rules.
+  listNotifyRules: () => request<{ rules: NotifyRule[] }>('GET', '/api/v1/notify/rules'),
+  createNotifyRule: (r: NewRule) => request<{ rule: NotifyRule }>('POST', '/api/v1/notify/rules', r),
+  updateNotifyRule: (id: number, r: RuleUpdate) => request<{ rule: NotifyRule }>('PUT', `/api/v1/notify/rules/${id}`, r),
+  deleteNotifyRule: (id: number) => request<void>('DELETE', `/api/v1/notify/rules/${id}`),
+  // Maintenance windows (one-shot; add/delete only).
+  listMaintenanceWindows: () => request<{ windows: MaintenanceWindow[] }>('GET', '/api/v1/notify/windows'),
+  createMaintenanceWindow: (w: NewWindow) => request<{ window: MaintenanceWindow }>('POST', '/api/v1/notify/windows', w),
+  deleteMaintenanceWindow: (id: number) => request<void>('DELETE', `/api/v1/notify/windows/${id}`),
+  // Delivery log (read-only, org-scoped; viewer may read).
+  listDeliveries: (f: { status?: string; org_id?: number; limit?: number } = {}) =>
+    request<{ deliveries: NotificationDelivery[] }>('GET', `/api/v1/notify/deliveries${qs(f)}`),
 };

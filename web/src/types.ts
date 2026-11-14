@@ -114,6 +114,80 @@ export interface DeviceDetail {
   commands: Command[];
 }
 
+// --- NS1 alert notifications -------------------------------------------------
+// Wire types for /api/v1/notify (docs/PROTOCOL.md). The channel secret (SMTP
+// password / webhook signing secret) is write-only: it is never returned, only
+// `secret_set` tells whether one is stored.
+
+export type NotifyKind = 'email' | 'webhook';
+export type WebhookFlavor = 'slack' | 'generic';
+export type DeliveryEvent = 'opened' | 'resolved' | 'test';
+export type DeliveryStatus = 'pending' | 'sent' | 'failed' | 'suppressed';
+
+/** The four alert types the evaluator opens (internal/server/alerts.go). */
+export const ALERT_TYPES = ['offline', 'disk_full', 'memory_high', 'battery_low'] as const;
+
+/** Non-secret settings of an email channel (config of a kind `email` channel). */
+export interface EmailConfig { host: string; port: number; from: string; to: string[]; starttls: boolean; username: string }
+/** Non-secret settings of a webhook channel (config of a kind `webhook` channel). */
+export interface WebhookConfig { url: string; flavor: WebhookFlavor }
+
+export interface NotifyChannel {
+  id: number; kind: NotifyKind; name: string;
+  /** `null` = a global channel usable by any rule; a number scopes it to one client. */
+  org_id: number | null;
+  /** Kind-specific non-secret settings; shape is EmailConfig or WebhookConfig. */
+  config: EmailConfig | WebhookConfig | Record<string, unknown>;
+  /** Whether a secret is stored. The secret itself is never returned (write-only). */
+  secret_set: boolean;
+  enabled: boolean; created_at: string; created_by: number | null;
+}
+
+export interface NotifyRule {
+  id: number; name: string; org_id: number | null; min_severity: Severity;
+  /** Alert types the rule matches; `[]` = all types. */
+  alert_types: string[];
+  on_open: boolean; on_resolve: boolean; channel_id: number;
+  enabled: boolean; created_at: string; created_by: number | null;
+}
+
+export interface MaintenanceWindow {
+  id: number; org_id: number | null; starts_at: string; ends_at: string; reason: string;
+  /** Server-computed: `now` is within [starts_at, ends_at). */
+  active_now: boolean;
+  created_at: string; created_by: number | null;
+}
+
+export interface NotificationDelivery {
+  id: number; alert_id: number | null; rule_id: number | null; channel_id: number | null;
+  org_id: number | null; event: DeliveryEvent; status: DeliveryStatus; attempts: number;
+  /** Redacted — never carries a secret or a tokened URL. */
+  last_error: string; detail: Record<string, unknown>;
+  created_at: string; updated_at: string;
+}
+
+/** POST /notify/channels body. `secret`/`enabled` omitted take the server defaults. */
+export interface NewChannel {
+  kind: NotifyKind; name: string; org_id: number | null;
+  config: EmailConfig | WebhookConfig; secret?: string; enabled?: boolean;
+}
+/** PUT /notify/channels/{id} body. Omit `secret` to keep the stored one; `""` is rejected. */
+export interface ChannelUpdate {
+  kind: NotifyKind; name: string; config: EmailConfig | WebhookConfig; secret?: string; enabled?: boolean;
+}
+/** POST /notify/rules body. */
+export interface NewRule {
+  name: string; org_id: number | null; min_severity: Severity; alert_types: string[];
+  on_open: boolean; on_resolve: boolean; channel_id: number; enabled?: boolean;
+}
+/** PUT /notify/rules/{id} body (org cannot be changed). */
+export interface RuleUpdate {
+  name: string; min_severity: Severity; alert_types: string[];
+  on_open: boolean; on_resolve: boolean; channel_id: number; enabled?: boolean;
+}
+/** POST /notify/windows body. `starts_at`/`ends_at` are RFC3339 timestamps. */
+export interface NewWindow { org_id: number | null; starts_at: string; ends_at: string; reason: string }
+
 export const ROLE_RANK: Record<Role, number> = { viewer: 0, operator: 1, admin: 2 };
 export const canOperate = (u: User | null): boolean => !!u && ROLE_RANK[u.role] >= ROLE_RANK.operator;
 export const isAdmin = (u: User | null): boolean => !!u && u.role === 'admin';

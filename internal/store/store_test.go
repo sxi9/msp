@@ -69,8 +69,8 @@ func fixture(t *testing.T, s *Store) (Org, User, Device, string) {
 }
 
 // migrationCount is the number of files in migrations/ (0001_init,
-// 0002_heartbeats_at, 0003_shell_sessions, 0004_user_orgs).
-const migrationCount = 4
+// 0002_heartbeats_at, 0003_shell_sessions, 0004_user_orgs, 0005_notifications).
+const migrationCount = 5
 
 func TestOpenMigratesAndReopens(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "msp.db")

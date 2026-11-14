@@ -66,6 +66,12 @@ label { display: inline-flex; gap: 6px; align-items: center; font-size: 13px; co
 .sev-high, .st-failed, .st-timeout, .st-lost { background: var(--bad); }
 .sev-low, .st-queued, .st-sent, .st-cancelled { background: var(--grey); }
 .st-done { background: var(--ok); }
+/* NS1 delivery-status chips (pending/sent/failed/suppressed) and the active
+   maintenance-window badge. Built on .badge. */
+.nst-pending { background: var(--grey); }
+.nst-sent { background: var(--ok); }
+.nst-failed { background: var(--bad); }
+.nst-suppressed { background: var(--warn); }
 .chip { display: inline-block; padding: 0 6px; margin-left: 4px; border-radius: 4px; font-size: 11px; font-weight: 600; letter-spacing: .3px; background: var(--code-bg); color: var(--muted); text-transform: uppercase; }
 .chip-lock { color: var(--warn); }
 .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; background: var(--grey); vertical-align: middle; }
@@ -141,7 +147,10 @@ pre.out { margin: 0; padding: 8px 64px 8px 10px; background: var(--code-bg); bor
 .orgscope-list { list-style: none; margin: 8px 0 0; padding: 8px; max-height: 200px; overflow: auto; border: 1px solid var(--line); border-radius: 6px; display: grid; gap: 4px; }
 .orgscope-list label { color: var(--text); }
 .access-names { white-space: normal; overflow-wrap: anywhere; }
-.row-actions { display: inline-flex; gap: 6px; align-items: center; }
+.row-actions { display: inline-flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+/* NS1 delivery log: the wide table scrolls inside its own box so it never grows
+   the page on desktop; on phones the grid stacks (see the media query). */
+.log-scroll { overflow-x: auto; border-radius: 8px; }
 
 .login { width: 320px; display: flex; flex-direction: column; gap: 12px; }
 .login label { flex-direction: column; align-items: stretch; gap: 4px; }

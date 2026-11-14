@@ -12,6 +12,8 @@ import { Device } from './views/Device.tsx';
 import { Alerts } from './views/Alerts.tsx';
 import { Orgs } from './views/Orgs.tsx';
 import { Org } from './views/Org.tsx';
+import { Notifications } from './views/Notifications.tsx';
+import { Deliveries } from './views/Deliveries.tsx';
 import { Audit } from './views/Audit.tsx';
 import { Users } from './views/Users.tsx';
 import { Account } from './views/Account.tsx';
@@ -23,6 +25,8 @@ function page(route: Route, user: User) {
     case 'alerts': return <Alerts user={user} />;
     case 'orgs': return <Orgs user={user} />;
     case 'org': return <Org id={route.id} user={user} />;
+    case 'notify': return user.role === 'viewer' ? <Deliveries /> : <Notifications user={user} />;
+    case 'deliveries': return <Deliveries />;
     case 'audit': return <Audit />;
     case 'users': return user.role === 'admin' ? <Users user={user} /> : <p class="error">Admins only.</p>;
     case 'account': return <Account user={user} />;

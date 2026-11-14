@@ -1,14 +1,19 @@
 import type { ComponentChildren } from 'preact';
 import type { Route } from '../router.ts';
 import type { User } from '../types.ts';
-import { isAdmin } from '../types.ts';
+import { canOperate, isAdmin } from '../types.ts';
 import { api } from '../api.ts';
 import { usePoll } from '../hooks.ts';
 
-const NAV: { hash: string; label: string; match: Route['name'][]; admin?: boolean }[] = [
+// `admin`/`operator` gate a nav item to that role or above; the delivery log is
+// read-only and reachable by every role, so Notifications settings is operator+
+// while Deliveries has no gate (NS1).
+const NAV: { hash: string; label: string; match: Route['name'][]; admin?: boolean; operator?: boolean }[] = [
   { hash: '#/', label: 'Fleet', match: ['fleet', 'device'] },
   { hash: '#/alerts', label: 'Alerts', match: ['alerts'] },
   { hash: '#/orgs', label: 'Orgs', match: ['orgs', 'org'] },
+  { hash: '#/notify', label: 'Notifications', match: ['notify'], operator: true },
+  { hash: '#/deliveries', label: 'Deliveries', match: ['deliveries'] },
   { hash: '#/audit', label: 'Audit', match: ['audit'] },
   { hash: '#/users', label: 'Users', match: ['users'], admin: true },
 ];
@@ -20,7 +25,7 @@ export function Layout({ user, route, onLogout, children }: { user: User; route:
       <header class="topbar">
         <a class="brand" href="#/">MSP</a>
         <nav class="nav">
-          {NAV.filter((n) => !n.admin || isAdmin(user)).map((n) => (
+          {NAV.filter((n) => (!n.admin || isAdmin(user)) && (!n.operator || canOperate(user))).map((n) => (
             <a key={n.hash} href={n.hash} class={n.match.includes(route.name) ? 'active' : ''}>
               {n.label}
               {n.label === 'Alerts' && summary && summary.open_alerts > 0 && <span class="badge badge-amber">{summary.open_alerts}</span>}

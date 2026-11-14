@@ -1,7 +1,10 @@
 // In-memory stand-in for the server, active when location.search has mock=1
 // (add &role=viewer|operator to try a weaker role). Lets the dashboard be
 // developed and demoed without a backend. Nothing here ships to the server.
-import type { Alert, AuditEntry, Command, Device, EnrollmentToken, NewCommand, NewShell, Org, Preset, User } from './types.ts';
+import type {
+  Alert, AuditEntry, Command, Device, EnrollmentToken, MaintenanceWindow, NewCommand, NewShell,
+  NotificationDelivery, NotifyChannel, NotifyRule, Org, Preset, User,
+} from './types.ts';
 import type { ShellSocket } from './lib/shell.ts';
 
 interface Reply { status: number; body: unknown }
@@ -63,6 +66,39 @@ const audit: AuditEntry[] = [
   { id: 2, at: iso(899.5e3), actor_type: 'device', actor_id: 1, actor_label: 'device:1', org_id: 1, action: 'command.finished', target_type: 'command', target_id: 1, ip: '10.0.1.1', detail: { status: 'done', exit_code: 0 } },
   { id: 1, at: iso(900e3), actor_type: 'user', actor_id: 1, actor_label: me.email, org_id: 1, action: 'command.queued', target_type: 'command', target_id: 1, ip: '127.0.0.1', detail: { kind: 'exec', argv: ['uname', '-a'] } },
 ];
+// NS1 alert notifications: two channels (one email with a stored secret, one
+// Slack webhook), a rule, an active maintenance window and a few deliveries
+// including a suppressed and a sent one. The secret is write-only, so a channel
+// carries only secret_set.
+const notifyChannels: NotifyChannel[] = [
+  {
+    id: 20, kind: 'email', name: 'On-call email', org_id: null,
+    config: { host: 'smtp.example.com', port: 587, from: 'alerts@example.com', to: ['oncall@example.com', 'noc@example.com'], starttls: true, username: 'alerts@example.com' },
+    secret_set: true, enabled: true, created_at: iso(86400e3 * 3), created_by: 1,
+  },
+  {
+    id: 21, kind: 'webhook', name: 'Acme Slack', org_id: 1,
+    config: { url: 'https://hooks.slack.com/services/T0000/B0000/xxxxxxxxxxxxxxxx', flavor: 'slack' },
+    secret_set: false, enabled: true, created_at: iso(86400e3 * 2), created_by: 1,
+  },
+];
+const notifyRules: NotifyRule[] = [
+  { id: 30, name: 'Acme high alerts to Slack', org_id: 1, min_severity: 'high', alert_types: [], on_open: true, on_resolve: false, channel_id: 21, enabled: true, created_at: iso(86400e3 * 2), created_by: 1 },
+];
+const maintenanceWindows: MaintenanceWindow[] = [
+  // Started 1h ago, ends 1h from now -> active now (active_now computed on read).
+  { id: 40, org_id: 1, starts_at: iso(3600e3), ends_at: iso(-3600e3), reason: 'Server room UPS replacement', active_now: true, created_at: iso(86400e3), created_by: 1 },
+];
+const deliveries: NotificationDelivery[] = [
+  { id: 50, alert_id: 1, rule_id: 30, channel_id: 21, org_id: 1, event: 'opened', status: 'sent', attempts: 1, last_error: '', detail: { kind: 'webhook', flavor: 'slack', url: 'https://hooks.slack.com', signed: false }, created_at: iso(3600e3 * 4), updated_at: iso(3600e3 * 4) },
+  { id: 51, alert_id: 2, rule_id: 30, channel_id: 21, org_id: 1, event: 'opened', status: 'suppressed', attempts: 0, last_error: '', detail: {}, created_at: iso(1800e3), updated_at: iso(1800e3) },
+  { id: 52, alert_id: null, rule_id: null, channel_id: 20, org_id: null, event: 'test', status: 'failed', attempts: 5, last_error: 'dial tcp smtp.example.com:587: connect: connection refused', detail: { kind: 'email', to: ['oncall@example.com'], subject: '[MSP] test from On-call email' }, created_at: iso(900e3), updated_at: iso(700e3) },
+];
+const windowActiveNow = (w: MaintenanceWindow): boolean => {
+  const s = Date.parse(w.starts_at), e = Date.parse(w.ends_at), now = Date.now();
+  return !Number.isNaN(s) && !Number.isNaN(e) && now >= s && now < e;
+};
+
 // The server's builtin preset library (internal/server/presets.go), as GET /api/v1/presets serves it.
 const presets: { linux: Preset[]; windows: Preset[] } = {
   linux: [
@@ -320,6 +356,124 @@ function route(method: string, path: string, body: unknown): Reply {
     u.disabled_at = iso(0); log('user.disabled', 'user', u.id, null);
     return ok(null, 204);
   }
+
+  // --- NS1 alert notifications ---
+  const toOrgId = (v: unknown): number | null => (v === null || v === undefined ? null : Number(v));
+  if (p === '/api/v1/notify/channels' && method === 'GET') return ok({ channels: notifyChannels });
+  if (p === '/api/v1/notify/channels' && method === 'POST') {
+    const rr = needRole('operator'); if (rr) return rr;
+    const name = String(b.name ?? '').trim();
+    const kind = String(b.kind ?? '');
+    if (!name) return err(400, 'invalid_request', 'name is required');
+    if (kind !== 'email' && kind !== 'webhook') return err(400, 'invalid_request', 'kind must be email or webhook');
+    const org_id = toOrgId(b.org_id);
+    const ch: NotifyChannel = {
+      id: nextId++, kind: kind as NotifyChannel['kind'], name, org_id,
+      config: (b.config ?? {}) as NotifyChannel['config'],
+      secret_set: typeof b.secret === 'string' && b.secret !== '', enabled: b.enabled !== false,
+      created_at: iso(0), created_by: me.id,
+    };
+    notifyChannels.push(ch); log('notify.channel_created', 'notify_channel', ch.id, org_id, { kind, name });
+    return ok({ channel: ch }, 201);
+  }
+  if ((x = m(/^\/api\/v1\/notify\/channels\/(\d+)$/))) {
+    const rr = needRole('operator'); if (rr) return rr;
+    const ch = notifyChannels.find((c) => c.id === Number(x![1])); if (!ch) return err(404, 'not_found');
+    if (method === 'DELETE') {
+      notifyChannels.splice(notifyChannels.indexOf(ch), 1); log('notify.channel_deleted', 'notify_channel', ch.id, ch.org_id);
+      return ok(null, 204);
+    }
+    // PUT: omitting secret keeps it; "" is rejected; a value replaces it.
+    const name = String(b.name ?? '').trim();
+    const kind = String(b.kind ?? '');
+    if (!name) return err(400, 'invalid_request', 'name is required');
+    if (kind !== 'email' && kind !== 'webhook') return err(400, 'invalid_request', 'kind must be email or webhook');
+    if (b.secret !== undefined && b.secret !== null && String(b.secret) === '') return err(400, 'invalid_request', 'secret cannot be empty; omit it to keep the stored secret');
+    ch.kind = kind as NotifyChannel['kind']; ch.name = name; ch.config = (b.config ?? {}) as NotifyChannel['config'];
+    ch.enabled = b.enabled !== false;
+    if (typeof b.secret === 'string') ch.secret_set = true;
+    log('notify.channel_updated', 'notify_channel', ch.id, ch.org_id, { kind, name, secret_replaced: typeof b.secret === 'string' });
+    return ok({ channel: ch });
+  }
+  if ((x = m(/^\/api\/v1\/notify\/channels\/(\d+)\/test$/))) {
+    const rr = needRole('operator'); if (rr) return rr;
+    const ch = notifyChannels.find((c) => c.id === Number(x![1])); if (!ch) return err(404, 'not_found');
+    // No dispatcher in the mock: simulate the send so the button shows a status.
+    const del: NotificationDelivery = {
+      id: nextId++, alert_id: null, rule_id: null, channel_id: ch.id, org_id: ch.org_id,
+      event: 'test', status: ch.enabled ? 'sent' : 'failed', attempts: 1,
+      last_error: ch.enabled ? '' : 'channel is disabled', detail: { kind: ch.kind, subject: `[MSP] test from ${ch.name}` },
+      created_at: iso(0), updated_at: iso(0),
+    };
+    deliveries.unshift(del); log('notify.channel_tested', 'notify_channel', ch.id, ch.org_id, { delivery_id: del.id });
+    return ok({ delivery: del }, 201);
+  }
+  if (p === '/api/v1/notify/rules' && method === 'GET') return ok({ rules: notifyRules });
+  if (p === '/api/v1/notify/rules' && method === 'POST') {
+    const rr = needRole('operator'); if (rr) return rr;
+    const name = String(b.name ?? '').trim();
+    const minSeverity = String(b.min_severity ?? '');
+    const channelId = Number(b.channel_id ?? 0);
+    if (!name) return err(400, 'invalid_request', 'name is required');
+    if (!['low', 'medium', 'high'].includes(minSeverity)) return err(400, 'invalid_request', 'min_severity must be low, medium or high');
+    if (channelId <= 0 || !notifyChannels.some((c) => c.id === channelId)) return err(400, 'invalid_request', 'channel_id not found');
+    const ru: NotifyRule = {
+      id: nextId++, name, org_id: toOrgId(b.org_id), min_severity: minSeverity as NotifyRule['min_severity'],
+      alert_types: Array.isArray(b.alert_types) ? b.alert_types.map(String) : [],
+      on_open: b.on_open !== false, on_resolve: b.on_resolve === true, channel_id: channelId,
+      enabled: b.enabled !== false, created_at: iso(0), created_by: me.id,
+    };
+    notifyRules.push(ru); log('notify.rule_created', 'notify_rule', ru.id, ru.org_id, { name, channel_id: channelId });
+    return ok({ rule: ru }, 201);
+  }
+  if ((x = m(/^\/api\/v1\/notify\/rules\/(\d+)$/))) {
+    const rr = needRole('operator'); if (rr) return rr;
+    const ru = notifyRules.find((r) => r.id === Number(x![1])); if (!ru) return err(404, 'not_found');
+    if (method === 'DELETE') {
+      notifyRules.splice(notifyRules.indexOf(ru), 1); log('notify.rule_deleted', 'notify_rule', ru.id, ru.org_id);
+      return ok(null, 204);
+    }
+    const name = String(b.name ?? '').trim();
+    const minSeverity = String(b.min_severity ?? '');
+    const channelId = Number(b.channel_id ?? 0);
+    if (!name) return err(400, 'invalid_request', 'name is required');
+    if (!['low', 'medium', 'high'].includes(minSeverity)) return err(400, 'invalid_request', 'min_severity must be low, medium or high');
+    if (channelId <= 0 || !notifyChannels.some((c) => c.id === channelId)) return err(400, 'invalid_request', 'channel_id not found');
+    ru.name = name; ru.min_severity = minSeverity as NotifyRule['min_severity'];
+    ru.alert_types = Array.isArray(b.alert_types) ? b.alert_types.map(String) : [];
+    ru.on_open = b.on_open !== false; ru.on_resolve = b.on_resolve === true; ru.channel_id = channelId; ru.enabled = b.enabled !== false;
+    log('notify.rule_updated', 'notify_rule', ru.id, ru.org_id, { name, channel_id: channelId });
+    return ok({ rule: ru });
+  }
+  if (p === '/api/v1/notify/windows' && method === 'GET') {
+    return ok({ windows: maintenanceWindows.map((w) => ({ ...w, active_now: windowActiveNow(w) })) });
+  }
+  if (p === '/api/v1/notify/windows' && method === 'POST') {
+    const rr = needRole('operator'); if (rr) return rr;
+    const starts = String(b.starts_at ?? ''), ends = String(b.ends_at ?? '');
+    if (Number.isNaN(Date.parse(starts))) return err(400, 'invalid_request', 'starts_at must be an RFC3339 timestamp');
+    if (Number.isNaN(Date.parse(ends))) return err(400, 'invalid_request', 'ends_at must be an RFC3339 timestamp');
+    if (Date.parse(ends) <= Date.parse(starts)) return err(400, 'invalid_request', 'ends_at must be after starts_at');
+    const w: MaintenanceWindow = {
+      id: nextId++, org_id: toOrgId(b.org_id), starts_at: new Date(starts).toISOString(), ends_at: new Date(ends).toISOString(),
+      reason: String(b.reason ?? '').trim(), active_now: false, created_at: iso(0), created_by: me.id,
+    };
+    w.active_now = windowActiveNow(w);
+    maintenanceWindows.push(w); log('notify.window_created', 'maintenance_window', w.id, w.org_id, { starts_at: w.starts_at, ends_at: w.ends_at });
+    return ok({ window: w }, 201);
+  }
+  if ((x = m(/^\/api\/v1\/notify\/windows\/(\d+)$/)) && method === 'DELETE') {
+    const rr = needRole('operator'); if (rr) return rr;
+    const w = maintenanceWindows.find((w) => w.id === Number(x![1])); if (!w) return err(404, 'not_found');
+    maintenanceWindows.splice(maintenanceWindows.indexOf(w), 1); log('notify.window_deleted', 'maintenance_window', w.id, w.org_id);
+    return ok(null, 204);
+  }
+  if (p === '/api/v1/notify/deliveries') {
+    const st = q.get('status') ?? '', orgId = Number(q.get('org_id') ?? 0), limit = Math.min(Number(q.get('limit') ?? 200), 1000);
+    if (st && !['pending', 'sent', 'failed', 'suppressed'].includes(st)) return err(400, 'invalid_request', 'status must be pending, sent, failed or suppressed');
+    return ok({ deliveries: deliveries.filter((d) => (!st || d.status === st) && (!orgId || d.org_id === orgId)).slice(0, limit) });
+  }
+
   return err(404, 'not_found');
 }
 
