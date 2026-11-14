@@ -285,7 +285,7 @@ function RulesPanel({ rules, error, orgs, channels, canGlobal, writable, onChang
                     <RuleForm rule={ru} orgs={orgs} channels={channels} canGlobal={canGlobal} onCancel={() => setEditId(0)} onDone={() => { setEditId(0); onChanged(); }} />
                   </td></tr>
                 )}
-              </>
+              </Fragment>
             ))}
           </tbody>
         </table>
