@@ -32,7 +32,7 @@ SELECT c.id, c.device_id, c.org_id, c.created_by, COALESCE(u.email, ''), c.kind,
        c.source, c.file_id, c.sha256, c.dest, c.run, c.run_args_json, c.package,
        c.version, c.url,
        c.timeout_s, c.status, c.created_at, c.sent_at, c.started_at, c.finished_at,
-       c.exit_code, c.stdout, c.stderr, c.truncated, c.error
+       c.exit_code, c.stdout, c.stderr, c.truncated, c.error, c.job_id
   FROM commands c LEFT JOIN users u ON u.id = c.created_by`
 
 func scanCommand(row interface{ Scan(...any) error }) (Command, error) {
@@ -49,15 +49,19 @@ func scanCommand(row interface{ Scan(...any) error }) (Command, error) {
 		sentAt, startedAt, finished        sql.NullString
 		exitCode                           sql.NullInt64
 		truncated                          int
+		jobID                              sql.NullInt64
 	)
 	err := row.Scan(&c.ID, &c.DeviceID, &c.OrgID, &c.CreatedBy, &c.CreatedByEmail, &c.Kind, &argvJSON, &shell, &body,
 		&text, &action, &mode, &reboot, &patchIDsJSON,
 		&source, &fileID, &sha256, &dest, &run, &runArgsJSON, &pkg,
 		&version, &urlCol,
 		&c.TimeoutS, &c.Status, &created, &sentAt, &startedAt, &finished,
-		&exitCode, &c.Stdout, &c.Stderr, &truncated, &c.Error)
+		&exitCode, &c.Stdout, &c.Stderr, &truncated, &c.Error, &jobID)
 	if err != nil {
 		return Command{}, err
+	}
+	if jobID.Valid {
+		c.JobID = jobID.Int64
 	}
 	c.Argv, err = decodeArgv(argvJSON)
 	if err != nil {
@@ -264,17 +268,21 @@ func (s *Store) CreateCommand(ctx context.Context, p CreateCommandParams) (Comma
 	case protocol.KindPatch:
 		timeoutS = protocol.ClampPatchTimeout(p.TimeoutS)
 	}
+	var jobID any
+	if p.JobID != 0 {
+		jobID = p.JobID
+	}
 	res, err := s.db.ExecContext(ctx,
 		`INSERT INTO commands (device_id, org_id, created_by, kind, argv_json, shell, body, body_sha256, text,
 		                       action, mode, reboot, patch_ids_json,
 		                       source, file_id, sha256, dest, run, run_args_json, package,
-		                       version, url,
+		                       version, url, job_id,
 		                       timeout_s, status, created_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?)`,
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?)`,
 		p.DeviceID, p.OrgID, p.CreatedBy, p.Kind, argvJSON, shell, body, bodySHA, text,
 		action, mode, reboot, patchIDsJSON,
 		source, fileID, sha256v, dest, run, runArgsJSON, pkg,
-		version, urlv,
+		version, urlv, jobID,
 		timeoutS, fmtTime(s.Now()))
 	if err != nil {
 		return Command{}, fmt.Errorf("store: create command: %w", err)

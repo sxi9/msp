@@ -151,8 +151,12 @@ type Command struct {
 	// SHA256 (above, shared with deploy) carries the update binary's hash.
 	// CreateCommand's KindUpdate case persists them and ClaimQueuedCommands emits
 	// them in the agent command JSON.
-	Version    string     `json:"version,omitempty"`
-	URL        string     `json:"url,omitempty"`
+	Version string `json:"version,omitempty"`
+	URL     string `json:"url,omitempty"`
+	// JobID groups the per-device commands of one bulk run / automation fan-out
+	// (AUT1); omitempty so a command queued outside a job keeps its existing JSON
+	// shape. CreateCommand's job_id arg persists it and JobProgress counts by it.
+	JobID      int64      `json:"job_id,omitempty"`
 	TimeoutS   int        `json:"timeout_s"`
 	Status     string     `json:"status"`
 	CreatedAt  time.Time  `json:"created_at"`
@@ -271,8 +275,11 @@ type CreateCommandParams struct {
 	// Version/URL belong to kind update (AU1): the server fills Version, URL and
 	// SHA256 from the release manifest at queue time. They are zero for every
 	// other kind.
-	Version  string
-	URL      string
+	Version string
+	URL     string
+	// JobID (AUT1) tags a command created as part of a bulk run / automation
+	// fan-out; 0 (the default) leaves job_id NULL for an ordinary command.
+	JobID    int64
 	TimeoutS int
 }
 
