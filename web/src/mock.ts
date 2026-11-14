@@ -388,8 +388,11 @@ function route(method: string, path: string, body: unknown): Reply {
     const kind = String(b.kind ?? '');
     if (!name) return err(400, 'invalid_request', 'name is required');
     if (kind !== 'email' && kind !== 'webhook') return err(400, 'invalid_request', 'kind must be email or webhook');
+    // Kind is immutable on the real server (no kind column); reject a change here
+    // too so the mock behaves the same (NS1 fix).
+    if (kind !== ch.kind) return err(400, 'invalid_request', 'channel kind cannot be changed');
     if (b.secret !== undefined && b.secret !== null && String(b.secret) === '') return err(400, 'invalid_request', 'secret cannot be empty; omit it to keep the stored secret');
-    ch.kind = kind as NotifyChannel['kind']; ch.name = name; ch.config = (b.config ?? {}) as NotifyChannel['config'];
+    ch.name = name; ch.config = (b.config ?? {}) as NotifyChannel['config'];
     ch.enabled = b.enabled !== false;
     if (typeof b.secret === 'string') ch.secret_set = true;
     log('notify.channel_updated', 'notify_channel', ch.id, ch.org_id, { kind, name, secret_replaced: typeof b.secret === 'string' });

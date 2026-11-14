@@ -197,7 +197,9 @@ function ChannelForm({ channel, orgs, canGlobal, onDone, onCancel }: {
     <form class="card" onSubmit={submit}>
       <div class="form-row">
         <label>Kind
-          <select value={kind} disabled={busy} onChange={(e) => setKind(e.currentTarget.value as NotifyKind)}>
+          {/* Kind is immutable once a channel exists (the server rejects a change),
+              so the select is fixed while editing. */}
+          <select value={kind} disabled={busy || editing} onChange={(e) => setKind(e.currentTarget.value as NotifyKind)}>
             <option value="email">email</option><option value="webhook">webhook</option>
           </select>
         </label>

@@ -33,7 +33,7 @@ code { background: var(--code-bg); padding: 1px 4px; border-radius: 3px; }
 /* top bar */
 .topbar { display: flex; align-items: center; gap: 16px; padding: 0 16px; height: 48px; background: var(--panel); border-bottom: 1px solid var(--line); flex-wrap: wrap; }
 .brand { font-weight: 700; letter-spacing: 1px; color: var(--text); }
-.nav { display: flex; gap: 4px; }
+.nav { display: flex; flex-wrap: wrap; gap: 4px; min-width: 0; }
 .nav a { padding: 6px 10px; border-radius: 6px; color: var(--text); display: inline-flex; gap: 6px; align-items: center; }
 .nav a.active { background: var(--code-bg); font-weight: 600; }
 .nav a:hover { text-decoration: none; background: var(--row-hover); }

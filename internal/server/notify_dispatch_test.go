@@ -431,9 +431,16 @@ func TestRedaction(t *testing.T) {
 		t.Fatalf("redactURL kept credentials/query: %q", got)
 	}
 	err := fmt.Errorf("webhook post: dial https://hooks.test/services/SECRET123?x=1 failed")
-	msg := redactError(err, store.NotificationDelivery{})
+	msg := redactError(err, "")
 	if strings.Contains(msg, "SECRET123") || strings.Contains(msg, "x=1") {
 		t.Fatalf("redactError leaked URL token: %q", msg)
+	}
+	// Regression (NS1 low finding): redactError strips the channel secret when it
+	// is known, honouring the docs/SECURITY.md guarantee even if an underlying
+	// library error ever echoed the credential.
+	secretErr := fmt.Errorf("smtp auth failed for password hunter2-smtp-pw")
+	if got := redactError(secretErr, "hunter2-smtp-pw"); strings.Contains(got, "hunter2-smtp-pw") {
+		t.Fatalf("redactError leaked the channel secret: %q", got)
 	}
 }
 
@@ -545,3 +552,78 @@ func addrBetween(line string) string {
 }
 
 func ptrI64(v int64) *int64 { return &v }
+
+// TestBuildMIMENoHeaderInjection is the regression for the SMTP header/body
+// injection finding: a hostname carrying CRLF reaches the Subject via
+// renderSubject, and buildMIME must neutralise it so no attacker-controlled
+// header (e.g. Bcc) appears as its own line and the header block is not
+// terminated early.
+func TestBuildMIMENoHeaderInjection(t *testing.T) {
+	nc := notifyContext{
+		OrgName:  "Acme",
+		Device:   "host\r\nBcc: attacker@evil.test\r\n\r\ninjected body",
+		Type:     "disk_full",
+		Severity: "medium",
+		Event:    store.EventOpened,
+		At:       time.Date(2026, 11, 14, 9, 0, 0, 0, time.UTC),
+	}
+	subject, body := renderEmail(nc)
+	// A recipient/sender with CRLF must also be neutralised.
+	msg := EmailMessage{From: "msp@ex.com", To: []string{"ops@ex.com\r\nBcc: x@evil.test"}, Subject: subject, Body: body}
+	mime := buildMIME(msg)
+
+	header := mime
+	if i := strings.Index(mime, "\r\n\r\n"); i >= 0 {
+		header = mime[:i]
+	}
+	allowed := []string{"From:", "To:", "Subject:", "MIME-Version:", "Content-Type:"}
+	for _, line := range strings.Split(header, "\r\n") {
+		if line == "" {
+			continue
+		}
+		ok := false
+		for _, p := range allowed {
+			if strings.HasPrefix(line, p) {
+				ok = true
+				break
+			}
+		}
+		if !ok {
+			t.Fatalf("injected header line in the header block: %q\nfull header:\n%s", line, header)
+		}
+	}
+	if strings.Count(mime, "Subject: ") != 1 {
+		t.Fatalf("Subject header does not appear exactly once:\n%s", header)
+	}
+}
+
+// TestDispatchWebhookSSRFBlocked is the regression for the webhook SSRF finding:
+// the production dispatcher refuses to POST to an internal/loopback/metadata
+// address even when the channel was stored out of band (bypassing the validating
+// API), never calling the sender and landing the delivery failed.
+func TestDispatchWebhookSSRFBlocked(t *testing.T) {
+	e := newTestEnv(t)
+	ctx := context.Background()
+	dev := seedDevice(e, "ws-ssrf")
+	ch := newChannel(e, store.ChannelWebhook, "evil", `{"url":"http://169.254.169.254/latest/meta-data/","flavor":"generic"}`, "")
+	newRule(e, ch, "low")
+	alert := seedAlert(e, dev, "offline", "high", "down")
+	e.srv.EnqueueAlertNotifications(ctx, alert, store.EventOpened)
+
+	fs := &fakeSender{}
+	d := NewNotifyDispatcher(e.srv, fs) // blockPrivateWebhooks defaults to true
+	for i := 0; i < notifyMaxAttempts; i++ {
+		e.clock.advance(notifyRetryBackoff + time.Second)
+		d.DispatchOnce(ctx)
+	}
+	if len(fs.webhooks) != 0 {
+		t.Fatalf("SSRF webhook was sent %d time(s); the dispatcher must block it", len(fs.webhooks))
+	}
+	all, _ := e.st.ListDeliveries(ctx, store.DeliveryFilter{})
+	if len(all) != 1 || all[0].Status != store.DeliveryFailed {
+		t.Fatalf("SSRF delivery = %+v, want exactly 1 failed", all)
+	}
+	if !strings.Contains(all[0].LastError, "blocked") {
+		t.Fatalf("last_error = %q, want a 'blocked' reason", all[0].LastError)
+	}
+}

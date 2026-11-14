@@ -19,6 +19,19 @@ const (
 
 var validArches = map[string]bool{"amd64": true, "arm64": true, "386": true, "arm": true}
 
+// hasControlChars reports whether s contains any C0 control character (including
+// CR and LF) or DEL. Enrollment rejects these in the hostname so an agent
+// operator cannot smuggle a newline into a value the server later writes into an
+// email header.
+func hasControlChars(s string) bool {
+	for _, r := range s {
+		if r < 0x20 || r == 0x7f {
+			return true
+		}
+	}
+	return false
+}
+
 // handlePing is GET /api/agent/v1/ping (no auth).
 func (s *Server) handlePing(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, protocol.PingResponse{OK: true, Version: s.cfg.Version})
@@ -50,6 +63,11 @@ func validateEnroll(req protocol.EnrollRequest) error {
 		return errors.New("hostname is required")
 	case len(req.Hostname) > maxHostname:
 		return errors.New("hostname too long")
+	case hasControlChars(req.Hostname):
+		// The hostname is surfaced as alert.Hostname and interpolated into the
+		// email Subject header; a CR/LF here would otherwise allow SMTP
+		// header/body injection on notification mail.
+		return errors.New("hostname contains control characters")
 	case !protocol.ValidPlatform(req.Platform):
 		return errors.New("platform must be linux, windows or android")
 	case !validArches[req.Arch]:

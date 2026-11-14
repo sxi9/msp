@@ -84,6 +84,12 @@ type NotifyDispatcher struct {
 	maxAttempts int
 	tick        time.Duration
 	backoff     time.Duration
+	// blockPrivateWebhooks re-checks each webhook URL against the SSRF guard
+	// (validateWebhookURL) before sending, so a channel whose URL was stored out
+	// of band (not through the validating API) still cannot reach an internal
+	// address. True in production; the in-process e2e test disables it because it
+	// drives httptest webhook servers on loopback.
+	blockPrivateWebhooks bool
 }
 
 // NewNotifyDispatcher builds a dispatcher for a server. baseURL (cfg.BaseURL) is
@@ -91,14 +97,15 @@ type NotifyDispatcher struct {
 // test that moves the store clock moves the dispatcher too.
 func NewNotifyDispatcher(s *Server, sender Sender) *NotifyDispatcher {
 	return &NotifyDispatcher{
-		st:          s.st,
-		log:         s.log,
-		sender:      sender,
-		now:         s.now,
-		baseURL:     strings.TrimRight(s.cfg.BaseURL, "/"),
-		maxAttempts: notifyMaxAttempts,
-		tick:        notifyTickEvery,
-		backoff:     notifyRetryBackoff,
+		st:                   s.st,
+		log:                  s.log,
+		sender:               sender,
+		now:                  s.now,
+		baseURL:              strings.TrimRight(s.cfg.BaseURL, "/"),
+		maxAttempts:          notifyMaxAttempts,
+		tick:                 notifyTickEvery,
+		backoff:              notifyRetryBackoff,
+		blockPrivateWebhooks: true,
 	}
 }
 
@@ -144,7 +151,15 @@ func (d *NotifyDispatcher) deliver(ctx context.Context, del store.NotificationDe
 		return
 	}
 	terminal := del.Attempts+1 >= d.maxAttempts
-	msg := redactError(err, del)
+	// Load the channel secret (best effort) so redactError can strip it from the
+	// message as documented, even if an underlying SMTP/HTTP error ever echoed it.
+	secret := ""
+	if del.ChannelID != nil {
+		if ch, cerr := d.st.GetChannel(ctx, *del.ChannelID); cerr == nil {
+			secret = ch.Secret
+		}
+	}
+	msg := redactError(err, secret)
 	if mErr := d.st.MarkDeliveryFailed(ctx, del.ID, msg, terminal); mErr != nil {
 		d.log.Error("notify dispatch: mark failed", "delivery", del.ID, "err", mErr)
 	}
@@ -208,6 +223,11 @@ func (d *NotifyDispatcher) sendWebhook(ctx context.Context, ch store.NotifyChann
 	}
 	if cfg.URL == "" {
 		return "", fmt.Errorf("webhook channel %d missing url", ch.ID)
+	}
+	if d.blockPrivateWebhooks {
+		if detail := validateWebhookURL(cfg.URL); detail != "" {
+			return "", fmt.Errorf("webhook channel %d blocked: %s", ch.ID, detail)
+		}
 	}
 	var body []byte
 	switch cfg.Flavor {
@@ -418,12 +438,16 @@ func redactURL(raw string) string {
 }
 
 // redactError produces a last_error string that cannot leak a secret or a
-// tokened URL. It never embeds the channel secret (the error strings built here
-// do not include it, but an SMTP/HTTP library error might echo a URL), so any
-// URL-looking substring is reduced and the known secret is stripped if present.
-func redactError(err error, del store.NotificationDelivery) string {
-	_ = del
+// tokened URL: it strips the channel secret (when known) out of the message, then
+// reduces any http(s) URL-looking substring to scheme://host. The error strings
+// built in this package never embed the secret, but an underlying SMTP/HTTP
+// library error could, so the explicit strip keeps the documented guarantee
+// (docs/SECURITY.md section 12) true regardless. Pass secret "" when none is set.
+func redactError(err error, secret string) string {
 	msg := err.Error()
+	if secret != "" {
+		msg = strings.ReplaceAll(msg, secret, "[redacted-secret]")
+	}
 	var b strings.Builder
 	for i := 0; i < len(msg); {
 		scheme := urlSchemeAt(msg, i)
@@ -526,12 +550,36 @@ func (s *stdSender) SendEmail(ctx context.Context, cfg EmailConfig, password str
 	return c.Quit()
 }
 
+// sanitizeHeader neutralises a value interpolated into an email header so a
+// control character it carries cannot inject an extra header or terminate the
+// header block early (header/body injection). CR and LF are collapsed to a
+// single space; other C0 controls and DEL are dropped. The alert hostname flows
+// into the Subject (renderSubject) and the From/To come from channel config, so
+// every header value passes through here before buildMIME writes it raw.
+func sanitizeHeader(v string) string {
+	return strings.Map(func(r rune) rune {
+		switch {
+		case r == '\r' || r == '\n' || r == '\t':
+			return ' '
+		case r < 0x20 || r == 0x7f:
+			return -1
+		}
+		return r
+	}, v)
+}
+
 // buildMIME renders the minimal RFC 5322 message bytes for a plain-text email.
+// Every header value is sanitized of CR/LF first so a hostname or address with an
+// embedded newline cannot forge headers (e.g. an extra Bcc:) or inject a body.
 func buildMIME(msg EmailMessage) string {
+	to := make([]string, len(msg.To))
+	for i, t := range msg.To {
+		to[i] = sanitizeHeader(t)
+	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "From: %s\r\n", msg.From)
-	fmt.Fprintf(&b, "To: %s\r\n", strings.Join(msg.To, ", "))
-	fmt.Fprintf(&b, "Subject: %s\r\n", msg.Subject)
+	fmt.Fprintf(&b, "From: %s\r\n", sanitizeHeader(msg.From))
+	fmt.Fprintf(&b, "To: %s\r\n", strings.Join(to, ", "))
+	fmt.Fprintf(&b, "Subject: %s\r\n", sanitizeHeader(msg.Subject))
 	fmt.Fprintf(&b, "MIME-Version: 1.0\r\n")
 	fmt.Fprintf(&b, "Content-Type: text/plain; charset=utf-8\r\n")
 	fmt.Fprintf(&b, "\r\n")

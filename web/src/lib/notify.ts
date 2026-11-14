@@ -69,11 +69,16 @@ function ms(iso: string): number {
   return Date.parse(iso);
 }
 
-/** Whether `now` falls inside [starts_at, ends_at) — the suppression test. */
+/**
+ * Whether `now` falls inside [starts_at, ends_at] — the suppression test. Both
+ * edges are inclusive, matching the server's store.ActiveMaintenance (and its
+ * `toWindowView` active_now badge), so this preview agrees with what the
+ * dispatcher actually does at the boundary instant.
+ */
 export function windowActive(w: Pick<MaintenanceWindow, 'starts_at' | 'ends_at'>, now: number = Date.now()): boolean {
   const s = ms(w.starts_at), e = ms(w.ends_at);
   if (Number.isNaN(s) || Number.isNaN(e)) return false;
-  return now >= s && now < e;
+  return now >= s && now <= e;
 }
 
 /** A window's state relative to `now`: upcoming, active, ended (or invalid times). */
@@ -81,7 +86,7 @@ export function windowState(w: Pick<MaintenanceWindow, 'starts_at' | 'ends_at'>,
   const s = ms(w.starts_at), e = ms(w.ends_at);
   if (Number.isNaN(s) || Number.isNaN(e) || e <= s) return 'invalid';
   if (now < s) return 'upcoming';
-  if (now < e) return 'active';
+  if (now <= e) return 'active';
   return 'ended';
 }
 

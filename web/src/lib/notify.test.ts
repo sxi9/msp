@@ -59,15 +59,19 @@ test('describeRule: severity, events and types in one line', () => {
     'low and up · no events · all types');
 });
 
-test('windowActive / windowState: before, inside and after [start, end)', () => {
+test('windowActive / windowState: before, inside and after [start, end] (end inclusive)', () => {
   const w = { starts_at: '2026-06-01T10:00:00Z', ends_at: '2026-06-01T12:00:00Z' };
   const at = (iso: string) => Date.parse(iso);
   assert.equal(windowActive(w, at('2026-06-01T09:59:59Z')), false);
-  assert.equal(windowActive(w, at('2026-06-01T10:00:00Z')), true);
+  assert.equal(windowActive(w, at('2026-06-01T10:00:00Z')), true); // start inclusive
   assert.equal(windowActive(w, at('2026-06-01T11:00:00Z')), true);
-  assert.equal(windowActive(w, at('2026-06-01T12:00:00Z')), false); // end is exclusive
+  // End is inclusive, matching the server's store.ActiveMaintenance so the badge
+  // and the dispatcher agree at the boundary instant.
+  assert.equal(windowActive(w, at('2026-06-01T12:00:00Z')), true);
+  assert.equal(windowActive(w, at('2026-06-01T12:00:01Z')), false);
   assert.equal(windowState(w, at('2026-06-01T09:00:00Z')), 'upcoming');
   assert.equal(windowState(w, at('2026-06-01T11:00:00Z')), 'active');
+  assert.equal(windowState(w, at('2026-06-01T12:00:00Z')), 'active'); // end inclusive
   assert.equal(windowState(w, at('2026-06-01T13:00:00Z')), 'ended');
 });
 

@@ -291,6 +291,26 @@ credential. What that changes:
   server-initiated connection it is subject to the server's own network position; a server
   compromise can both read these secrets and send as these channels, which is the same blast radius
   as the rest of the server (section 1).
+- **Webhook targets are validated against SSRF.** A webhook `config.url` is rejected — at create,
+  at update, and again before every send — when its host is a loopback, private (RFC1918), ULA,
+  link-local (169.254.0.0/16, fe80::/10), unspecified or multicast IP literal, or a name that
+  points at the loopback or the cloud metadata service by convention (`localhost`, `*.localhost`,
+  `metadata`, `metadata.google.internal`). This stops an org-scoped operator from pointing a
+  channel at the server's own network (e.g. `http://169.254.169.254/` or `http://127.0.0.1:<port>/`)
+  and probing it with a Send-test. The check is deterministic (no DNS), so a hostname that passes
+  validation but only *later* resolves to an internal address (DNS rebinding) is a known residual;
+  a non-public webhook endpoint should still be fronted by an allowlisting egress proxy.
+- **Notification mail cannot be used for header injection.** The alert hostname flows into the email
+  Subject. A hostname is rejected at enrollment if it contains any control character, and every
+  value interpolated into an email header (Subject, From, To) has its CR/LF collapsed to spaces
+  before the message is written, so an agent operator cannot inject an extra header (a Bcc) or an
+  arbitrary body into the notification mail. The `config.from`/`config.to` addresses are likewise
+  rejected if they contain line breaks.
+- **Redaction strips the secret and tokened URLs.** Before a `last_error` is stored or logged, the
+  channel secret (when known) is removed and any `http(s)` URL is reduced to `scheme://host`
+  (dropping userinfo, path and query). The error strings the dispatcher builds never embed the
+  secret; the explicit strip keeps the guarantee true even if an underlying SMTP/HTTP library error
+  ever echoed the credential.
 - **Org scoping (RS2).** Channels, rules, windows and the delivery log follow the same two-layer
   tenant isolation and 404-not-403 rule as every other staff resource (section 4): a scoped
   operator manages only their orgs' rows, a global `org_id null` row is visible only to all-orgs

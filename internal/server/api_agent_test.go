@@ -795,3 +795,33 @@ func TestClientIPTrustProxy(t *testing.T) {
 		t.Fatalf("trusted proxy: %q", got)
 	}
 }
+
+// TestEnrollRejectsControlCharsInHostname is the regression for the SMTP
+// header/body injection finding: a hostname carrying a CR/LF (or any control
+// char) is refused at enrollment, so it can never reach the notification email's
+// Subject header. A normal hostname still enrolls.
+func TestEnrollRejectsControlCharsInHostname(t *testing.T) {
+	e := newTestEnv(t)
+	e.srv.enrollLimit = newRateLimiter(1000)
+	for _, host := range []string{
+		"host\r\nBcc: attacker@evil.test",
+		"host\r\n\r\ninjected body",
+		"host\nx",
+		"host\tx",
+		"bad\x00host",
+	} {
+		req := enrollRequest("uid-ctl", protocol.PlatformLinux)
+		req.EnrollmentToken = e.token
+		req.Hostname = host
+		resp, body := e.do(http.MethodPost, "/api/agent/v1/enroll", req, nil)
+		if resp.StatusCode != 400 || errorCode(t, body) != "invalid_request" {
+			t.Fatalf("hostname %q should be 400 invalid_request: %d %s", host, resp.StatusCode, body)
+		}
+	}
+	req := enrollRequest("uid-ok", protocol.PlatformLinux)
+	req.EnrollmentToken = e.token
+	req.Hostname = "ws-reception-01"
+	if resp, body := e.do(http.MethodPost, "/api/agent/v1/enroll", req, nil); resp.StatusCode != 201 {
+		t.Fatalf("normal hostname should enroll: %d %s", resp.StatusCode, body)
+	}
+}

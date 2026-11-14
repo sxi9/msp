@@ -471,11 +471,16 @@ section 12).
 
 The server makes **outbound** connections to the SMTP host/port and to each webhook URL, so the
 server's egress must allow them (a locked-down host that only accepts inbound 443 will see every
-delivery fail and land `failed` after the retries). Channel secrets are stored in the database in
-the clear because they are credentials in use (docs/SECURITY.md section 2 and 13); they are
-write-only over the API, never logged, and never placed in a delivery's `detail_json`, and
-tokened URLs are redacted to `scheme://host` in logs and the delivery log. Keep the database and
-backups private accordingly.
+delivery fail and land `failed` after the retries). Webhook URLs are validated against an SSRF
+denylist — loopback, private, ULA, link-local, unspecified and multicast IP literals, plus
+`localhost`/`metadata` names — at create, at update and before every send, so a channel cannot be
+aimed at the server's own network or the cloud metadata service (docs/SECURITY.md section 12). A
+hostname that only resolves to an internal address at send time (DNS rebinding) is a documented
+residual; front non-public webhook endpoints with an egress allowlist if that is a concern.
+Channel secrets are stored in the database in the clear because they are credentials in use
+(docs/SECURITY.md section 2 and 13); they are write-only over the API, never logged, and never
+placed in a delivery's `detail_json`, and the channel secret and tokened URLs are stripped/redacted
+to `scheme://host` in logs and the delivery log. Keep the database and backups private accordingly.
 
 ### 11e. Reading the delivery log
 

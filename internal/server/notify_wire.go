@@ -238,5 +238,10 @@ func (n storeNotify) ListNotificationDeliveries(ctx context.Context, f DeliveryF
 // with the production sender (net/smtp + net/http). It mirrors EvaluateNow for
 // the in-process e2e test; Run starts the dispatcher on its own ticker.
 func DispatchNotificationsNow(s *Server) {
-	NewNotifyDispatcher(s, newStdSender()).DispatchOnce(context.Background())
+	d := NewNotifyDispatcher(s, newStdSender())
+	// The in-process e2e test drives httptest webhook servers on loopback, which
+	// the production SSRF guard would block; disable it for this test-only
+	// synchronous entry point (Run keeps it on).
+	d.blockPrivateWebhooks = false
+	d.DispatchOnce(context.Background())
 }

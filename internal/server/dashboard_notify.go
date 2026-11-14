@@ -3,7 +3,9 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -375,7 +377,10 @@ type maintenanceWindowView struct {
 
 func (s *Server) toWindowView(wnd MaintenanceWindow) maintenanceWindowView {
 	now := s.now()
-	active := !now.Before(wnd.StartsAt) && now.Before(wnd.EndsAt)
+	// End-inclusive, matching store.ActiveMaintenance (the authoritative
+	// suppression test): a window [starts_at, ends_at] contains now at both edges,
+	// so the active_now badge agrees with what the dispatcher actually does.
+	active := !now.Before(wnd.StartsAt) && !now.After(wnd.EndsAt)
 	return maintenanceWindowView{
 		ID: wnd.ID, OrgID: wnd.OrgID, StartsAt: wnd.StartsAt, EndsAt: wnd.EndsAt,
 		Reason: wnd.Reason, ActiveNow: active, CreatedAt: wnd.CreatedAt, CreatedBy: wnd.CreatedBy,
@@ -508,6 +513,13 @@ func (s *Server) handleUpdateNotifyChannel(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
+	// Kind is immutable: the store has no kind column, so a changed kind would be
+	// silently dropped while config_json was replaced with the other kind's shape,
+	// corrupting the channel. Reject it explicitly rather than half-apply it.
+	if req.Kind != existing.Kind {
+		writeError(w, http.StatusBadRequest, "invalid_request", "channel kind cannot be changed")
+		return
+	}
 	cfg, detail := validateChannel(req.Kind, strings.TrimSpace(req.Name), req.Config)
 	if detail != "" {
 		writeError(w, http.StatusBadRequest, "invalid_request", detail)
@@ -629,12 +641,20 @@ func validateChannel(kind, name string, raw json.RawMessage) (string, string) {
 		if strings.TrimSpace(c.From) == "" {
 			return "", "config.from is required for an email channel"
 		}
+		// Reject CR/LF in addresses so they cannot inject SMTP headers when the
+		// dispatcher writes From/To into the message (header injection).
+		if strings.ContainsAny(c.From, "\r\n") {
+			return "", "config.from must not contain line breaks"
+		}
 		if len(c.To) == 0 {
 			return "", "config.to must list at least one recipient"
 		}
 		for _, to := range c.To {
 			if strings.TrimSpace(to) == "" {
 				return "", "config.to entries cannot be empty"
+			}
+			if strings.ContainsAny(to, "\r\n") {
+				return "", "config.to entries must not contain line breaks"
 			}
 		}
 		b, _ := json.Marshal(c)
@@ -647,8 +667,8 @@ func validateChannel(kind, name string, raw json.RawMessage) (string, string) {
 		if err := json.Unmarshal(raw, &c); err != nil {
 			return "", "config is not a valid object"
 		}
-		if !strings.HasPrefix(c.URL, "http://") && !strings.HasPrefix(c.URL, "https://") {
-			return "", "config.url must be an http(s) URL"
+		if detail := validateWebhookURL(c.URL); detail != "" {
+			return "", detail
 		}
 		if c.Flavor != webhookFlavorSlack && c.Flavor != webhookFlavorGeneric {
 			return "", "config.flavor must be slack or generic"
@@ -658,6 +678,59 @@ func validateChannel(kind, name string, raw json.RawMessage) (string, string) {
 	default:
 		return "", "kind must be email or webhook"
 	}
+}
+
+// --- webhook URL SSRF guard -----------------------------------------------
+
+// validateWebhookURL rejects a webhook URL an operator could aim at the server's
+// own network (SSRF). It must be an http(s) URL whose host is neither a
+// loopback/private/link-local/ULA/unspecified/multicast IP literal nor a name
+// that points at the loopback or the cloud metadata service by convention
+// (localhost, *.localhost, metadata, metadata.google.internal). The check is
+// deterministic (no DNS) so it is safe to run in the request path and again
+// before every send; a hostname that only later resolves to an internal address
+// is a documented residual (docs/SECURITY.md section 12). Returns "" when the URL
+// is acceptable, else a short reason suitable for a 400 detail.
+func validateWebhookURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
+		return "config.url must be an http(s) URL"
+	}
+	if u.Hostname() == "" {
+		return "config.url must be an http(s) URL"
+	}
+	if webhookHostBlocked(u.Hostname()) {
+		return "config.url must not point at an internal, loopback or link-local address"
+	}
+	return ""
+}
+
+// webhookHostBlocked reports whether host (a bare hostname or IP literal, no
+// port) is an address the webhook dispatcher must not reach.
+func webhookHostBlocked(host string) bool {
+	switch strings.ToLower(host) {
+	case "localhost", "metadata", "metadata.google.internal":
+		return true
+	}
+	if strings.HasSuffix(strings.ToLower(host), ".localhost") {
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ipBlocked(ip)
+	}
+	return false
+}
+
+// ipBlocked reports whether ip is in a range the webhook dispatcher must not
+// reach: loopback, link-local unicast/multicast (169.254.0.0/16, fe80::/10),
+// any multicast, the unspecified address, and private ranges (RFC1918 and the
+// ULA fc00::/7). IPv4-mapped IPv6 is unwrapped first.
+func ipBlocked(ip net.IP) bool {
+	if v4 := ip.To4(); v4 != nil {
+		ip = v4
+	}
+	return ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() ||
+		ip.IsMulticast() || ip.IsUnspecified() || ip.IsPrivate()
 }
 
 // --- rules ----------------------------------------------------------------

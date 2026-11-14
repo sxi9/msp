@@ -636,3 +636,81 @@ func TestNotifyOrgScoping(t *testing.T) {
 	}
 	_ = chG
 }
+
+// TestNotifyWebhookSSRFRejected is the regression for the webhook SSRF finding:
+// a webhook channel aimed at an internal/loopback/link-local/metadata address is
+// rejected (400) at both create and update, while a public host is accepted.
+func TestNotifyWebhookSSRFRejected(t *testing.T) {
+	e := newTestEnv(t)
+	fake := newFakeNotifyStore()
+	installFakeNotify(t, fake)
+	admin := dashAdmin(e)
+
+	blocked := []string{
+		"http://127.0.0.1:9000/",
+		"http://169.254.169.254/latest/meta-data/",
+		"http://10.0.0.5/hook",
+		"http://192.168.1.10/hook",
+		"http://[::1]:8080/hook",
+		"https://localhost/hook",
+		"http://metadata.google.internal/",
+	}
+	for _, u := range blocked {
+		body := map[string]any{"kind": "webhook", "name": "x", "org_id": e.org.ID, "config": map[string]any{"url": u, "flavor": "generic"}}
+		if resp, b := e.do(http.MethodPost, "/api/v1/notify/channels", body, withCookie(admin, csrfHeader)); resp.StatusCode != 400 || errorCode(t, b) != "invalid_request" {
+			t.Fatalf("SSRF url %q should be 400 invalid_request: %d %s", u, resp.StatusCode, b)
+		}
+	}
+
+	// A public webhook host is accepted.
+	okBody := map[string]any{"kind": "webhook", "name": "ok", "org_id": e.org.ID, "config": map[string]any{"url": "https://hooks.example.com/services/x", "flavor": "slack"}}
+	resp, b := e.do(http.MethodPost, "/api/v1/notify/channels", okBody, withCookie(admin, csrfHeader))
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("public webhook should be created: %d %s", resp.StatusCode, b)
+	}
+	var created struct {
+		Channel notifyChannelView `json:"channel"`
+	}
+	if err := json.Unmarshal(b, &created); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	// PUT to an internal URL is rejected on the same validation path.
+	put := map[string]any{"kind": "webhook", "name": "ok", "config": map[string]any{"url": "http://127.0.0.1/hook", "flavor": "slack"}}
+	if resp, pb := e.do(http.MethodPut, "/api/v1/notify/channels/"+itoa(created.Channel.ID), put, withCookie(admin, csrfHeader)); resp.StatusCode != 400 || errorCode(t, pb) != "invalid_request" {
+		t.Fatalf("PUT to an internal url should be 400 invalid_request: %d %s", resp.StatusCode, pb)
+	}
+}
+
+// TestNotifyChannelKindImmutable is the regression for the channel-kind finding:
+// a PUT that changes the channel kind is rejected (400) and leaves the stored
+// kind and config untouched, rather than silently dropping the kind change while
+// replacing config_json with the other kind's shape.
+func TestNotifyChannelKindImmutable(t *testing.T) {
+	e := newTestEnv(t)
+	fake := newFakeNotifyStore()
+	installFakeNotify(t, fake)
+	admin := dashAdmin(e)
+
+	const cfg = `{"host":"smtp.x","port":587,"from":"a@x","to":["b@x"]}`
+	ch := fake.seedChannel(NotifyChannel{Kind: "email", Name: "Ops", OrgID: orgPtr(e.org.ID), ConfigJSON: cfg, Enabled: true}, "")
+	path := "/api/v1/notify/channels/" + itoa(ch.ID)
+
+	// email -> webhook is rejected; the stored kind/config stay put.
+	put := map[string]any{"kind": "webhook", "name": "Ops", "config": map[string]any{"url": "https://hooks.example.com/x", "flavor": "slack"}}
+	if resp, b := e.do(http.MethodPut, path, put, withCookie(admin, csrfHeader)); resp.StatusCode != 400 || errorCode(t, b) != "invalid_request" {
+		t.Fatalf("kind change should be 400 invalid_request: %d %s", resp.StatusCode, b)
+	}
+	got := fake.channels[ch.ID]
+	if got.Kind != "email" {
+		t.Fatalf("stored kind mutated to %q", got.Kind)
+	}
+	if got.ConfigJSON != cfg {
+		t.Fatalf("stored config replaced with the other kind's shape: %s", got.ConfigJSON)
+	}
+
+	// A same-kind update still works.
+	okPut := map[string]any{"kind": "email", "name": "Ops 2", "config": emailConfig()}
+	if resp, b := e.do(http.MethodPut, path, okPut, withCookie(admin, csrfHeader)); resp.StatusCode != 200 {
+		t.Fatalf("same-kind update should be 200: %d %s", resp.StatusCode, b)
+	}
+}
