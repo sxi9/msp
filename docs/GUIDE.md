@@ -36,7 +36,7 @@ Phase 1 features (built and verified on Linux; Windows and Android runtime need 
 
 Later phases (planned, not built): the branded
 RustDesk client with the relay compiled in (`docs/RUSTDESK-BRANDING.md`),
-software deployment, notifications by SMS, reports, Android device-owner mode
+reports, Android device-owner mode
 (wipe, kiosk, app push), macOS/iOS agents, ticketing. See `docs/FEATURES.md` and
 `docs/STATUS.md`.
 
@@ -472,32 +472,56 @@ There is one open alert per device and type. **Alerts** page: Open or All, filte
 **Ack** to acknowledge (recorded with your user and time). Thresholds are server config
 (`DiskPct`, `MemPct`, `BatteryPct` in `internal/server`).
 
-### Notifications: email and Slack/webhook (NS1)
+### Notifications: email, Slack/webhook, SMS and escalation (NS1 + NS2)
 
 The **Notifications** section (admin and operator; a viewer sees only the read-only delivery
-log) sends an email or an HTTP webhook when an alert opens or resolves. There is nothing to
-configure in the environment — set it up in three panels:
+log) sends an email, an HTTP webhook or an SMS when an alert opens or resolves. There is nothing
+to configure in the environment — set it up in the panels:
 
 1. **Channels** — where notifications go. Add an **email** channel (SMTP host, port, from, one or
-   more recipients, STARTTLS, optional username + password) or a **webhook** channel (a URL and a
-   flavor: **Slack** posts the Slack incoming-webhook shape, **generic** posts a JSON object). The
-   secret (SMTP password or webhook signing secret) is **write-only**: the form shows "set / not
-   set" and a replace affordance; it is never shown again. Use **Send test** to enqueue a test
-   delivery and watch it turn `sent` (or `failed`) in the log.
+   more recipients, STARTTLS, optional username + password), a **webhook** channel (a URL and a
+   flavor: **Slack** posts the Slack incoming-webhook shape, **generic** posts a JSON object), or
+   an **SMS** channel (see "Escalation and SMS" below). The secret (SMTP password, webhook signing
+   secret or SMS provider token) is **write-only**: the form shows "set / not set" and a replace
+   affordance; it is never shown again. Use **Send test** to enqueue a test delivery and watch it
+   turn `sent` (or `failed`) in the log.
 2. **Rules** — what to route. A rule picks a channel and matches by client (one client or all), a
    minimum severity, an optional list of alert types (none = all), and whether it fires on open,
-   on resolve, or both. An alert that opens or resolves creates one delivery per matching rule.
+   on resolve, or both. An alert that opens or resolves creates one delivery per matching rule. A
+   rule may also attach an **escalation policy** (below).
 3. **Maintenance windows** — when to stay quiet. A window mutes a client's (or everyone's)
    deliveries between a start and end time, with an "active now" badge. Alerts still open during a
    window, but their deliveries are recorded **suppressed** and nothing is sent — a mute for
-   planned work, not a way to hide anything.
+   planned work, not a way to hide anything. This also suppresses escalation steps.
 
 The **Delivery log** lists every attempt newest first: time, client, device/alert, channel,
-event, a status chip (pending / sent / failed / suppressed), attempts and the last error; filter
-by status and client. A row stuck `pending` with rising attempts usually means the SMTP host or
-webhook URL is unreachable from the server — the server connects **out** to them, so that egress
-must be allowed (docs/OPS.md section 11). Everything here is scoped to your clients exactly like
-the rest of the dashboard. SMS and multi-step escalation policies are the NS2 follow-ons.
+event, the escalation **step** (blank for an ordinary delivery), a status chip
+(pending / sent / failed / suppressed), attempts and the last error; filter by status and client.
+A row stuck `pending` with rising attempts usually means the SMTP host, webhook URL or SMS provider
+is unreachable from the server — the server connects **out** to them, so that egress must be
+allowed (docs/OPS.md section 11). Everything here is scoped to your clients exactly like the rest
+of the dashboard.
+
+#### Escalation and SMS (NS2)
+
+**SMS channel.** Add a channel of kind **SMS** to text an on-call phone. Pick a provider:
+**Twilio** (enter the account SID, your Twilio "from" number, and the Twilio auth token as the
+write-only secret) or **generic** (enter your gateway's URL and its bearer token as the secret);
+list one or more recipient numbers in E.164 form (`+15551234567`). An SMS carries only the short
+one-line summary (`[MSP] <severity> <type> on <host> (<client>)`) — no dashboard link, so no secret
+or tokened URL ever rides out in a text. **Send test** works for it like any channel. A generic
+gateway must be an endpoint you control and the server can reach.
+
+**Escalation policies.** A policy is an ordered list of **steps**; each step fires one or more
+channels after a delay (in minutes) from the moment the alert opened — for example page Slack at
+0 min, text the on-call phone at 15 min, text the manager at 60 min. Build a policy in the
+**Escalation policies** panel (add steps with a delay and the channels to fire), then attach it to
+a rule in the rule editor. When that rule matches a newly opened alert, the rule's own channel
+still fires immediately **and** the policy adds the later steps on top. A step fires **only while
+the alert is still open and unacknowledged** — the moment someone **Ack**s it (or it resolves),
+every further step stops. Steps due inside a maintenance window are suppressed like any other
+delivery, and each step is sent once no matter how often the dispatcher ticks. The delivery log
+shows which step each escalation delivery came from.
 
 ## 13. Users, roles, audit
 

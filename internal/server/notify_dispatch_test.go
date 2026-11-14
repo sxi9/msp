@@ -499,6 +499,131 @@ func TestEscalationSuppressedDuringMaintenance(t *testing.T) {
 	}
 }
 
+// TestEscalationNotSentAfterAckAcrossRetry is the regression for the confirmed
+// NS2 finding that a queued escalation step could still be sent after the alert
+// was acknowledged. A step comes due while the alert is open, its first send
+// fails transiently (leaving the row pending), the operator acknowledges the
+// alert, and a later tick past the backoff re-claims the still-pending step: the
+// dispatcher must now re-check the alert state and suppress the step instead of
+// paging. (The enqueue-time guard in DueEscalations alone does not cover a row
+// that is already pending, so without the send-time re-check the step would be
+// delivered — see TestEscalationStopsOnAck, which only exercises the enqueue
+// case where the step is never queued.)
+func TestEscalationNotSentAfterAckAcrossRetry(t *testing.T) {
+	e := newTestEnv(t)
+	ctx := context.Background()
+	dev := seedDevice(e, "ws-ack-retry")
+	seedEscalation(e) // step 1 at 0 min (SMS), step 2 at 15 min (email)
+	alert := seedAlert(e, dev, "offline", "high", "down")
+
+	fs := &fakeSender{}
+	d := NewNotifyDispatcher(e.srv, fs)
+
+	// Tick at open: step 1 (SMS) delivered; step 2 not due yet.
+	d.DispatchOnce(ctx)
+	if len(fs.sms) != 1 || len(fs.emails) != 0 {
+		t.Fatalf("after open: sms=%d emails=%d, want 1/0", len(fs.sms), len(fs.emails))
+	}
+
+	// Advance past step 2's 15 min delay so the step comes due, then make the next
+	// send fail transiently: step 2 is enqueued and claimed but its send fails, so
+	// MarkDeliveryFailed(non-terminal) leaves the row pending.
+	e.clock.advance(15*time.Minute + time.Second)
+	fs.failErr = fmt.Errorf("sms provider timeout")
+	d.DispatchOnce(ctx)
+	if len(fs.emails) != 0 {
+		t.Fatalf("step 2 claimed to have sent despite the failing sender: emails=%d", len(fs.emails))
+	}
+	var step2ID int64
+	for _, dl := range mustDeliveries(t, e) {
+		if dl.Step == 2 {
+			step2ID = dl.ID
+			if dl.Status != store.DeliveryPending || dl.Attempts != 1 {
+				t.Fatalf("step 2 after failed send = %+v, want pending attempts=1", dl)
+			}
+		}
+	}
+	if step2ID == 0 {
+		t.Fatal("step 2 was never enqueued while the alert was open")
+	}
+
+	// The operator acknowledges the alert while step 2 sits pending.
+	if err := e.st.AckAlert(ctx, alert.ID, e.admin.ID); err != nil {
+		t.Fatalf("AckAlert: %v", err)
+	}
+
+	// Recover the sender and advance past the retry backoff so the still-pending
+	// step 2 is re-claimable. The dispatcher must suppress it, not send it.
+	fs.failErr = nil
+	e.clock.advance(notifyRetryBackoff + time.Second)
+	d.DispatchOnce(ctx)
+	d.DispatchOnce(ctx) // idempotent: still suppressed, still no send
+
+	if len(fs.emails) != 0 {
+		t.Fatalf("escalation step 2 was delivered after the ack: emails=%d, want 0", len(fs.emails))
+	}
+	got, err := e.st.GetDelivery(ctx, step2ID)
+	if err != nil {
+		t.Fatalf("GetDelivery step 2: %v", err)
+	}
+	if got.Status != store.DeliverySuppressed {
+		t.Fatalf("step 2 status = %q, want suppressed after ack", got.Status)
+	}
+}
+
+// mustDeliveries returns every delivery row (test helper).
+func mustDeliveries(t *testing.T, e *testEnv) []store.NotificationDelivery {
+	t.Helper()
+	all, err := e.st.ListDeliveries(context.Background(), store.DeliveryFilter{})
+	if err != nil {
+		t.Fatalf("ListDeliveries: %v", err)
+	}
+	return all
+}
+
+// TestDispatchSMSSSRFBlocked is the regression for the confirmed NS2 finding that
+// the SMS send path had no send-time SSRF guard: like the webhook path, the
+// production dispatcher must refuse to POST an SMS to an internal/loopback/metadata
+// address even when the channel was stored out of band (bypassing the validating
+// API). It covers both a generic gateway URL and a Twilio url override.
+func TestDispatchSMSSSRFBlocked(t *testing.T) {
+	cases := []struct {
+		name string
+		cfg  string
+	}{
+		{"generic internal ip", `{"provider":"generic","from":"+15550000000","to":["+15551112222"],"url":"http://169.254.169.254/latest/meta-data/"}`},
+		{"twilio loopback override", `{"provider":"twilio","from":"+15550000000","to":["+15551112222"],"account_sid":"ACx","url":"http://127.0.0.1:8080/send"}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newTestEnv(t)
+			ctx := context.Background()
+			dev := seedDevice(e, "ws-sms-ssrf")
+			ch := newChannel(e, store.ChannelSMS, "evil-sms", tc.cfg, "tok-SECRET-999")
+			newRule(e, ch, "low")
+			alert := seedAlert(e, dev, "offline", "high", "down")
+			e.srv.EnqueueAlertNotifications(ctx, alert, store.EventOpened)
+
+			fs := &fakeSender{}
+			d := NewNotifyDispatcher(e.srv, fs) // blockPrivateWebhooks defaults to true
+			for i := 0; i < notifyMaxAttempts; i++ {
+				e.clock.advance(notifyRetryBackoff + time.Second)
+				d.DispatchOnce(ctx)
+			}
+			if len(fs.sms) != 0 {
+				t.Fatalf("SSRF SMS was sent %d time(s); the dispatcher must block it", len(fs.sms))
+			}
+			all, _ := e.st.ListDeliveries(ctx, store.DeliveryFilter{})
+			if len(all) != 1 || all[0].Status != store.DeliveryFailed {
+				t.Fatalf("SSRF SMS delivery = %+v, want exactly 1 failed", all)
+			}
+			if !strings.Contains(all[0].LastError, "blocked") {
+				t.Fatalf("last_error = %q, want a 'blocked' reason", all[0].LastError)
+			}
+		})
+	}
+}
+
 // --- real sender: fake SMTP + httptest webhook ------------------------------
 
 func TestStdSenderEmailAgainstFakeSMTP(t *testing.T) {

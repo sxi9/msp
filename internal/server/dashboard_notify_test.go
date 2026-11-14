@@ -1059,3 +1059,75 @@ func TestNotifyRuleWithPolicy(t *testing.T) {
 		t.Fatalf("rule with cross-org policy should be 400: %d %s", resp.StatusCode, b)
 	}
 }
+
+// TestNotifyCrossOrgReferenceRejected is the regression for the low cross-tenant
+// finding: references are validated against the rule/policy's OWN org, not just the
+// caller's visibility, so even an all-orgs admin cannot wire an org-A rule/policy
+// to an org-B channel or policy (which would deliver org-A alert content to another
+// tenant). A compatible reference (same org, or a global channel) still works, and
+// a global rule/policy may reference only a global channel.
+func TestNotifyCrossOrgReferenceRejected(t *testing.T) {
+	e := newTestEnv(t)
+	ctx := context.Background()
+	fake := newFakeNotifyStore()
+	installFakeNotify(t, fake)
+	orgA := e.org
+	orgB, err := e.st.CreateOrg(ctx, "Beta Corp")
+	if err != nil {
+		t.Fatalf("CreateOrg: %v", err)
+	}
+	admin := dashAdmin(e) // all-orgs: sees every org, so only org-consistency can stop a cross-tenant wire
+
+	chA := fake.seedChannel(NotifyChannel{Kind: "email", Name: "A chan", OrgID: orgPtr(orgA.ID), Enabled: true}, "")
+	chB := fake.seedChannel(NotifyChannel{Kind: "email", Name: "B chan", OrgID: orgPtr(orgB.ID), Enabled: true}, "")
+	chG := fake.seedChannel(NotifyChannel{Kind: "email", Name: "Global chan", OrgID: nil, Enabled: true}, "")
+	polB := fake.seedPolicy(EscalationPolicy{Name: "B pol", OrgID: orgPtr(orgB.ID), Steps: []EscalationStep{{StepOrder: 1, AfterMinutes: 0, ChannelIDs: []int64{chB.ID}}}})
+
+	post := func(path string, body any) (int, string) {
+		resp, b := e.do(http.MethodPost, path, body, withCookie(admin, csrfHeader))
+		return resp.StatusCode, string(b)
+	}
+
+	// Rejected cross-tenant wires (admin can see org B, so this is pure org-consistency).
+	rejects := []struct {
+		name string
+		path string
+		body any
+	}{
+		{"policy orgA -> orgB channel", "/api/v1/notify/policies",
+			policyBody(orgA.ID, []map[string]any{{"after_minutes": 0, "channel_ids": []int64{chB.ID}}})},
+		{"global policy -> orgA channel", "/api/v1/notify/policies",
+			map[string]any{"name": "g", "steps": []map[string]any{{"after_minutes": 0, "channel_ids": []int64{chA.ID}}}}},
+		{"rule orgA -> orgB channel", "/api/v1/notify/rules",
+			map[string]any{"name": "R", "org_id": orgA.ID, "min_severity": "low", "channel_id": chB.ID}},
+		{"rule orgA -> orgB policy", "/api/v1/notify/rules",
+			map[string]any{"name": "R", "org_id": orgA.ID, "min_severity": "low", "channel_id": chA.ID, "escalation_policy_id": polB.ID}},
+	}
+	for _, rc := range rejects {
+		if code, b := post(rc.path, rc.body); code != 400 || errorCode(t, []byte(b)) != "invalid_request" {
+			t.Fatalf("%s = %d %s, want 400 invalid_request", rc.name, code, b)
+		}
+	}
+
+	// Compatible references still succeed: a same-org channel, a global channel for
+	// an org-scoped policy, and a global channel for a global policy.
+	accepts := []struct {
+		name string
+		path string
+		body any
+	}{
+		{"policy orgA -> orgA channel", "/api/v1/notify/policies",
+			policyBody(orgA.ID, []map[string]any{{"after_minutes": 0, "channel_ids": []int64{chA.ID}}})},
+		{"policy orgA -> global channel", "/api/v1/notify/policies",
+			policyBody(orgA.ID, []map[string]any{{"after_minutes": 0, "channel_ids": []int64{chG.ID}}})},
+		{"global policy -> global channel", "/api/v1/notify/policies",
+			map[string]any{"name": "g", "steps": []map[string]any{{"after_minutes": 0, "channel_ids": []int64{chG.ID}}}}},
+		{"rule orgA -> global channel", "/api/v1/notify/rules",
+			map[string]any{"name": "R", "org_id": orgA.ID, "min_severity": "low", "channel_id": chG.ID}},
+	}
+	for _, ac := range accepts {
+		if code, b := post(ac.path, ac.body); code != http.StatusCreated {
+			t.Fatalf("%s = %d %s, want 201", ac.name, code, b)
+		}
+	}
+}

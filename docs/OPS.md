@@ -469,25 +469,28 @@ start it, put the new `.pub` line into `MSP_RUSTDESK_KEY`, restart the server, a
 `msp-agent rustdesk setup` on every endpoint and the client settings on every technician PC
 (the agents receive the new key in their next sync but only `setup` applies it to RustDesk).
 
-## 11. Notifications (email and Slack/webhook) (NS1)
+## 11. Notifications (email, Slack/webhook, SMS, escalation) (NS1 + NS2)
 
-Alert notifications send an email or an HTTP webhook when an alert opens or resolves, routed
-per client org and severity, muted during maintenance windows. There is nothing to configure
-in the environment: channels, routing rules and maintenance windows are created in the
-dashboard (Notifications section) or over `/api/v1/notify/*` (docs/PROTOCOL.md). The dispatcher
-is always running.
+Alert notifications send an email, an HTTP webhook or an **SMS** when an alert opens or resolves,
+routed per client org and severity, muted during maintenance windows. NS2 adds the SMS channel
+kind and **multi-step escalation policies** (timed re-notification while an alert stays open and
+unacknowledged). There is nothing to configure in the environment: channels, routing rules,
+escalation policies and maintenance windows are created in the dashboard (Notifications section)
+or over `/api/v1/notify/*` (docs/PROTOCOL.md). The dispatcher is always running.
 
 ### 11a. The dispatcher
 
 A background goroutine started in `Run` alongside the alert evaluator and the pruner (stopped
 on shutdown). Every few seconds it claims the `pending` deliveries whose retry lease has
 expired, renders the message for the channel kind, sends it through the real sender
-(`net/smtp` for email, `net/http` for webhooks), and marks the row `sent` or records the
+(`net/smtp` for email, `net/http` for webhooks and SMS), and marks the row `sent` or records the
 failure. Retries use a per-delivery backoff (the claim stamps `updated_at`, which both leases
 the row so two ticks never grab it and schedules the next attempt); after `maxAttempts` (5) a
-delivery is left `failed`. Enqueue is idempotent — one row per `(alert, rule, event)` — so the
-evaluator running twice never double-sends. Nothing is tunable by env in NS1; the constants
-live in `internal/server/notify_dispatch.go`.
+delivery is left `failed`. Each tick **first runs the escalation tick** (NS2): for every open,
+unacknowledged alert whose matched rule carries a policy, it enqueues the policy steps that have
+come due. Enqueue is idempotent — one row per `(alert, rule, channel, event, step)` — so the
+dispatcher or the escalation tick running twice never double-sends. Nothing is tunable by env; the
+constants live in `internal/server/notify_dispatch.go`.
 
 ## 12. Patching (PM1)
 
@@ -524,9 +527,33 @@ the normal command queue (`POST /api/v1/devices/{id}/patch`, docs/PROTOCOL.md).
   `{"text":"<subject> — <message>"}` (a Slack incoming webhook). `generic` posts
   `{alert_id, org, device, type, severity, message, event, at}`; if a `secret` is set it adds
   `X-MSP-Signature: sha256=<hmac of the body>` so the receiver can verify authenticity.
+- **SMS** (NS2): `config` = `{"provider":"twilio"|"generic","from","to":[...],"account_sid","url"}`,
+  plus a write-only `secret` (the provider auth token). For **twilio**, set `provider:"twilio"`,
+  `account_sid` (the `AC...` SID), `from` (your Twilio number) and the token as the secret; the
+  server POSTs the Messages API form with HTTP basic auth. For a **generic** gateway, set
+  `provider:"generic"` and `url` (your gateway endpoint); the server POSTs `{to,text}` JSON with the
+  token as a `Bearer` header. All numbers are E.164 (`+15551234567`). The message is the short
+  one-line summary `[MSP] <severity> <type> on <hostname> (<org>)` only — no dashboard link, so a
+  tokened URL can never ride out in a text. **A generic SMS gateway `url` is not SSRF-validated the
+  way a webhook URL is, so point it only at a trusted, operator-controlled endpoint** (the server's
+  egress must reach it; docs/SECURITY.md section 12).
 
 Use **Send test** on a channel to enqueue a `test` delivery immediately and watch it in the
 delivery log; the dispatcher sends it on its next tick.
+
+### 11c-esc. Escalation policies (NS2)
+
+An escalation policy is an ordered list of steps; each step fires one or more channels
+`after_minutes` from the moment the alert opened. Attach a policy to a rule
+(`escalation_policy_id`): when that rule matches a newly opened alert, the rule's own `on_open`
+channel still fires immediately (step 0 in the delivery log) and the policy adds the later steps on
+top. A step fires **only while the alert is still open and unacknowledged** — acknowledging or
+resolving the alert stops all further steps at once (a resolve still honours `on_resolve` rules).
+Timing is computed from the alert's `opened_at` plus each step's `after_minutes`, so there is no
+per-alert scheduler to tune; a step due during a maintenance window is suppressed like any other
+delivery. Typical use: page Slack at 0 min, text the on-call phone at 15 min, text the manager at
+60 min if no one has acknowledged. Steps must be ordered by non-decreasing `after_minutes`
+(0..40320, i.e. up to 4 weeks), at most 10 per policy.
 
 ### 11c. Routing rules and maintenance windows
 
@@ -540,9 +567,10 @@ section 12).
 
 ### 11d. Firewall and secrets
 
-The server makes **outbound** connections to the SMTP host/port and to each webhook URL, so the
-server's egress must allow them (a locked-down host that only accepts inbound 443 will see every
-delivery fail and land `failed` after the retries). Webhook URLs are validated against an SSRF
+The server makes **outbound** connections to the SMTP host/port, to each webhook URL and to each
+SMS provider (the Twilio Messages API or a generic gateway `url`), so the server's egress must
+allow them (a locked-down host that only accepts inbound 443 will see every delivery fail and land
+`failed` after the retries). Webhook URLs are validated against an SSRF
 denylist — loopback, private, ULA, link-local, unspecified and multicast IP literals, plus
 `localhost`/`metadata` names — at create, at update and before every send, so a channel cannot be
 aimed at the server's own network or the cloud metadata service (docs/SECURITY.md section 12). A
@@ -556,11 +584,12 @@ to `scheme://host` in logs and the delivery log. Keep the database and backups p
 ### 11e. Reading the delivery log
 
 `GET /api/v1/notify/deliveries?status=&org_id=&limit=` (the Delivery log view) shows every
-attempt newest first: time, org, device/alert, channel, event, a status chip
-(`pending`/`sent`/`failed`/`suppressed`), the attempt count and the last error. A row stuck
-`pending` with rising attempts points at an unreachable SMTP host or webhook (check egress and
-the channel config); a `failed` row has given up after `maxAttempts`. All of it is org-scoped
-for staff exactly like the rest of the dashboard.
+attempt newest first: time, org, device/alert, channel, event, the escalation **step** (blank for
+an ordinary open/resolve/test delivery, the 1-based step number for an escalation delivery), a
+status chip (`pending`/`sent`/`failed`/`suppressed`), the attempt count and the last error. A row
+stuck `pending` with rising attempts points at an unreachable SMTP host, webhook or SMS provider
+(check egress and the channel config); a `failed` row has given up after `maxAttempts`. All of it
+is org-scoped for staff exactly like the rest of the dashboard.
 
 ### 11f. Not configured in the build container
 

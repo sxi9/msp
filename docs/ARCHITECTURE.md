@@ -294,8 +294,29 @@ with no new transport and no new dependency (stdlib `net/smtp` and `net/http` on
   dashboard adds the Notifications panels and the Delivery log with `web/src/lib/notify.ts` pure
   helpers.
 - **Package rules unchanged**: store queries + server handlers + a dispatcher goroutine + Preact
-  views; no new module (stdlib `net/smtp`/`net/http`), and `internal/agent` is untouched. NS2 (SMS
-  as another channel `kind`, multi-step escalation) reuses this shape and adds no table.
+  views; no new module (stdlib `net/smtp`/`net/http`), and `internal/agent` is untouched.
+
+### NS2: SMS and multi-step escalation (phase 2)
+
+NS2 extends this exact shape with no new module, no new dependency and (on the server/dispatcher)
+no new goroutine:
+- **SMS channel** is a third channel `kind`. Migration `0013_ns2` rebuilds `notify_channels`
+  FK-safely (as 0007/0008/0012 do, backing up `notify_rules` first so the `channel_id` FK cannot
+  cascade-delete it) to widen the `kind` CHECK to `('email','webhook','sms')`. The production sender
+  gains `SendSMS` (Twilio Messages API form + HTTP basic auth, or a generic JSON gateway with a
+  bearer token) over the same injectable `Sender` interface; the renderer is a short one-line
+  summary with the provider token and any URL redacted, so no tokened link rides out in a text.
+- **Escalation policies** are two new tables (`escalation_policies` + `escalation_steps`); a rule
+  points at one with `notify_rules.escalation_policy_id` (a plain ADD COLUMN, no FK — `DeletePolicy`
+  detaches referencing rules in a transaction). There is **no per-alert scheduler**: due steps are
+  computed from the alert's own `opened_at` plus each step's `after_minutes` (`DueEscalations`),
+  filtered to alerts still open and unacknowledged. The dispatcher runs `EscalateOnce` first on each
+  tick, enqueuing one delivery per channel per due step; `notification_deliveries.step` widens the
+  idempotency key to `(alert_id, rule_id, channel_id, event, step)` so a repeated tick never
+  double-sends (NS1 rows keep step 0 and the old `(alert, rule, event)` guarantee).
+- **API + dashboard**: `/api/v1/notify/policies` CRUD joins the same `NotifyStore` adapter and RS2
+  helpers (audit `notify.policy_*`); the rule editor attaches a policy, the channel editor gains the
+  SMS kind, and the delivery log shows the step (`web/src/lib/escalation.ts` pure helpers).
 
 ## Patch status and install (PM1, phase 2)
 

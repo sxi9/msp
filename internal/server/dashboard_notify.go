@@ -961,10 +961,10 @@ func (s *Server) handleCreateNotifyRule(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	ctx := r.Context()
-	if !s.channelReferenceOK(w, r, req.ChannelID) {
+	if !s.channelReferenceOK(w, r, req.ChannelID, req.OrgID) {
 		return
 	}
-	if !s.policyReferenceOK(w, r, req.EscalationPolicyID) {
+	if !s.policyReferenceOK(w, r, req.EscalationPolicyID, req.OrgID) {
 		return
 	}
 	onOpen := true
@@ -1024,10 +1024,10 @@ func (s *Server) handleUpdateNotifyRule(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, "invalid_request", detail)
 		return
 	}
-	if !s.channelReferenceOK(w, r, req.ChannelID) {
+	if !s.channelReferenceOK(w, r, req.ChannelID, existing.OrgID) {
 		return
 	}
-	if !s.policyReferenceOK(w, r, req.EscalationPolicyID) {
+	if !s.policyReferenceOK(w, r, req.EscalationPolicyID, existing.OrgID) {
 		return
 	}
 	onOpen := true
@@ -1085,11 +1085,15 @@ func (s *Server) handleDeleteNotifyRule(w http.ResponseWriter, r *http.Request) 
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// channelReferenceOK reports whether the caller may attach a rule to channelID:
-// the channel must exist and be visible to the caller. A missing or invisible
-// channel is a 400 (not a 404) that does not reveal whether it exists in
+// channelReferenceOK reports whether the caller may attach a rule or policy in
+// org ownerOrg to channelID: the channel must exist, be visible to the caller,
+// and belong to the same client as the referencing rule/policy (or be global).
+// The org-consistency check is independent of the caller's broader visibility, so
+// an all-orgs admin cannot wire an org-A rule/policy to an org-B channel (which
+// would deliver org-A alert content to another tenant). A missing, invisible or
+// cross-org channel is a 400 (not a 404) that does not reveal whether it exists in
 // another org.
-func (s *Server) channelReferenceOK(w http.ResponseWriter, r *http.Request, channelID int64) bool {
+func (s *Server) channelReferenceOK(w http.ResponseWriter, r *http.Request, channelID int64, ownerOrg *int64) bool {
 	ns, ok := s.notifyStore(w)
 	if !ok {
 		return false
@@ -1110,19 +1114,35 @@ func (s *Server) channelReferenceOK(w http.ResponseWriter, r *http.Request, chan
 		writeError(w, http.StatusInternalServerError, "internal", "")
 		return false
 	}
-	if !vis {
+	if !vis || !notifyOrgCompatible(ch.OrgID, ownerOrg) {
 		writeError(w, http.StatusBadRequest, "invalid_request", "channel_id not found")
 		return false
 	}
 	return true
 }
 
-// policyReferenceOK reports whether the caller may attach a rule to the given
-// (optional) escalation policy: a nil id is fine (no policy); otherwise the
-// policy must exist and be visible to the caller. A missing or invisible policy
-// is a 400 (not a 404) that does not reveal whether it exists in another org,
-// matching channelReferenceOK.
-func (s *Server) policyReferenceOK(w http.ResponseWriter, r *http.Request, policyID *int64) bool {
+// notifyOrgCompatible reports whether a referenced row with org rowOrg may be used
+// by a rule/policy whose org is ownerOrg: a global row (rowOrg nil) is usable by
+// any owner; a client-scoped row is usable only by a rule/policy in that same
+// client. This enforces tenant org-consistency independently of who is calling, so
+// even an all-orgs admin cannot cross tenants (a global rule/policy, in turn, may
+// only reference global rows, since it fires for every client).
+func notifyOrgCompatible(rowOrg, ownerOrg *int64) bool {
+	if rowOrg == nil {
+		return true
+	}
+	return ownerOrg != nil && *rowOrg == *ownerOrg
+}
+
+// policyReferenceOK reports whether the caller may attach a rule in org ownerOrg
+// to the given (optional) escalation policy: a nil id is fine (no policy);
+// otherwise the policy must exist, be visible to the caller, and belong to the
+// same client as the rule (or be global). The org-consistency check is independent
+// of the caller's visibility, so an all-orgs admin cannot point an org-A rule at an
+// org-B policy (whose steps would then fire org-B channels for org-A alerts). A
+// missing, invisible or cross-org policy is a 400 (not a 404) that does not reveal
+// whether it exists in another org, matching channelReferenceOK.
+func (s *Server) policyReferenceOK(w http.ResponseWriter, r *http.Request, policyID *int64, ownerOrg *int64) bool {
 	if policyID == nil {
 		return true
 	}
@@ -1146,7 +1166,7 @@ func (s *Server) policyReferenceOK(w http.ResponseWriter, r *http.Request, polic
 		writeError(w, http.StatusInternalServerError, "internal", "")
 		return false
 	}
-	if !vis {
+	if !vis || !notifyOrgCompatible(p.OrgID, ownerOrg) {
 		writeError(w, http.StatusBadRequest, "invalid_request", "escalation_policy_id not found")
 		return false
 	}
@@ -1266,8 +1286,9 @@ func (s *Server) handleCreateNotifyPolicy(w http.ResponseWriter, r *http.Request
 	if !s.notifyCreateAllowed(w, r, req.OrgID) {
 		return
 	}
-	// Every channel the policy fires must exist and be visible to the caller.
-	if !s.policyChannelsOK(w, r, steps) {
+	// Every channel the policy fires must exist, be visible to the caller, and
+	// belong to the same client as the policy (or be global).
+	if !s.policyChannelsOK(w, r, steps, req.OrgID) {
 		return
 	}
 	actor, _ := dashActor(r)
@@ -1315,7 +1336,7 @@ func (s *Server) handleUpdateNotifyPolicy(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusBadRequest, "invalid_request", detail)
 		return
 	}
-	if !s.policyChannelsOK(w, r, steps) {
+	if !s.policyChannelsOK(w, r, steps, existing.OrgID) {
 		return
 	}
 	p, err := ns.UpdateEscalationPolicy(ctx, UpdateEscalationPolicyParams{ID: id, Name: name, Steps: steps})
@@ -1357,10 +1378,12 @@ func (s *Server) handleDeleteNotifyPolicy(w http.ResponseWriter, r *http.Request
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// policyChannelsOK reports whether every channel referenced by the policy's steps
-// exists and is visible to the caller (same rule as channelReferenceOK). A
-// missing/invisible channel is a 400 that does not reveal cross-org existence.
-func (s *Server) policyChannelsOK(w http.ResponseWriter, r *http.Request, steps []EscalationStep) bool {
+// policyChannelsOK reports whether every channel referenced by the steps of a
+// policy in org ownerOrg exists, is visible to the caller, and belongs to the same
+// client as the policy (or is global) — same rule as channelReferenceOK. A
+// missing/invisible/cross-org channel is a 400 that does not reveal cross-org
+// existence.
+func (s *Server) policyChannelsOK(w http.ResponseWriter, r *http.Request, steps []EscalationStep, ownerOrg *int64) bool {
 	seen := map[int64]bool{}
 	for _, st := range steps {
 		for _, id := range st.ChannelIDs {
@@ -1368,7 +1391,7 @@ func (s *Server) policyChannelsOK(w http.ResponseWriter, r *http.Request, steps 
 				continue
 			}
 			seen[id] = true
-			if !s.channelReferenceOK(w, r, id) {
+			if !s.channelReferenceOK(w, r, id, ownerOrg) {
 				return false
 			}
 		}

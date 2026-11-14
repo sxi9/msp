@@ -276,13 +276,16 @@ the Nth client, in this order:
    allowlisting at the proxy.
 5. Windows job-object process-tree kill and a reviewed script library.
 
-## 12. Notification secrets and suppression (NS1)
+## 12. Notification secrets and suppression (NS1 + NS2)
 
 Alert notifications add outbound SMTP and HTTP from the server and one new kind of stored
-credential. What that changes:
+credential. NS2 adds an **SMS** channel (its provider auth token is a fourth such credential) and
+**multi-step escalation policies** (timed re-notification while an alert stays open). What that
+changes:
 
-- **Secrets are credentials in use, not hashes.** A channel's `secret` (the SMTP password or the
-  webhook signing secret) must be presented to the SMTP server or fed to the HMAC, so it is stored
+- **Secrets are credentials in use, not hashes.** A channel's `secret` (the SMTP password, the
+  webhook signing secret, or the **SMS provider auth token** — Twilio token or the generic
+  gateway's bearer token) must be presented to the provider, so it is stored
   in the clear in `notify_channels.secret` (section 2). Protect it exactly like the device tokens:
   whoever holds the database holds these secrets. It is **write-only over the API** — the channel
   JSON carries only `"secret_set":true|false`; `PUT` with the field omitted keeps the stored value,
@@ -323,10 +326,36 @@ credential. What that changes:
   (dropping userinfo, path and query). The error strings the dispatcher builds never embed the
   secret; the explicit strip keeps the guarantee true even if an underlying SMTP/HTTP library error
   ever echoed the credential.
-- **Org scoping (RS2).** Channels, rules, windows and the delivery log follow the same two-layer
-  tenant isolation and 404-not-403 rule as every other staff resource (section 4): a scoped
-  operator manages only their orgs' rows, a global `org_id null` row is visible only to all-orgs
-  staff, and a cross-org resource is indistinguishable from one that does not exist.
+- **SMS token write-only and redacted (NS2).** The SMS provider token is handled exactly like the
+  other channel secrets: write-only over the API (`"secret_set"` only), never logged, never placed
+  in a delivery's `detail_json` or `last_error`. It rides only in the provider request's
+  `Authorization` header (Twilio HTTP basic auth, or a `Bearer` header for the generic gateway),
+  never in a URL. The SMS body is a short one-line summary built only from alert fields with any
+  URL reduced to `scheme://host`, so no tokened link can ride out in a text message. An SMS
+  `config.url` (generic gateway, or a Twilio override) is SSRF-validated exactly like a webhook URL
+  — at create, at update, and again before every send (so a channel stored out of band still cannot
+  reach an internal address) — with the same deterministic-check / DNS-rebinding residual noted
+  above; a generic SMS gateway should still be a trusted, operator-controlled endpoint (docs/OPS.md).
+- **Escalation respects maintenance windows and acknowledgements (NS2).** An escalation step is
+  enqueued only while the alert is **open and unacknowledged**; acknowledging or resolving the
+  alert stops every further step at once — both by not enqueuing new steps and by suppressing an
+  already-queued step at send time (so a step left `pending` by a transient provider failure is not
+  re-claimed and paged after the operator has taken the alert). A due step whose org is inside an
+  active maintenance window is enqueued `suppressed` and sent nothing, exactly like an NS1
+  open/resolve delivery — the same operational mute, with the same caveat that it is not a security
+  control. The escalation tick is idempotent (one delivery per `(alert, rule, channel, step)`), so a
+  repeated tick or a restart never re-pages.
+- **Escalation and routing references are tenant-consistent (NS2/RS2).** A rule or escalation
+  policy may reference only a channel (and a rule only a policy) that is **global or in its own
+  client** — enforced against the rule/policy's own `org_id`, not merely the caller's visibility, so
+  not even an all-orgs admin can wire an org-A rule/policy to an org-B channel and leak one client's
+  alert content to another tenant. A cross-org reference is a `400` that does not reveal whether the
+  resource exists.
+- **Org scoping (RS2).** Channels, rules, **escalation policies**, windows and the delivery log
+  follow the same two-layer tenant isolation and 404-not-403 rule as every other staff resource
+  (section 4): a scoped operator manages only their orgs' rows, a global `org_id null` row is
+  visible only to all-orgs staff, and a cross-org resource is indistinguishable from one that does
+  not exist.
 
 ## 13. Patch install (PM1)
 

@@ -216,6 +216,22 @@ func (d *NotifyDispatcher) EscalateOnce(ctx context.Context) {
 // lands the row failed. Errors are redacted of any secret or token before they
 // reach last_error or the log.
 func (d *NotifyDispatcher) deliver(ctx context.Context, del store.NotificationDelivery) {
+	// NS2: escalation must "stop entirely" once the alert is acknowledged or
+	// resolved. DueEscalations stops ENQUEUEING new steps on ack/resolve, but a
+	// step already enqueued -- e.g. one left pending by a transient provider
+	// failure -- is still claimed here, so re-check the alert at send time and
+	// suppress the step rather than page after the operator has taken the alert.
+	if superseded, serr := d.escalationSuperseded(ctx, del); serr != nil {
+		// A transient read error should not permanently wedge the delivery; log and
+		// fall through to the normal send path (which will itself fail safely if the
+		// alert is truly gone).
+		d.log.Warn("notify dispatch: escalation state", "delivery", del.ID, "err", serr)
+	} else if superseded {
+		if mErr := d.st.MarkDeliverySuppressed(ctx, del.ID); mErr != nil {
+			d.log.Error("notify dispatch: mark suppressed", "delivery", del.ID, "err", mErr)
+		}
+		return
+	}
 	detail, err := d.send(ctx, del)
 	if err == nil {
 		if mErr := d.st.MarkDeliverySent(ctx, del.ID, detail); mErr != nil {
@@ -238,6 +254,22 @@ func (d *NotifyDispatcher) deliver(ctx context.Context, del store.NotificationDe
 	}
 	d.log.Warn("notify delivery failed", "delivery", del.ID, "attempt", del.Attempts+1,
 		"terminal", terminal, "error", msg)
+}
+
+// escalationSuperseded reports whether del is an escalation-step delivery
+// (step >= 1, event opened) whose alert has since been acknowledged or resolved,
+// in which case the step must not be sent (NS2 "stop entirely"). A non-escalation
+// delivery (step 0), a test delivery or a delivery with no alert is never
+// superseded, so the NS1 open/resolve/test semantics are unchanged.
+func (d *NotifyDispatcher) escalationSuperseded(ctx context.Context, del store.NotificationDelivery) (bool, error) {
+	if del.Step < 1 || del.Event != store.EventOpened || del.AlertID == nil {
+		return false, nil
+	}
+	alert, err := d.st.GetAlert(ctx, *del.AlertID)
+	if err != nil {
+		return false, err
+	}
+	return alert.AcknowledgedAt != nil || alert.ResolvedAt != nil, nil
 }
 
 // send loads the channel, builds the render context and dispatches by kind. The
@@ -285,6 +317,17 @@ func (d *NotifyDispatcher) sendSMS(ctx context.Context, ch store.NotifyChannel, 
 	}
 	if reason := validateSMSConfigForSend(cfg); reason != "" {
 		return "", fmt.Errorf("sms channel %d invalid: %s", ch.ID, reason)
+	}
+	// Send-time SSRF re-check, mirroring sendWebhook: a channel stored out of band
+	// (not through the validating dashboard API) must still not reach an internal
+	// address. The generic provider POSTs to cfg.URL; a twilio channel may carry a
+	// url override that stdSender.SendSMS honours. A twilio channel with no override
+	// (cfg.URL == "") addresses the fixed public api.twilio.com endpoint and needs
+	// no check.
+	if d.blockPrivateWebhooks && cfg.URL != "" {
+		if detail := validateWebhookURL(cfg.URL); detail != "" {
+			return "", fmt.Errorf("sms channel %d blocked: %s", ch.ID, detail)
+		}
 	}
 	msg := SMSMessage{From: cfg.From, To: cfg.To, Text: renderSMS(nc)}
 	if err := d.sender.SendSMS(ctx, cfg, ch.Secret, msg); err != nil {

@@ -48,7 +48,7 @@ P1 = first build. P2 = next. P3 = after that.
 - RD1 (built) RustDesk hbbs/hbbr in compose, `MSP_RUSTDESK_HOST`/`KEY`, device RustDesk id registry (`devices.rustdesk_id`), `GET /api/v1/rustdesk`, `POST /devices/{id}/remote-desktop`, audit `device.remote_desktop_opened`
 - RS2 (built) Per-technician org scoping: `user_orgs` table + `users.all_orgs`, visible-org set resolved per request and pushed into the store list queries, 404-not-403 at every org/device endpoint, `all_orgs`/`org_ids` on `GET /users`, scoping on `POST /users`, `PUT /users/{id}/orgs`, audit `user.orgs_changed`
 - NS1 (built) Alert notifications: email (SMTP, STARTTLS) and webhook (Slack incoming-webhook + generic JSON with optional HMAC-SHA256 signature) channels, per-org/severity/type routing rules, one-shot maintenance windows that suppress, a retrying background dispatcher (backoff, `maxAttempts`, concurrency-safe claim) with an idempotent enqueue and a delivery log, a Send-test action, all org-scoped for staff like RS2; secrets are write-only (`secret_set`), never logged or stored in `detail_json`
-- P2 Notifications NS2: SMS (another channel `kind`, an HTTP provider) and multi-step escalation policies — reserved, not built
+- P2 Notifications NS2: SMS (Twilio or a generic JSON gateway) and multi-step escalation policies — built (migration `0013_ns2`)
 - P3 Session length / recording audit for remote desktop
 - P3 Single sign-on, mutual TLS
 
@@ -70,13 +70,14 @@ P1 = first build. P2 = next. P3 = after that.
 - NS1 (built) Notifications section (Channels, Rules, Maintenance windows) for admin/operator with a "Send test" button, a Delivery log view (time, org, device/alert, channel, event, status chip, attempts, last error) with status/org filters, write-only secret fields ("set / not set" + replace); viewer sees the read-only log
 - P3 White-label branding per client, custom dashboards
 
-## Notifications (NS1 built; NS2 reserved)
+## Notifications (NS1 + NS2 built)
 - NS1 (built) Email channel: SMTP with STARTTLS and optional PLAIN auth, plain-text message (subject `[MSP] <sev> <type> on <host> (<org>)`, body with device/org/message/time and a dashboard link when `MSP_BASE_URL` is set)
 - NS1 (built) Webhook channel: Slack incoming-webhook (`{"text":...}`) and generic JSON (`{alert_id, org, device, type, severity, message, event, at}`) with an optional `X-MSP-Signature: sha256=…` HMAC when a signing secret is set
 - NS1 (built) Routing rules: per org (or global), `min_severity`, alert-type list (empty = all), on-open / on-resolve, to one channel
 - NS1 (built) Maintenance windows: one-shot absolute start/end per org (or all), suppress deliveries while active (an operational mute, not a security control)
 - NS1 (built) Dispatcher: background goroutine, claims pending rows, retries with backoff, gives up at `maxAttempts` → `failed`, concurrency-safe lease, idempotent enqueue, injectable clock + sender for tests
-- NS2 (reserved) SMS channel kind (HTTP provider) and multi-step escalation policies — schema leaves room, not built
+- NS2 (built) SMS channel: Twilio (Messages API form + HTTP basic auth) or a generic JSON gateway (`{to,text}` + bearer token); the provider token is write-only and redacted; the body is the short one-line summary only, so no tokened URL rides out in a text
+- NS2 (built) Multi-step escalation policies: an ordered list of steps, each firing its channels `after_minutes` from the alert opening, but only while it stays open and unacknowledged (an ack or resolve stops escalation); suppressed under maintenance windows; idempotent per `(alert, rule, channel, step)`; runs in addition to the rule's own `on_open` channel; attached to a rule by `escalation_policy_id`; the delivery log shows the step number
 
 ## Monitoring beyond agents
 - P2 Website and TCP uptime checks

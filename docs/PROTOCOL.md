@@ -928,13 +928,15 @@ A scoped user who is later **promoted to admin** becomes all-orgs at once (the v
 keys off role); **demoting an admin** to operator keeps `all_orgs:true` until an admin scopes them
 through `PUT …/orgs`.
 
-### Notifications (NS1)
+### Notifications (NS1 + NS2)
 
-Alert notifications: email (SMTP) and webhook (Slack-compatible + generic JSON), routed per
-client and severity, suppressed during maintenance windows, with a retrying dispatcher and a
-delivery log. All four resources are **org-scoped for staff visibility exactly like RS2**: a
-scoped operator/viewer sees and manages only channels/rules/windows/deliveries whose `org_id`
-is in their visible set; a global `org_id null` row is visible only to all-orgs users; a
+Alert notifications: email (SMTP), webhook (Slack-compatible + generic JSON) and **SMS**
+(Twilio or a generic JSON gateway), routed per client and severity, suppressed during
+maintenance windows, with a retrying dispatcher and a delivery log. NS2 adds the `sms` channel
+kind and **multi-step escalation policies** (`/api/v1/notify/policies`), both org-scoped exactly
+like the NS1 resources. Every resource is **org-scoped for staff visibility exactly like RS2**: a
+scoped operator/viewer sees and manages only channels/rules/policies/windows/deliveries whose
+`org_id` is in their visible set; a global `org_id null` row is visible only to all-orgs users; a
 cross-org single resource is `404 not_found`, resolved before any side effect (docs/SECURITY.md
 section 4). GETs require `viewer`; writes require `operator`; a global (`org_id null`) row may be
 created only by an all-orgs caller (`403 forbidden` otherwise). CSRF header on every write.
@@ -947,12 +949,21 @@ sending a value replaces it.
 - `GET /api/v1/notify/channels` -> `{"channels":[CHANNEL...]}` (org-scoped).
 
 ```
-CHANNEL = {"id":3,"kind":"email"|"webhook","name":"Ops email","org_id":1|null,
+CHANNEL = {"id":3,"kind":"email"|"webhook"|"sms","name":"Ops email","org_id":1|null,
            "config":{...},"secret_set":true,"enabled":true,"created_at":"...","created_by":1}
 ```
 
 `config` for email: `{"host","port","from","to":[...],"starttls":bool,"username"}`; for webhook:
-`{"url","flavor":"slack"|"generic"}`.
+`{"url","flavor":"slack"|"generic"}`; for **sms** (NS2):
+`{"provider":"twilio"|"generic","from":"+1555...","to":["+1555..."],"account_sid":"AC...","url":"https://..."}`.
+The channel `secret` is the provider auth token (write-only, as for the other kinds). `twilio`
+POSTs the Messages API form (From/To/Body) with HTTP basic auth (`account_sid` : token); `url` is
+an optional self-hosted/test override (the dashboard drops it, addressing the account by
+`account_sid`). `generic` POSTs `{to,text}` JSON to `url` with the token as a `Bearer` header
+(`account_sid` is dropped). The SMS body is a short one-line summary
+(`"[MSP] <severity> <type> on <hostname> (<org>)"`, trimmed to ~300 chars, any URL reduced to
+`scheme://host`); a tokened link can never ride out in a text. Validation: provider in the enum,
+a `from` and at least one `to` E.164-ish number, `account_sid` for twilio, `url` for generic.
 - `POST /api/v1/notify/channels {"kind","name","org_id":1|null,"config":{...},"secret":"...","enabled":true}`
   (admin, or operator for an org they can see) -> `201 {"channel":CHANNEL}`. Validates the
   kind-specific config (`400 invalid_request` with a detail). Audit `notify.channel_created`.
@@ -968,16 +979,40 @@ CHANNEL = {"id":3,"kind":"email"|"webhook","name":"Ops email","org_id":1|null,
 ```
 RULE = {"id":5,"name":"High to Slack","org_id":1|null,"min_severity":"low"|"medium"|"high",
         "alert_types":["offline","disk_full"],"on_open":true,"on_resolve":false,
-        "channel_id":3,"enabled":true,"created_at":"...","created_by":1}
+        "channel_id":3,"escalation_policy_id":7|null,"enabled":true,"created_at":"...","created_by":1}
 ```
 
 `alert_types` empty = all types. A rule fires when org matches (rule `org_id` null or == the
 alert's org), `alert severity >= min_severity`, the type is listed (or the list is empty), and
-the event matches (`on_open` for opened, `on_resolve` for resolved).
+the event matches (`on_open` for opened, `on_resolve` for resolved). `escalation_policy_id` (NS2,
+optional) attaches a policy that drives timed steps **in addition to** the rule's own `on_open`
+channel: the immediate `on_open` channel still fires at open; the policy adds the later steps.
 - `POST /api/v1/notify/rules`, `PUT /api/v1/notify/rules/{id}` (`org_id` immutable on update),
-  `DELETE /api/v1/notify/rules/{id}` (same auth + org scope). `channel_id` must reference a
-  channel the caller can see (`400 invalid_request` otherwise, not revealing another org's
-  channel). Audit `notify.rule_created`/`updated`/`deleted`.
+  `DELETE /api/v1/notify/rules/{id}` (same auth + org scope). `channel_id` and (when set)
+  `escalation_policy_id` must reference a channel/policy the caller can see (`400 invalid_request`
+  otherwise, not revealing another org's resource). Audit `notify.rule_created`/`updated`/`deleted`.
+
+#### Escalation policies (NS2)
+
+A policy is an ordered list of steps; each step fires its channels `after_minutes` from the
+alert opening, but only while the alert is still **open and unacknowledged**. Acknowledging or
+resolving the alert stops escalation at once; a resolve still honours `on_resolve` rules.
+- `GET /api/v1/notify/policies` -> `{"policies":[POLICY...]}` (org-scoped).
+
+```
+POLICY = {"id":7,"name":"Critical escalation","org_id":1|null,
+          "steps":[{"after_minutes":0,"channel_ids":[21]},{"after_minutes":15,"channel_ids":[22]}],
+          "created_at":"...","created_by":1}
+```
+
+- `POST /api/v1/notify/policies {"name","org_id":1|null,"steps":[{"after_minutes","channel_ids":[...]}]}`
+  -> `201 {"policy":POLICY}`. At least one step, at most 10; `after_minutes` 0..40320 (4 weeks) and
+  non-decreasing across steps; each step needs >=1 visible channel (`400 invalid_request`
+  otherwise). Audit `notify.policy_created`.
+- `PUT /api/v1/notify/policies/{id}` (`org_id` immutable; replaces name + full step list) ->
+  `200 {"policy":POLICY}`. `404 not_found` across orgs. Audit `notify.policy_updated`.
+- `DELETE /api/v1/notify/policies/{id}` -> `204` (steps cascade; any rule pointing at it is
+  detached, `escalation_policy_id` set null). Audit `notify.policy_deleted`.
 - `GET /api/v1/notify/windows` -> `{"windows":[WINDOW...]}`.
 
 ```
@@ -995,15 +1030,21 @@ One-shot absolute times; `active_now` is computed server-side (`starts_at <= now
 ```
 DELIVERY = {"id":9,"alert_id":9|null,"rule_id":5|null,"channel_id":3|null,"org_id":1|null,
             "event":"opened"|"resolved"|"test","status":"pending"|"sent"|"failed"|"suppressed",
-            "attempts":0,"last_error":"","detail":{...redacted...},"created_at":"...","updated_at":"..."}
+            "attempts":0,"last_error":"","detail":{...redacted...},"step":2|null,
+            "created_at":"...","updated_at":"..."}
 ```
 
-One row per `(alert_id, rule_id, event)` (a UNIQUE index makes enqueue idempotent so the
-dispatcher never double-sends; a `test` row has `alert_id` null and is always its own row). An
-alert newly opened (`OpenAlert` returned created) or resolved enqueues one `pending` row per
-matching rule, or `suppressed` when the alert's org is inside an active maintenance window at
-enqueue time. The dispatcher retries with backoff and lands `failed` after `maxAttempts`.
-`detail` and `last_error` are redacted of any secret or tokened URL (docs/SECURITY.md).
+One row per `(alert_id, rule_id, channel_id, event, step)` (a UNIQUE index makes enqueue
+idempotent so the dispatcher, or the escalation tick, never double-sends; a `test` row has
+`alert_id` null and is always its own row). `step` (NS2) is the 1-based escalation step number for
+an escalation delivery and `null` for an ordinary open/resolve/test delivery (stored as `0`); for
+an NS1 row `channel_id` is the rule's single channel and the key reduces to the old
+`(alert, rule, event)` guarantee. An alert newly opened (`OpenAlert` returned created) or resolved
+enqueues one `pending` row per matching rule; the escalation tick enqueues one row per channel per
+due step of a matched policy-bearing rule while the alert is open+unacked; each is `suppressed`
+when the alert's org is inside an active maintenance window at enqueue time. The dispatcher retries
+with backoff and lands `failed` after `maxAttempts`. `detail` and `last_error` are redacted of any
+secret or tokened URL (docs/SECURITY.md).
 
 ### Other paths and headers
 

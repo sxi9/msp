@@ -845,6 +845,24 @@ func (s *Store) MarkDeliverySent(ctx context.Context, id int64, detailJSON strin
 	return s.oneRow(res, "mark delivery sent")
 }
 
+// MarkDeliverySuppressed cancels a still-pending delivery without sending it:
+// status suppressed, last_error cleared. The dispatcher uses it for an escalation
+// step whose alert was acknowledged or resolved after the step had been enqueued
+// (NS2: escalation "stops entirely" on ack/resolve, including a step left pending
+// by a transient send failure that a later tick would otherwise re-claim and
+// send). Only a row still pending is updated. ErrNotFound when no pending row with
+// that id exists.
+func (s *Store) MarkDeliverySuppressed(ctx context.Context, id int64) error {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE notification_deliveries SET status = 'suppressed', last_error = '', updated_at = ?
+		  WHERE id = ? AND status = 'pending'`,
+		fmtTime(s.Now()), id)
+	if err != nil {
+		return fmt.Errorf("store: mark delivery suppressed: %w", err)
+	}
+	return s.oneRow(res, "mark delivery suppressed")
+}
+
 // MarkDeliveryFailed records a failed send attempt: attempts += 1 and last_error
 // set. terminal true leaves the row failed (the dispatcher gave up at
 // maxAttempts); terminal false leaves it pending so a later tick retries it
