@@ -620,3 +620,32 @@ start); `MSP_MAX_FILE_MB` (default 200) caps each upload, over it the upload is 
   downloads only its own client's or a global file, destination paths are validated and the hash is
   re-checked on the device. Every upload, delete and deploy is audited (`file.uploaded`,
   `file.deleted`, `deploy.requested`).
+
+## 14. Scripts, bulk actions and automations (AUT1)
+
+A DB-backed script library, a bulk run that fans a script across many devices as one tracked job, and
+automations that produce jobs on a schedule or when an alert opens. All reuse the existing command
+queue (so there is nothing new to install on an endpoint and no new egress — the resulting commands
+ride the agent's normal sync), the RS2 org scoping and the audit trail.
+
+- **The scheduler tick.** A job in the server jobs loop runs every 30 s alongside the alert
+  evaluator and the pruner. Each tick it finds the enabled schedule automations whose `next_run_at`
+  has passed, fans each one's script out across its target's visible devices under a job (origin
+  `schedule`), and advances `next_run_at = now + every_minutes`. The next time is computed **from
+  now**, so a server that was down for several intervals runs each automation **once** on restart —
+  missed ticks do not stack. The tick uses the server clock, so it is driven deterministically by the
+  fake clock in tests.
+- **Triggered automations and the cooldown.** An alert automation fires from the same alert-open hook
+  the notifications use (a newly opened alert), running its script on the **alerting device** under a
+  job (origin `trigger`). A per-automation-per-device cooldown (10 min) stops a flapping alert from
+  re-running the same automation on the same device; the gate reads the time of that automation's last
+  command on the device, so a restart does not reset it.
+- **Jobs reuse the command queue.** A job is just a group of ordinary queued commands tagged with a
+  `job_id`; progress is derived by counting them by status (queued/sent/done/failed). Offline devices
+  are queued like any command and run when they next sync; android is skipped for exec/script with a
+  per-device note. There is no job-runner process to watch — the agents do the work on their normal
+  long-poll.
+- **Scope and audit.** Script/job/automation CRUD and run-on-many are role-gated (operator or admin,
+  never viewer) and tenant-scoped (docs/SECURITY.md §17): a technician sees and targets only their
+  clients. Every bulk run and automation run is audited (`job.created`, `automation.ran`,
+  `automation.triggered` — the two run actions as actor `system`), as is each resulting command.

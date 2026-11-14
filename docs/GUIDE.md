@@ -456,6 +456,37 @@ command history. The button is greyed when the device already runs the released 
 updates on its own; a forced **Update agent** still applies. Use this to stage a release on a few
 pilot machines before letting the whole fleet take it.
 
+## 11a. Scripts and automations (AUT1)
+
+Turn one-off commands into a reusable **script library**, run a script across many devices at once as
+a tracked **job**, and have the server run scripts on a schedule or when an alert fires
+(**automations**). Everything is per-client: a scoped technician only sees and targets their own
+clients' scripts, jobs and automations.
+
+**Save a script.** On the **Scripts** page (admin or operator), **New script**: give it a name, pick a
+platform (Linux, Windows or Any), a kind — **exec** (a command and its arguments, run directly, never
+through a shell) or **script** (an interpreter plus a body) — a timeout, and a client (or leave it
+global for an all-clients login). This library is separate from the fixed console presets; scripts are
+editable and stored in the database.
+
+**Run on many.** From the Scripts page (or a script row), **Run on devices**: pick a target — a filter
+(client / status / platform / hostname contains) or specific checked devices — and launch. The server
+creates a job and one command per matching device, skipping android for exec/script with a note. The
+**job progress** view shows *n done / n total* with each device's status (queued, sent, done, failed);
+it reuses the normal command queue, so offline devices run their command when they next sync.
+
+**Schedule it.** On the **Automations** page, **New automation** with trigger **Schedule**: choose a
+script, a target and an interval (every N minutes). The server runs it on that cadence; the page shows
+the last run and the next run. If the server was down over several intervals it runs once on restart
+rather than firing a backlog.
+
+**Trigger on an alert.** Choose trigger **Alert**: pick a script, an alert type and a minimum severity.
+When a matching alert opens on a device, the script runs on that device. A short per-device cooldown
+(10 minutes) stops a flapping alert from running it over and over.
+
+Enable/disable an automation from its row; every bulk run and automation run is written to the audit
+log, and each resulting command appears in the device's command history as usual.
+
 ## 12. Alerts
 
 Alerts are evaluated by the server on every sync and by a sweeper every 15 s. No separate

@@ -215,7 +215,17 @@ func (s *Server) handleGetJob(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal", "")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"job": jobView{Job: job, Progress: p}})
+	// The detail body is {job, progress, devices} at the top level (TS JobDetail),
+	// with one device row per command the job queued (AUT1 spec: the job plus its
+	// per-device command status and the device rows). progress is top-level here,
+	// not nested in the job as the list's jobView carries it.
+	devices, err := s.st.JobDevices(ctx, job.ID)
+	if err != nil {
+		s.log.Error("job devices", "job", job.ID, "err", err)
+		writeError(w, http.StatusInternalServerError, "internal", "")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"job": job, "progress": p, "devices": devices})
 }
 
 // wakeJobDevices wakes the parked sync of every device that got a command so the

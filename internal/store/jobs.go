@@ -212,6 +212,58 @@ type JobCommand struct {
 	Note      string `json:"note,omitempty"`
 }
 
+// JobDeviceRow is one device's slot in a job's detail view: the device, its org
+// label, and the command this job queued on it with its current status. Unlike
+// JobCommand (the POST /jobs fan-out breakdown, which also reports platform/android
+// skips), these are reconstructed from the commands table at read time, so only
+// devices that actually got a command appear (a skip queues no command and is not
+// persisted). CommandID/Status are therefore always set here; the TS JobDeviceRow
+// keeps them nullable to share one type with the POST breakdown.
+type JobDeviceRow struct {
+	DeviceID  int64  `json:"device_id"`
+	Hostname  string `json:"hostname"`
+	OrgID     int64  `json:"org_id"`
+	OrgName   string `json:"org_name"`
+	CommandID *int64 `json:"command_id"`
+	Status    string `json:"status"`
+	Skipped   bool   `json:"skipped"`
+	Note      string `json:"note"`
+}
+
+// JobDevices returns a job's per-device command rows (one per command it queued),
+// joined to the device and its org for the RS2 label, ordered by hostname then
+// command id. A job with no commands returns an empty slice (the caller has already
+// checked the job exists and is visible).
+func (s *Store) JobDevices(ctx context.Context, jobID int64) ([]JobDeviceRow, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT d.id, d.hostname, d.org_id, o.name, c.id, c.status
+		   FROM commands c
+		   JOIN devices d ON d.id = c.device_id
+		   JOIN orgs o ON o.id = d.org_id
+		  WHERE c.job_id = ?
+		  ORDER BY d.hostname, c.id`, jobID)
+	if err != nil {
+		return nil, fmt.Errorf("store: job devices: %w", err)
+	}
+	defer rows.Close()
+	out := []JobDeviceRow{}
+	for rows.Next() {
+		var (
+			r   JobDeviceRow
+			cid int64
+		)
+		if err := rows.Scan(&r.DeviceID, &r.Hostname, &r.OrgID, &r.OrgName, &cid, &r.Status); err != nil {
+			return nil, fmt.Errorf("store: job devices: %w", err)
+		}
+		r.CommandID = &cid
+		out = append(out, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: job devices: %w", err)
+	}
+	return out, nil
+}
+
 // CreateCommandsForDevices fans a script out across devices under one job,
 // reusing CreateCommand with the job_id so JobProgress can count the result. A
 // device whose platform does not support the script's kind (android for

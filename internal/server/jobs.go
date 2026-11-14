@@ -9,22 +9,29 @@ import (
 const (
 	evaluateEvery = 15 * time.Second
 	pruneEvery    = time.Hour
+	scheduleEvery = 30 * time.Second
 )
 
 // runJobs drives the periodic work until ctx is done: the alert evaluator and
-// lost-command sweeper every 15 s, the heartbeat and session pruner hourly.
-// Each pass is isolated by recover so one bad pass never stops the loop.
+// lost-command sweeper every 15 s, the scheduled-automation tick every 30 s, the
+// heartbeat and session pruner hourly. Each pass is isolated by recover so one bad
+// pass never stops the loop. RunScheduledOnce uses s.now() and is per-automation
+// isolated, so the fake-clock e2e test drives it directly instead of on this ticker.
 func (s *Server) runJobs(ctx context.Context) {
 	evaluate := time.NewTicker(evaluateEvery)
 	defer evaluate.Stop()
 	prune := time.NewTicker(pruneEvery)
 	defer prune.Stop()
+	schedule := time.NewTicker(scheduleEvery)
+	defer schedule.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-evaluate.C:
 			s.safely("evaluate", func() { s.evaluateOnce(ctx) })
+		case <-schedule.C:
+			s.safely("automations", func() { s.RunScheduledOnce(ctx) })
 		case <-prune.C:
 			s.safely("prune", func() { s.pruneOnce(ctx) })
 		}

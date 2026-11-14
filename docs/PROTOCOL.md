@@ -901,6 +901,101 @@ writes `agents.json` with the real digests alongside the binaries and `SHA256SUM
   `403 forbidden` for viewer. The update log (old→new, outcome, any rollback) comes back on the
   command result.
 
+### Script library, bulk jobs and automations (AUT1)
+
+A DB-backed, editable **script library** (distinct from the static `presets.json` console presets),
+a **bulk run** that fans a script out across many devices as one tracked **job**, and **automations**
+that produce jobs on a schedule or when an alert opens. Everything reuses the existing command queue
+(the agent runs the resulting commands unchanged — the agent wire COMMAND is unchanged, only the
+dashboard COMMAND JSON gains `job_id`), RS2 org-scoping and audit. A command created by a job carries
+`job_id` (`omitempty`) in the dashboard COMMAND.
+
+```
+SCRIPT = {"id":5,"org_id":1,"name":"restart-nginx","description":"","platform":"linux",
+          "kind":"exec","argv":["systemctl","restart","nginx"],"shell":"","body":"",
+          "timeout_s":300,"created_at":"...","created_by":1}
+```
+
+`org_id` is `null` for a global script usable by any client (visible to all-orgs users only, exactly
+like a global file/channel). `platform` is `linux`, `windows` or `any`; `kind` is `exec` (an `argv`)
+or `script` (a `shell` + `body`). exec/script are desktop kinds, so a fan-out skips android.
+
+- `GET /api/v1/scripts` (viewer) -> `{"scripts":[SCRIPT...]}` newest first, org-scoped (RS2).
+- `POST /api/v1/scripts` (admin|operator; CSRF) body `{name,description,platform,kind,argv|shell+body,
+  timeout_s,org_id?}` -> `201 {"script":SCRIPT}`. A global script (`org_id` omitted) requires all-orgs.
+  Audit `script.created`.
+- `GET /api/v1/scripts/{id}` (viewer) -> `{"script":SCRIPT}`; `404 not_found` across orgs (RS2).
+- `PUT /api/v1/scripts/{id}` (admin|operator) -> `{"script":SCRIPT}`; `org_id` is immutable. Audit
+  `script.updated`.
+- `DELETE /api/v1/scripts/{id}` (admin|operator) -> `204`; a job that used it keeps its rows
+  (`script_id ON DELETE SET NULL`); an automation that referenced it is removed
+  (`script_id ON DELETE CASCADE`). Audit `script.deleted`.
+
+A **job** groups the per-device commands created in one fan-out; its progress is derived by counting
+those commands by status (the four buckets sum to `total`).
+
+```
+JOB      = {"id":7,"org_id":1,"name":"restart-nginx","origin":"manual","script_id":5,
+            "created_by":1,"automation_id":null,"created_at":"...","total":2,
+            "progress":{"job_id":7,"total":2,"queued":0,"sent":0,"done":2,"failed":0}}
+PROGRESS = {"job_id":7,"total":2,"queued":0,"sent":0,"done":2,"failed":0}
+```
+
+`origin` is `manual` (a bulk run), `schedule` or `trigger` (an automation). `progress.failed` folds
+in every terminal non-success status (failed/timeout/lost/cancelled) so the four columns sum to
+`total`. A job's `org_id` is `null` when it spans several visible orgs (a global script run across
+them); a scoped user then does not see it.
+
+- `POST /api/v1/jobs` (admin|operator; CSRF) body
+  `{"script_id":5 | "command":{platform,kind,argv|shell+body,timeout_s}, "target":{org_id?,status?,
+  platform?,hostname_q?,device_ids?}, "name"?}` -> `201 {"job_id":7,"total":2,"devices":[JC...]}`.
+  Resolves the caller's **visible** devices matching the target (RS2: a device outside the caller's
+  org set, or a target `org_id`/`device_ids` outside the script's client, is `404 not_found` before
+  any side effect), creates a job and one command per device. A device whose platform cannot run the
+  script (android for exec/script, or a platform-specific script on another platform) is **skipped**
+  with a per-device note and no command; `total` counts only the commands actually created. Audit
+  `job.created` (origin, name, total, skipped, script_id/kind). `JC` is a per-device fan-out row:
+  `{"device_id":42,"hostname":"ws-01","org_id":1,"command_id":9,"skipped":false,"note":""}`
+  (`command_id` omitted on a skip; `note` carries the reason).
+- `GET /api/v1/jobs?org_id=` (viewer) -> `{"jobs":[JOB...]}` newest first, org-scoped (RS2).
+- `GET /api/v1/jobs/{id}` (viewer) -> `{"job":JOB}` (with `progress`); `404 not_found` across orgs.
+
+An **automation** is a saved rule that produces jobs: `trigger:"schedule"` (run by the server
+scheduler) or `trigger:"alert"` (run from the alert-open hook on the alerting device).
+
+```
+AUTOMATION = {"id":3,"org_id":1,"name":"nightly-reboot-check","enabled":true,"trigger":"schedule",
+              "script_id":5,"target_json":"{...}","schedule_json":"{\"every_minutes\":1440}",
+              "alert_json":"","last_run_at":null,"next_run_at":"...","created_at":"...","created_by":1}
+```
+
+- `GET /api/v1/automations` (viewer) -> `{"automations":[AUTOMATION...]}` org-scoped (RS2).
+- `POST /api/v1/automations` (admin|operator; CSRF) body `{name,trigger,script_id,org_id?,
+  target:{...}, schedule:{every_minutes} | alert:{alert_type?,min_severity?}, enabled?}` ->
+  `201 {"automation":AUTOMATION}`. A schedule automation needs `schedule.every_minutes >= 1` and no
+  alert matcher; an alert automation needs no schedule. A global automation requires all-orgs; the
+  script and target must stay inside the automation's client (else `404`/`400`). The first
+  `next_run_at` is seeded to `now + every_minutes` for an enabled schedule. Audit `automation.created`.
+- `PUT /api/v1/automations/{id}` (admin|operator) -> `{"automation":AUTOMATION}`; `org_id` immutable.
+  Audit `automation.updated`.
+- `POST /api/v1/automations/{id}/enable` (admin|operator) body `{"enabled":true|false}` ->
+  `{"automation":AUTOMATION}`; re-seeds `next_run_at` on enable, clears it on disable (keeps
+  `last_run_at`). Audit `automation.enabled` / `automation.disabled`.
+- `DELETE /api/v1/automations/{id}` (admin|operator) -> `204`; a job it produced survives
+  (`automation_id` is a plain column, no FK). Audit `automation.deleted`.
+
+The **scheduler** is a job in the server jobs loop (every 30 s, fake-clock-injectable via `now()`):
+each tick it runs every enabled schedule automation whose `next_run_at <= now`, resolving the target
+to the automation's org-scoped visible devices, fanning the script out under a job (origin schedule),
+and advancing `next_run_at = now + every_minutes` (computed from `now`, so **missed ticks do not
+stack**). Audit `automation.ran` (actor `system`). A **triggered** automation fires from the
+alert-open hook (the same `OpenAlert`-returned-true path notifications use): on a newly opened alert,
+each enabled alert automation matching the alert's org, `alert_type` and `min_severity` runs its
+script on the **alerting device** under a job (origin trigger), subject to a per-automation-per-device
+**cooldown** (10 min) so a flapping alert cannot hammer a device. Audit `automation.triggered` (actor
+`system`). Both run actions attribute the resulting commands to the automation's owner
+(`automations.created_by`; `commands.created_by` is NOT NULL).
+
 ### Alerts, audit, users
 
 - `GET /api/v1/alerts?state=open|all&org_id=` -> `{"alerts":[{"id":9,"org_id":1,"org_name":"...","device_id":42,"hostname":"ws-01","type":"offline","severity":"high","message":"no sync for 6m","opened_at":"...","resolved_at":null,"acknowledged_by":null,"acknowledged_at":null}]}` (default open; limit 500). Filtered to the caller's visible orgs **(RS2)**; an explicit `?org_id=` outside the visible set is `404 not_found`.
@@ -1067,7 +1162,10 @@ secret or tokened URL (docs/SECURITY.md).
 `device.lock_requested` **(A1)**, `device.remote_desktop_opened` **(RD1)**,
 `shell.opened`, `shell.connected`, `shell.closed` **(RS1)**,
 `patch.scan_requested`, `patch.install_requested` **(PM1)**,
-`file.uploaded`, `file.deleted`, `deploy.requested` **(SD1)**, `agent.update_requested` **(AU1)**, `command.queued`,
+`file.uploaded`, `file.deleted`, `deploy.requested` **(SD1)**, `agent.update_requested` **(AU1)**,
+`script.created`, `script.updated`, `script.deleted`, `job.created`, `automation.created`,
+`automation.updated`, `automation.enabled`, `automation.disabled`, `automation.deleted`,
+`automation.ran`, `automation.triggered` **(AUT1**; the two run actions are actor `system`**)**, `command.queued`,
 `command.finished`, `command.lost`, `alert.ack`,
 `notify.channel_created`, `notify.channel_updated`, `notify.channel_deleted`,
 `notify.channel_tested`, `notify.rule_created`, `notify.rule_updated`, `notify.rule_deleted`,

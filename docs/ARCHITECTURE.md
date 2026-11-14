@@ -557,3 +557,41 @@ for lockouts. No new dependency: the TOTP primitive is pure Go stdlib (`crypto/h
   flow (enrol, two-step login, wrong/stale/replayed codes, recovery single-use, disable, admin reset,
   rate limiting, RFC vectors, non-2FA login unchanged); everything is deterministic (codes computed
   in-test), no authenticator app or external call.
+
+## Script library, bulk jobs and automations (AUT1, phase 2)
+
+Reusable, scalable operations built entirely on the existing primitives — no new command kind, no
+agent change, no new process. Migration `0014_automations` adds four pieces, all additive:
+
+- `scripts` — the DB-backed, editable command library (distinct from the static `presets.json`
+  console presets): `org_id` NULL = a global script, kind `exec` (argv) or `script` (shell + body),
+  `platform` gating (`linux`/`windows`/`any`). `internal/store/scripts.go` is the CRUD;
+  `internal/server/dashboard_scripts.go` the `/api/v1/scripts` endpoints.
+- `jobs` — one fan-out of a script across a device set. A job stores only `origin`
+  (`manual`/`schedule`/`trigger`), `script_id`, `automation_id` and `total`; progress is **derived**
+  at read time by counting the job's commands by status (`JobProgress`). `internal/store/jobs.go`;
+  `CreateCommandsForDevices` reuses `CreateCommand` with a `job_id`, skipping a device whose platform
+  cannot run the script.
+- `commands.job_id` — a plain `ADD COLUMN` (no CHECK change) tagging each command a fan-out creates.
+  The agent wire COMMAND is unchanged; only the dashboard COMMAND JSON gains `job_id` (omitempty).
+- `automations` — a saved rule that produces jobs: `trigger schedule` (`schedule_json`
+  `{every_minutes}`) or `trigger alert` (`alert_json` `{alert_type?, min_severity?}`), with a
+  `target_json` device filter resolved at run time. `internal/store/automations.go`;
+  `internal/server/dashboard_automations.go` the CRUD; `internal/server/automations_run.go` the
+  execution.
+
+Two execution entry points, wired into the existing loops rather than a new one:
+
+- `RunScheduledOnce` is a tick in the server jobs loop (`internal/server/jobs.go`, every 30 s,
+  beside the evaluator/pruner), using `s.now()` so the fake clock drives it. It runs each due
+  schedule automation, resolving the target against the automation's org scope, and advances
+  `next_run_at` from `now` (missed ticks never stack).
+- `TriggerAutomationsForAlert` is called from the alert-open hook (`internal/server/alerts.go`
+  `s.open`, the same `OpenAlert`-returned-true path that enqueues notifications): it runs each
+  matching alert automation on the alerting device, gated by a per-automation-per-device cooldown.
+
+Target resolution funnels through one helper (`resolveTargetDevices`) and one RS2 gate
+(`validateTargetForCaller`) shared by the bulk-run endpoint and both automation paths, so a target can
+never reach a device outside the caller's / automation's visible org set. Everything is org-scoped like
+RS2 and audited (`script.*`, `job.created`, `automation.*`). Proven end to end by
+`internal/e2e/automations_test.go` (fake clock + the real Linux agent).

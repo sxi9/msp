@@ -499,7 +499,32 @@ swap a file.
   `MSP_AGENT_DIR` kept writable only by the MSP, since whoever can write `agents.json` chooses what
   every desktop runs.
 
-## 17. Reporting a vulnerability
+## 17. Script library, bulk jobs and automations (AUT1)
+
+- **Same execution model.** A script runs as an ordinary queued command, so every command guarantee
+  holds unchanged: argv is executed directly, never through a shell (section 6); a script body runs
+  under an explicit interpreter; paths are traversal-checked; the agent wire COMMAND is unchanged (a
+  job only tags its commands with a `job_id` in the dashboard view).
+- **Org-scoped targets (RS2).** Scripts, jobs and automations are org-scoped exactly like RS2: a
+  scoped operator/viewer sees only rows whose `org_id` is in their visible set, a global
+  (`org_id` NULL) script/automation is visible only to all-orgs users, and a cross-org single row is
+  `404 not_found`. A bulk or automation target can **never** reach a device outside the caller's (for
+  a bulk run) or the automation's visible org set: a target `org_id` or `device_id` outside scope is
+  rejected `404`/`400` **before any command is queued**, and the fan-out resolver drops any
+  out-of-scope device. A global script/automation requires all-orgs to create.
+- **Roles.** Viewer is read-only over all of it; create/update/delete/run-on-many require operator or
+  admin, with the CSRF header on every write.
+- **Cooldown against flapping.** A triggered automation re-runs on the same device only after a
+  per-automation-per-device cooldown (10 min), so an alert that flaps open/closed cannot hammer a
+  device with repeated commands.
+- **Attribution.** Every bulk run (`job.created`) and automation run (`automation.ran`,
+  `automation.triggered`, the latter two as actor `system`) is audited, and each resulting command is
+  audited as usual. A scheduled/triggered command is attributed to the automation's owner
+  (`automations.created_by`), so a run always traces back to an accountable user.
+- **Android.** exec/script are desktop kinds, so a fan-out skips android with a per-device note
+  rather than queueing a command the device cannot run.
+
+## 18. Reporting a vulnerability
 
 Report privately to the maintainers of this repository (open a security advisory on the
 repository, or e-mail the address listed in its README once published). Please include the

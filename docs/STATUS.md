@@ -179,7 +179,7 @@ Manual test for the `NOT VERIFIED` rows, in order: (1) on a host with Docker, fi
 | Installed-software inventory on desktops | 2 | `WORKING` (SI1 table above; Linux) / `NOT VERIFIED` (Windows registry) |
 | Alert notifications: email + Slack/webhook, routing, maintenance windows, delivery log | 2 | `WORKING` (NS1 table above) / `NOT VERIFIED` (a real external send) |
 | Notifications: SMS and escalation policies | 2 | `WORKING` (NS2) |
-| Script library, automations, policy groups, bulk actions | 2 | `PLANNED` |
+| Script library, bulk actions, scheduled and triggered automations (AUT1) | 2 | `WORKING` (Linux; proven by `internal/e2e/automations_test.go` with a fake clock + the real Linux agent, the `internal/server` automations tests, and `scripts/e2e.sh`) |
 | Reports and exports | 2 | `PLANNED` |
 | Two-factor authentication (TOTP + recovery codes + admin reset) | 2 | `WORKING` (TF1; proven by `internal/server/auth_totp_test.go` and `internal/e2e/twofactor_test.go`; live-browser run with a second user's 2FA enrolled over the API (setup → confirm with a computed TOTP code → 10 recovery codes once, `me` reports `totp_enabled`/`recovery_codes_remaining`, fresh login `totp_required` with no session until `/login/totp`): the Account two-factor setup (QR + manual secret) in `docs/screenshots/30-account-2fa-setup-{desktop,phone}.png` and the login second-factor prompt in `31-login-2fa-prompt-{desktop,phone}.png`, phone `scrollWidth` 400) |
 | Device token rotation, Postgres, API keys | 2 | `PLANNED` |

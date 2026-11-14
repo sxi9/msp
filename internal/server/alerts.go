@@ -144,6 +144,9 @@ func (s *Server) open(ctx context.Context, pass *evalPass, d store.Device, typ, 
 		// created flag).
 		if alert, err := s.st.GetOpenAlert(ctx, d.ID, typ); err == nil {
 			s.EnqueueAlertNotifications(ctx, alert, store.EventOpened)
+			// AUT1: run any alert-trigger automations that match this newly opened
+			// alert on the alerting device (cooldown-gated inside the hook).
+			s.TriggerAutomationsForAlert(ctx, alert)
 		} else {
 			s.log.Error("notify enqueue: load opened alert", "device", d.ID, "type", typ, "err", err)
 		}

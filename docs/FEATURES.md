@@ -62,7 +62,7 @@ P1 = first build. P2 = next. P3 = after that.
 - P1 Alerts page: acknowledge, resolve
 - P1 Audit log view
 - RS1 (built) Browser terminal for remote shell (`@xterm/xterm`, resize, status line, Transcript link on finished shell commands)
-- P2 Script library, scheduled automations, policy groups
+- AUT1 (built) Script library (CRUD, per-client or global, exec/script), "Run on devices" bulk action with a target picker and a job-progress view (n done / n total, per-device status), and an Automations page (schedule: every N minutes; or alert: type + min severity) with enable/disable and last-run/next-run; all org-scoped (RS2) and audited
 - P2 Reports: uptime, disk trends, patch compliance, exports
 - P2 Client portal with limited self-service view
 - RD1 (built) Remote desktop card on the device page: id, Copy, Connect button (opens `rustdesk://connect/<id>`), not-configured / not-reported states
