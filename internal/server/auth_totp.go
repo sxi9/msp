@@ -172,8 +172,16 @@ func generateRecoveryCodes() (codes []string, hashes []string) {
 // that, against the user's unused recovery codes (consuming one). It reports
 // success and whether a recovery code was used.
 func (s *Server) verifySecondFactor(ctx context.Context, userID int64, secret, code string) (ok bool, usedRecovery bool, err error) {
-	if totpVerify(secret, code, s.now()) {
-		return true, false, nil
+	if step, valid := totpVerifyStep(secret, code, s.now()); valid {
+		// RFC 6238 Section 5.2: a validated TOTP code is accepted at most once.
+		// Burn the matched step atomically; a replay of the same (or any older
+		// in-window) code fails here even when presented with a fresh pending
+		// token, so a captured still-valid code cannot mint a second session.
+		consumed, cerr := s.st.ConsumeTOTPStep(ctx, userID, step)
+		if cerr != nil {
+			return false, false, cerr
+		}
+		return consumed, false, nil
 	}
 	consumed, err := s.st.ConsumeRecoveryCode(ctx, userID, store.HashToken(canonicalRecoveryCode(code)))
 	if err != nil {
@@ -457,6 +465,14 @@ func (s *Server) handleTOTPReset(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx := r.Context()
+	// RS2 (TF1 spec line 47): the target must be visible before any side effect.
+	// This route is gated to RoleAdmin (dashRoute(RoleAdmin, ...)) and an admin is
+	// always all-orgs, so every user is visible to the caller and the uniform
+	// visible-org check is a no-op here — the admin-all-orgs invariant is what
+	// keeps it safe, exactly as the sibling admin user endpoints (handleDisableUser,
+	// handleSetUserOrgs) rely on. A non-existent id still returns 404 via
+	// GetUser/dashStoreError below. If this route were ever opened to a scoped
+	// role, add an explicit visible-user check here before DisableTOTP.
 	target, err := s.st.GetUser(ctx, id)
 	if err != nil {
 		s.dashStoreError(w, err, "get user")

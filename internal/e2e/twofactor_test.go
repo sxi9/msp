@@ -353,6 +353,90 @@ func TestTwoFactorSetupConfirmAndTwoStepLogin(t *testing.T) {
 	}
 }
 
+// TestTwoFactorTOTPCodeIsOneTime is the regression for the replay finding: an
+// accepted TOTP code is single-use per RFC 6238 Section 5.2, independent of the
+// single-use pending cookie. The server clock is pinned so both login attempts
+// fall inside the same 30 s step; the second is rejected because the code's time
+// step was already burned, not because the window advanced and not because the
+// pending token was reused (the second attempt carries a fresh one).
+func TestTwoFactorTOTPCodeIsOneTime(t *testing.T) {
+	e := newTFEnv(t)
+	base := time.Date(2026, 11, 14, 12, 0, 0, 0, time.UTC)
+	e.st.Now = func() time.Time { return base }
+
+	// Enrol at the pinned clock. confirm uses the stateless check and does not
+	// burn the login step, so a login code at this same step is still acceptable.
+	r := e.login(adminEmail, adminPassword)
+	session := cookie(r.cookies, tfSessionCookie)
+	if session == nil {
+		t.Fatalf("bootstrap login: %d %s", r.status, r.body)
+	}
+	setupR := e.call(http.MethodPost, "/api/v1/me/totp/setup", struct{}{}, session)
+	if setupR.status != 200 {
+		t.Fatalf("setup: %d %s", setupR.status, setupR.body)
+	}
+	var setup struct {
+		Secret string `json:"secret"`
+	}
+	if err := json.Unmarshal(setupR.body, &setup); err != nil || setup.Secret == "" {
+		t.Fatalf("setup body %s (%v)", setupR.body, err)
+	}
+	code := tfTOTP(setup.Secret, base)
+	if c := e.call(http.MethodPost, "/api/v1/me/totp/confirm", map[string]string{"code": code}, session); c.status != 200 {
+		t.Fatalf("confirm: %d %s", c.status, c.body)
+	}
+
+	// First login with the code at this step succeeds and mints a session.
+	r = e.login(adminEmail, adminPassword)
+	pending1 := cookie(r.cookies, tfPendingCookie)
+	if pending1 == nil {
+		t.Fatalf("no pending cookie: %v", r.cookies)
+	}
+	first := e.call(http.MethodPost, "/api/v1/login/totp", map[string]string{"code": code}, pending1)
+	if first.status != 200 {
+		t.Fatalf("first totp login: %d %s", first.status, first.body)
+	}
+	if cookie(first.cookies, tfSessionCookie) == nil {
+		t.Fatalf("no session from first totp login: %v", first.cookies)
+	}
+
+	// Second login: a FRESH pending cookie and the SAME still-in-window code. It
+	// must be rejected as invalid_code because the step is already consumed — the
+	// pending token here is new, so a 401 proves one-time TOTP, not cookie reuse.
+	r = e.login(adminEmail, adminPassword)
+	pending2 := cookie(r.cookies, tfPendingCookie)
+	if pending2 == nil {
+		t.Fatalf("no second pending cookie: %v", r.cookies)
+	}
+	replay := e.call(http.MethodPost, "/api/v1/login/totp", map[string]string{"code": code}, pending2)
+	if replay.status != 401 || !bytes.Contains(replay.body, []byte("invalid_code")) {
+		t.Fatalf("replayed in-window TOTP code accepted or wrong error: %d %s", replay.status, replay.body)
+	}
+	if cookie(replay.cookies, tfSessionCookie) != nil {
+		t.Fatal("replayed TOTP code issued a session")
+	}
+	if e.lastAudit("user.login_totp_failed") == nil {
+		t.Fatal("no user.login_totp_failed audit after a replayed code")
+	}
+
+	// A code from the next step still logs in: the per-user counter blocks re-use,
+	// not a legitimate later code.
+	next := base.Add(30 * time.Second)
+	e.st.Now = func() time.Time { return next }
+	r = e.login(adminEmail, adminPassword)
+	pending3 := cookie(r.cookies, tfPendingCookie)
+	if pending3 == nil {
+		t.Fatalf("no third pending cookie: %v", r.cookies)
+	}
+	good := e.call(http.MethodPost, "/api/v1/login/totp", map[string]string{"code": tfTOTP(setup.Secret, next)}, pending3)
+	if good.status != 200 {
+		t.Fatalf("next-step login rejected: %d %s", good.status, good.body)
+	}
+	if cookie(good.cookies, tfSessionCookie) == nil {
+		t.Fatalf("no session from next-step login: %v", good.cookies)
+	}
+}
+
 // TestTwoFactorRecoveryCodeLogin proves a recovery code logs in once, cannot be
 // reused, and the remaining count decrements.
 func TestTwoFactorRecoveryCodeLogin(t *testing.T) {

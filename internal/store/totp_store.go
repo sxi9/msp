@@ -56,7 +56,7 @@ func (s *Store) DisableTOTP(ctx context.Context, userID int64) error {
 	}
 	defer tx.Rollback()
 	res, err := tx.ExecContext(ctx,
-		`UPDATE users SET totp_secret = '', totp_enabled = 0, totp_confirmed_at = NULL WHERE id = ?`, userID)
+		`UPDATE users SET totp_secret = '', totp_enabled = 0, totp_confirmed_at = NULL, totp_last_step = 0 WHERE id = ?`, userID)
 	if err != nil {
 		return fmt.Errorf("store: disable totp: %w", err)
 	}
@@ -117,6 +117,41 @@ func (s *Store) ConsumeRecoveryCode(ctx context.Context, userID int64, hash stri
 		return false, fmt.Errorf("store: consume recovery code: %w", err)
 	}
 	return n > 0, nil
+}
+
+// ConsumeTOTPStep atomically records step as the user's highest consumed TOTP
+// time step and reports whether it was accepted. It succeeds only when step is
+// strictly greater than the stored totp_last_step, so a code from a step already
+// used at login — including the same code replayed within its +/-1 skew window —
+// is rejected, making an accepted TOTP code one-time per RFC 6238 Section 5.2.
+// The single guarded UPDATE is atomic even under concurrent logins (SQLite
+// serialises writers). A false with a nil error means the step was already
+// consumed; ErrNotFound means the user does not exist.
+func (s *Store) ConsumeTOTPStep(ctx context.Context, userID int64, step uint64) (bool, error) {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE users SET totp_last_step = ? WHERE id = ? AND totp_last_step < ?`,
+		int64(step), userID, int64(step))
+	if err != nil {
+		return false, fmt.Errorf("store: consume totp step: %w", err)
+	}
+	n, err := rowsAffected(res)
+	if err != nil {
+		return false, fmt.Errorf("store: consume totp step: %w", err)
+	}
+	if n > 0 {
+		return true, nil
+	}
+	// No row changed: either the step was already consumed (a replay) or the user
+	// is gone. Distinguish the two so a replay reads as a clean false, not a
+	// not-found error, and a vanished user is reported as such.
+	var one int
+	if err := s.db.QueryRowContext(ctx, `SELECT 1 FROM users WHERE id = ?`, userID).Scan(&one); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, ErrNotFound
+		}
+		return false, fmt.Errorf("store: consume totp step: %w", err)
+	}
+	return false, nil
 }
 
 // TOTPStatus returns the user's TOTP secret (for verification), whether 2FA is

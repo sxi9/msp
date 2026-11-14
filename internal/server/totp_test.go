@@ -77,6 +77,38 @@ func TestTOTPRoundTripAndSkew(t *testing.T) {
 	}
 }
 
+// TestTOTPVerifyStep checks totpVerifyStep returns the exact 30 s step a code
+// matched (the value the one-time login counter is keyed on), across the ±1 skew
+// window, and reports !ok for a wrong code without pinning a step.
+func TestTOTPVerifyStep(t *testing.T) {
+	secret := newTOTPSecret()
+	base := time.Date(2026, 11, 14, 12, 0, 0, 0, time.UTC)
+	code := totpNow(secret, base)
+	want := totpCounter(base)
+
+	// At the matching instant the code maps to the current step (offset 0).
+	if step, ok := totpVerifyStep(secret, code, base); !ok || step != want {
+		t.Fatalf("current step: ok=%v step=%d want %d", ok, step, want)
+	}
+	// With the verifier's clock one step ahead, the same code matches via the -1
+	// skew offset and still resolves to the step it was generated for.
+	if step, ok := totpVerifyStep(secret, code, base.Add(totpPeriod)); !ok || step != want {
+		t.Fatalf("skew +1 step: ok=%v step=%d want %d", ok, step, want)
+	}
+	// With the verifier's clock one step behind, it matches via the +1 offset.
+	if step, ok := totpVerifyStep(secret, code, base.Add(-totpPeriod)); !ok || step != want {
+		t.Fatalf("skew -1 step: ok=%v step=%d want %d", ok, step, want)
+	}
+	// A wrong code is not ok (and pins no step).
+	wrong := "000000"
+	if code == wrong {
+		wrong = "111111"
+	}
+	if _, ok := totpVerifyStep(secret, wrong, base); ok {
+		t.Fatal("wrong code reported a matched step")
+	}
+}
+
 // TestNewTOTPSecret checks the secret decodes to 20 bytes and differs each call.
 func TestNewTOTPSecret(t *testing.T) {
 	a := newTOTPSecret()

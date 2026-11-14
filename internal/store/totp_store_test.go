@@ -104,3 +104,54 @@ func TestTOTPStoreLifecycle(t *testing.T) {
 		t.Fatalf("disable missing user: %v", err)
 	}
 }
+
+// TestConsumeTOTPStep covers the one-time TOTP step counter that makes an
+// accepted login code non-replayable (RFC 6238 Section 5.2): a step is accepted
+// once, the same or any older step is then refused, a strictly greater step is
+// accepted, DisableTOTP resets the counter, and a missing user is ErrNotFound.
+func TestConsumeTOTPStep(t *testing.T) {
+	s, _ := openTest(t)
+	ctx := context.Background()
+	u, err := s.CreateUser(ctx, "step@example.com", "hash", "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const step = uint64(58000000)
+
+	// First use of a step is accepted.
+	ok, err := s.ConsumeTOTPStep(ctx, u.ID, step)
+	if err != nil || !ok {
+		t.Fatalf("first consume: ok=%v err=%v", ok, err)
+	}
+	// The same step is a replay: refused, with no error.
+	ok, err = s.ConsumeTOTPStep(ctx, u.ID, step)
+	if err != nil || ok {
+		t.Fatalf("replay same step: ok=%v err=%v", ok, err)
+	}
+	// An older step (within what would be the skew window) is refused too.
+	ok, err = s.ConsumeTOTPStep(ctx, u.ID, step-1)
+	if err != nil || ok {
+		t.Fatalf("older step: ok=%v err=%v", ok, err)
+	}
+	// A strictly greater step (a legitimate later login) is accepted.
+	ok, err = s.ConsumeTOTPStep(ctx, u.ID, step+1)
+	if err != nil || !ok {
+		t.Fatalf("next step: ok=%v err=%v", ok, err)
+	}
+
+	// Disabling 2FA resets the counter so a re-enrolled user starts clean: the
+	// original step is acceptable again.
+	if err := s.DisableTOTP(ctx, u.ID); err != nil {
+		t.Fatal(err)
+	}
+	ok, err = s.ConsumeTOTPStep(ctx, u.ID, step)
+	if err != nil || !ok {
+		t.Fatalf("consume after disable reset: ok=%v err=%v", ok, err)
+	}
+
+	// A missing user is ErrNotFound, not a silent false.
+	if _, err := s.ConsumeTOTPStep(ctx, 999999, step); err != ErrNotFound {
+		t.Fatalf("consume missing user: %v", err)
+	}
+}

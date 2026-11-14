@@ -388,6 +388,14 @@ credential. What that changes:
   Verification accepts the current 30 s step and ±1 (clock skew) and compares in **constant time**;
   a stale code (two or more steps away) is rejected. The primitive is tested against the RFC 6238
   Appendix B vectors.
+- **An accepted login code is one-time (RFC 6238 §5.2).** Beyond the pending cookie being single-use,
+  the login second factor records the highest TOTP time step a user has authenticated with
+  (`users.totp_last_step`, migration 0010) and refuses any code whose step is not strictly greater.
+  A still-valid code captured within its ±1 skew window therefore cannot be replayed to mint a second
+  session even with a freshly minted pending token; the burn is one atomic guarded `UPDATE` (SQLite
+  serialises writers), so concurrent logins cannot both spend the same step. The counter is reset when
+  2FA is disabled or admin-reset, so a re-enrolled user starts clean. A legitimate later login at the
+  next step is unaffected.
 - **The secret is write-only.** It is 20 random bytes base32-encoded (`users.totp_secret`), handed
   back once by `setup` so the owner can enrol, and after that never returned by `me`, the users list
   or any log line (section 2). It is cleared when 2FA is disabled or an admin resets it.
@@ -410,9 +418,9 @@ credential. What that changes:
   user's 2FA so a user who lost their authenticator and recovery codes can re-enrol. It is audited
   `user.totp_reset` with the acting admin as actor and the target as target, and returns `404` for a
   user that does not exist (the check is kept uniform even though admins are all-orgs).
-- **Residual.** Enrolment is per-user opt-in, not yet enforced as org policy (precondition 1). A code
-  used within its own 30 s window is not re-challenged (standard for TOTP); the ±1-step window plus
-  the shared rate limit bound the exposure.
+- **Residual.** Enrolment is per-user opt-in, not yet enforced as org policy (precondition 1). An
+  accepted login code is one-time (see above), so a replay within its window is rejected; the ±1-step
+  window plus the shared rate limit bound any remaining guessing exposure.
 
 ## 16. Reporting a vulnerability
 

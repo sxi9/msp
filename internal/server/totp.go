@@ -83,29 +83,49 @@ func totpNow(secret string, t time.Time) string {
 	return hotp(key, totpCounter(t))
 }
 
-// totpVerify reports whether code is valid for secret at instant t, accepting
-// the current 30 s step and the one before and after it (clock skew). The
-// comparison is constant time and the loop does not short-circuit, so a valid
-// code is not distinguishable by timing from an invalid one of the same length.
-func totpVerify(secret, code string, t time.Time) bool {
+// totpVerifyStep reports whether code is valid for secret at instant t, accepting
+// the current 30 s step and the one before and after it (clock skew), and when
+// valid returns the time step it matched. The matched step lets a caller enforce
+// one-time use (RFC 6238 Section 5.2) by refusing a step that was already
+// consumed. The comparison is constant time and the loop does not short-circuit,
+// so a valid code is not distinguishable by timing from an invalid one of the
+// same length; the matched step is selected with a constant-time mask.
+func totpVerifyStep(secret, code string, t time.Time) (step uint64, ok bool) {
 	code = strings.TrimSpace(code)
 	if len(code) != totpDigits {
-		return false
+		return 0, false
 	}
 	key, err := decodeTOTPSecret(secret)
 	if err != nil || len(key) == 0 {
-		return false
+		return 0, false
 	}
 	counter := totpCounter(t)
 	matched := 0
+	var matchedStep uint64
 	for _, off := range []int64{-1, 0, 1} {
 		if off < 0 && counter == 0 {
 			continue
 		}
-		expected := hotp(key, uint64(int64(counter)+off))
-		matched |= subtle.ConstantTimeCompare([]byte(expected), []byte(code))
+		cand := uint64(int64(counter) + off)
+		expected := hotp(key, cand)
+		eq := subtle.ConstantTimeCompare([]byte(expected), []byte(code))
+		matched |= eq
+		// Constant-time select: fold cand in when eq==1, keep matchedStep when
+		// eq==0, without branching on the comparison result.
+		mask := -uint64(eq) // 0 or all-ones
+		matchedStep = (matchedStep &^ mask) | (cand & mask)
 	}
-	return matched == 1
+	return matchedStep, matched == 1
+}
+
+// totpVerify reports whether code is valid for secret at instant t, accepting
+// the current 30 s step and the one before and after it (clock skew). It is the
+// stateless check used where one-time enforcement is not needed (enrolment
+// confirm, disable, recovery regeneration); the login second factor uses
+// totpVerifyStep plus the store's per-user step counter instead.
+func totpVerify(secret, code string, t time.Time) bool {
+	_, ok := totpVerifyStep(secret, code, t)
+	return ok
 }
 
 // otpauthURI builds the otpauth:// URI an authenticator app enrols from. The
