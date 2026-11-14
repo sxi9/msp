@@ -45,9 +45,9 @@ func usage(w io.Writer) {
 	fmt.Fprintf(w, `usage: msp-agent <command> [flags]
 
 commands:
-  enroll     --server URL --token et_... [--config PATH] [--ca-file PEM] [--interval 30] [--insecure-http]
-  run        [--config PATH] [--interval N]
-  install    --server URL --token et_... [--ca-file PEM] [--interval 30] [--insecure-http]   (root)
+  enroll     --server URL --token et_... [--config PATH] [--ca-file PEM] [--interval 30] [--insecure-http] [--no-auto-update]
+  run        [--config PATH] [--interval N] [--no-auto-update]
+  install    --server URL --token et_... [--ca-file PEM] [--interval 30] [--insecure-http] [--no-auto-update]   (root)
   uninstall                                                                                 (root)
   status     [--config PATH]
   rustdesk setup [--password-stdin] [--config-string S] [--config PATH]                  (root)
@@ -104,6 +104,7 @@ type enrollFlags struct {
 	server, token, config, caFile string
 	interval                      int
 	insecureHTTP                  bool
+	noAutoUpdate                  bool
 }
 
 func parseEnrollFlags(name string, args []string, stderr io.Writer, withConfig bool) (enrollFlags, bool) {
@@ -118,6 +119,7 @@ func parseEnrollFlags(name string, args []string, stderr io.Writer, withConfig b
 	fs.StringVar(&f.caFile, "ca-file", "", "PEM file with a private CA to trust")
 	fs.IntVar(&f.interval, "interval", 0, "sync interval in seconds (default 30)")
 	fs.BoolVar(&f.insecureHTTP, "insecure-http", false, "allow a plain http:// server URL that is not loopback")
+	fs.BoolVar(&f.noAutoUpdate, "no-auto-update", false, "disable automatic agent self-update on this device (persisted to the config; a dashboard update command still applies)")
 	if err := fs.Parse(args); err != nil {
 		return f, false
 	}
@@ -160,6 +162,10 @@ func cmdEnroll(args []string, stdout, stderr io.Writer, install bool) int {
 		}
 		return exitRuntime
 	}
+	if f.noAutoUpdate {
+		off := false
+		cfg.AutoUpdate = &off
+	}
 	if err := agent.Save(f.config, cfg); err != nil {
 		fmt.Fprintln(stderr, name+": save config:", err)
 		return exitRuntime
@@ -181,6 +187,7 @@ func cmdRun(args []string, stderr io.Writer, log *slog.Logger) int {
 	fs.SetOutput(stderr)
 	cfgPath := fs.String("config", agent.DefaultPath(), "config file")
 	interval := fs.Int("interval", 0, "override interval_s from the config")
+	noAuto := fs.Bool("no-auto-update", false, "disable automatic agent self-update for this run (a dashboard update command still applies)")
 	if err := fs.Parse(args); err != nil {
 		return exitUsage
 	}
@@ -195,6 +202,10 @@ func cmdRun(args []string, stderr io.Writer, log *slog.Logger) int {
 	}
 	if *interval > 0 {
 		cfg.IntervalS = *interval
+	}
+	if *noAuto {
+		off := false
+		cfg.AutoUpdate = &off
 	}
 	if err := cfg.Validate(); err != nil {
 		fmt.Fprintln(stderr, "run:", err)

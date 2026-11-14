@@ -29,6 +29,7 @@ Phase 1 features (built and verified on Linux; Windows and Android runtime need 
 | Patching | Pending OS updates per desktop device (apt / Windows Update) with a fleet column, and install all / security / named packages through the command queue; operator or admin; audited (section 10) |
 | Software deployment | A per-client file library, push a file to a desktop device and optionally run it, or install a named package (apt); hash-verified on the device and audited; operator or admin (section 11) |
 | Software inventory | Installed software per desktop device (dpkg/rpm on Linux, the uninstall registry on Windows), shown on the device page, and a fleet-wide package search for licensing and vulnerability hunting; any staff role (section 11) |
+| Agent self-update | Publish a new agent build and roll it out to desktops: each agent downloads it, verifies the hash, health-checks it and swaps itself, rolling back on a bad start; automatic by default or forced per device; operator or admin; audited (section 11) |
 | Alerts | `offline`, `disk_full` (≥ 90 %), `memory_high` (≥ 95 %), `battery_low` (≤ 15 %, not charging); acknowledge; auto-resolve |
 | Audit | Every login, token, enrollment, command, lock, alert ack and user change, with actor and IP; never pruned |
 | Ops | Docker compose, Caddy TLS example, systemd unit, Windows service, Android foreground service, health endpoint |
@@ -430,6 +431,30 @@ package, with its version, each row linking to the device. Use it to answer "who
 `log4j`/`openssl 1.x`/that unlicensed app?" across the fleet. The search is scoped to the clients
 you can see (a scoped operator never sees another client's devices or software), case-insensitive,
 and capped at 500 rows (it tells you when more matched). Any staff role can search; it is read-only.
+
+### Agent updates (self-update)
+
+Desktop agents can update themselves to a newer build you publish, safely and reversibly.
+
+**Publish a version.** Build the agents with `make agents` (section 3 of `docs/OPS.md`) with
+`MSP_AGENT_DIR` set; it writes the binaries, `SHA256SUMS` and a manifest `agents.json` holding the
+released version and each binary's hash. The server picks the manifest up within seconds — no
+restart. The **Software** / **Fleet** pages show the current released version; devices whose agent is
+older are flagged **outdated** (there is an "outdated agent" filter on the fleet, and an agent-version
+column).
+
+**Automatic.** By default each desktop applies a newer version itself: it downloads the binary over
+its authenticated channel, verifies the hash, checks the new binary actually runs, swaps itself and
+restarts. If the new binary fails to start, it rolls back to the previous one automatically. Android
+is not self-updated (update its APK the usual way, section 5c).
+
+**Force one now.** On a desktop device's page, when an update is available, press **Update agent**
+(operator or admin). The target version is shown; the result (and any rollback) appears in the
+command history. The button is greyed when the device already runs the released version.
+
+**Opt a device out.** Install, enroll or run the agent with `--no-auto-update` to stop it taking
+updates on its own; a forced **Update agent** still applies. Use this to stage a release on a few
+pilot machines before letting the whole fleet take it.
 
 ## 12. Alerts
 

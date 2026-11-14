@@ -31,11 +31,11 @@ empty.
   `go 1.26` releases would force a toolchain switch — see `go.mod` notes and `docs/SESSION-LOG.md`).
   Pinned deps: `modernc.org/sqlite v1.45.0`, `golang.org/x/crypto v0.48.0`, `golang.org/x/sys v0.41.0`.
   Added for RS1: `github.com/coder/websocket v1.8.15`. Web: `@xterm/xterm 6.0.0` + `@xterm/addon-fit`.
-- **Migrations** are numbered files in `internal/store/migrations/`. Current highest is `0010`; the
-  **next is 0011**. Never edit an existing migration. SQLite can't ALTER a CHECK, so adding a command
+- **Migrations** are numbered files in `internal/store/migrations/`. Current highest is `0012`; the
+  **next is 0013**. Never edit an existing migration. SQLite can't ALTER a CHECK, so adding a command
   kind recreates the `commands` table FK-safely (see 0007/0008 for the pattern that preserves
   `shell_sessions`).
-- **Command kinds**: `exec, script, lock, ping, message, shell, patch, deploy`. `KindsFor(platform)`
+- **Command kinds**: `exec, script, lock, ping, message, shell, patch, deploy, update`. `KindsFor(platform)`
   gates them (android gets only lock/ping/message). Add new kinds in `internal/protocol` with
   `ValidKind`, `KindSupportedOn`, `Command.Validate`, a fixture, and a `store.CreateCommand` case.
 - **Tenant isolation (RS2)**: every org-scoped endpoint checks the caller's visible org set and returns

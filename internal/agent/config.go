@@ -34,8 +34,18 @@ type Config struct {
 	InsecureHTTP bool   `json:"insecure_http,omitempty"`
 	RustdeskHost string `json:"rustdesk_host,omitempty"`
 	RustdeskKey  string `json:"rustdesk_key,omitempty"`
-	Path         string `json:"-"`
+	// AutoUpdate controls whether this agent applies an advertised self-update
+	// automatically (AU1). It is a pointer so a config written before AU1 (field
+	// absent) defaults to ON: a nil value means enabled. `msp-agent run
+	// --no-auto-update`, or `auto_update:false` persisted at install, opts out; a
+	// dashboard update command still forces an update regardless.
+	AutoUpdate *bool  `json:"auto_update,omitempty"`
+	Path       string `json:"-"`
 }
+
+// AutoUpdateEnabled reports whether this agent applies advertised self-updates
+// automatically (AU1): true unless auto_update was explicitly set to false.
+func (c Config) AutoUpdateEnabled() bool { return c.AutoUpdate == nil || *c.AutoUpdate }
 
 // DefaultPath is where the service reads its configuration:
 // /etc/msp-agent/agent.json on Linux, %ProgramData%\msp-agent\agent.json on

@@ -152,6 +152,11 @@ func Run(ctx context.Context, cfg Config, version string, log *slog.Logger) erro
 	// executor (package source). The deployer is built once over the same Client
 	// the sync loop uses, like patchCol above.
 	deployer := NewDeployer(client)
+	// Agent self-update (AU1): a kind update command (forced from the dashboard) or
+	// an advertised auto-update is applied through the updater, which downloads,
+	// verifies the hash, health-checks and atomically swaps the binary, keeping a
+	// backup for rollback. Built once over the same Client, like deployer above.
+	updater := NewUpdater(client)
 	// Installed-software inventory (SI1): the desktop agent reports the host's
 	// installed packages/programs on the same cadence as facts. The collector
 	// runs dpkg/rpm (Linux) or reads the uninstall registry (Windows); every
@@ -165,12 +170,27 @@ func Run(ctx context.Context, cfg Config, version string, log *slog.Logger) erro
 	}
 	backoff := backoffMin
 	syncs := 0 // successful syncs so far; facts go with sync 0, 120, 240, ...
+	finalizedUpdate := false
 	sem := make(chan struct{}, maxConcurrent)
 	var wg sync.WaitGroup
 	defer wg.Wait()
 
 	log.Info("agent started", "server", cfg.ServerURL, "device_id", cfg.DeviceID, "interval_s", cfg.IntervalS, "version", version)
+	// Start-of-day self-update rollback (AU1): if a prior update left a backup and
+	// the installed binary cannot run its own version subcommand, restore the backup
+	// and exit so the service manager restarts into the known-good binary.
+	if BootstrapRollback(ctx, version, log) {
+		log.Warn("rolled back a failed self-update; exiting so the service restarts into the restored binary")
+		return nil
+	}
 	for ctx.Err() == nil {
+		// A self-update that swapped a new binary into place asks the agent to exit
+		// so the service manager restarts into it; the deferred wg.Wait above has
+		// already let the update's command result reach the server.
+		if updater.ShouldRestart() {
+			log.Info("restarting into the updated agent")
+			return nil
+		}
 		metrics, merr := col.Metrics(ctx)
 		if merr != nil {
 			log.Warn("metrics unavailable", "err", merr)
@@ -240,6 +260,22 @@ func Run(ctx context.Context, cfg Config, version string, log *slog.Logger) erro
 			}
 		}
 
+		// Self-update bookkeeping (AU1). After the first successful sync on this
+		// binary, clear any leftover <exe>.bak: reaching the server is the signal
+		// that an update (if one happened) took, so the rollback backup can go.
+		if !finalizedUpdate {
+			finalizedUpdate = true
+			FinalizeUpdate(log)
+		}
+		// Auto-apply an advertised update when auto-update is enabled for this agent.
+		// A forced dashboard command arrives as a normal command below; this is the
+		// background path. RunUpdate posts no result (no command id), exactly like an
+		// auto deploy, and ShouldRestart (top of the loop) picks up the swap.
+		if ShouldApplyAdvertised(cfg.AutoUpdateEnabled(), resp.AgentUpdate, version) {
+			res := updater.RunUpdate(ctx, UpdateCommand(resp.AgentUpdate))
+			log.Info("auto-update applied", "log", res.Stdout, "err", res.Error)
+		}
+
 		for _, cmd := range resp.Commands {
 			// A kind shell command (RS1, decision D3) is an interactive relay
 			// that can live for hours; it is dispatched outside the two-slot
@@ -280,6 +316,12 @@ func Run(ctx context.Context, cfg Config, version string, log *slog.Logger) erro
 					res = patchCol.RunPatch(ctx, cmd)
 				case protocol.KindDeploy:
 					res = deployer.RunDeploy(ctx, cmd)
+				case protocol.KindUpdate:
+					// Agent self-update (AU1): download, verify, health-check and swap
+					// the binary. RunUpdate never exits the process; postResult reports
+					// old->new, and ShouldRestart (checked at the top of the loop) makes
+					// the agent exit for the service manager to restart into it.
+					res = updater.RunUpdate(ctx, cmd)
 				default:
 					res = Execute(ctx, cmd)
 				}

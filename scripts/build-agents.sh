@@ -67,6 +67,19 @@ build linux   arm64 msp-agent-linux-arm64       ./cmd/msp-agent
 build windows amd64 msp-agent-windows-amd64.exe ./cmd/msp-agent
 build linux   amd64 msp-server-linux-amd64      ./cmd/msp-server
 
+# Agent self-update release manifest (AU1): agents.json maps each desktop
+# platform-arch to the file served at /dl/<name> and the binary's real SHA-256, so
+# the server advertises the released VERSION and fills an update command's hash.
+# The agent re-verifies this hash after download; a mismatch aborts the swap.
+sha_of() { sha256sum "$1" | cut -d' ' -f1; }
+cat > dist/agents.json <<EOF
+{"version":"$VERSION","files":{
+  "linux-amd64":{"name":"msp-agent-linux-amd64","sha256":"$(sha_of dist/msp-agent-linux-amd64)"},
+  "linux-arm64":{"name":"msp-agent-linux-arm64","sha256":"$(sha_of dist/msp-agent-linux-arm64)"},
+  "windows-amd64":{"name":"msp-agent-windows-amd64.exe","sha256":"$(sha_of dist/msp-agent-windows-amd64.exe)"}}}
+EOF
+echo "wrote dist/agents.json (version $VERSION)"
+
 echo "compile-only proof: android/arm64 agent"
 GOOS=android GOARCH=arm64 go build -o /dev/null ./cmd/msp-agent
 

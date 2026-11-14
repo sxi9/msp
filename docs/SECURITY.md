@@ -422,7 +422,45 @@ credential. What that changes:
   accepted login code is one-time (see above), so a replay within its window is rejected; the ±1-step
   window plus the shared rate limit bound any remaining guessing exposure.
 
-## 16. Reporting a vulnerability
+## 16. Agent self-update (AU1)
+
+Self-update is the highest-blast-radius action in the platform: a bad push could brick every
+managed desktop at once. The design is therefore built to be verified and reversible, not just to
+swap a file.
+
+- **Hash-verified before use.** The update command carries the release binary's SHA-256, filled by
+  the server from `agents.json` (the operator never types it). The agent downloads the binary over
+  its authenticated device-token channel, bounds the body to the response `Content-Length`, and
+  recomputes the SHA-256 **before touching anything**. A mismatch aborts with the running binary
+  untouched and no backup left behind — a tampered or corrupted download can never be executed.
+- **Health-checked before the swap.** After the hash passes, the agent runs the new binary's
+  `version` subcommand with a short timeout and confirms it prints the expected version. A binary
+  that cannot start, or reports the wrong version, aborts the swap with the old binary still in
+  place and the backup removed. Only a verified, runnable binary of the expected version is swapped
+  in.
+- **Backed up and rolled back.** The current executable is copied to `<exe>.bak` before the atomic
+  rename (the running image is never disturbed). On the next start, if the installed binary cannot
+  run its own `version` subcommand, a bootstrap check restores `<exe>.bak` and restarts (automatic
+  rollback); the backup is cleared only after the next successful sync on the new version.
+- **Token-scoped download, no secret leak.** The download URL is resolved against the agent's own
+  server base; an absolute URL on a different host is refused, so the device token (sent only in the
+  `Authorization` header, never the URL, never logged) cannot be exfiltrated by a hostile or
+  mistaken manifest.
+- **Desktop only, role-gated, tenant-scoped, audited.** `update` is rejected on Android
+  (`unsupported_on_platform`) and on a revoked device. Forcing an update needs the operator or admin
+  role and the CSRF header; a device outside the caller's visible org set returns `404 not_found`
+  before any side effect (RS2), and every forced update writes `agent.update_requested` (from/to
+  version). A repeated identical advertised version is ignored while an update for it is in flight or
+  a restart is pending.
+- **Opt-out.** Auto-update defaults on but can be disabled per device (`--no-auto-update`,
+  persisted), so an operator can stage a release on a pilot group and hold the fleet. A forced
+  dashboard command still applies to an opted-out device.
+- **Residual.** The Windows service-swap path (rename-aside) is written and cross-built but NOT
+  VERIFIED on a real Windows host; the manifest and its binaries must be published over TLS and the
+  `MSP_AGENT_DIR` kept writable only by the MSP, since whoever can write `agents.json` chooses what
+  every desktop runs.
+
+## 17. Reporting a vulnerability
 
 Report privately to the maintainers of this repository (open a security advisory on the
 repository, or e-mail the address listed in its README once published). Please include the

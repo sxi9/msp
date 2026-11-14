@@ -95,13 +95,16 @@ type Updater struct {
 
 // NewUpdater builds the production updater: downloads stream over client, the
 // health-check runs the new binary through os/exec, and the executable is
-// resolved with resolveExecutable (os.Executable + symlink resolution).
+// resolved with resolveExe (resolveExecutable: os.Executable + symlink
+// resolution). resolveExe is a package variable so the cross-package e2e test can
+// point the WHOLE swap at a temp "exe" path (SetResolveExecutableForTest) without
+// ever touching the real running binary.
 func NewUpdater(client *Client) *Updater {
 	return &Updater{
 		client:  client,
 		dl:      clientDownloader{client},
 		exec:    execRunner{},
-		resolve: resolveExecutable,
+		resolve: resolveExe,
 	}
 }
 
@@ -273,7 +276,7 @@ func (u *Updater) runningVersion() string {
 // on Windows, the renamed-aside old image) can be cleared. It is best-effort and
 // safe to call when there is nothing to clean up.
 func FinalizeUpdate(log *slog.Logger) {
-	exe, err := resolveExecutable()
+	exe, err := resolveExe()
 	if err != nil {
 		return
 	}
@@ -304,7 +307,7 @@ func finalizeBackups(exe string, log *slog.Logger) {
 // restored binary. A healthy binary leaves the backup in place for FinalizeUpdate
 // to clear after the next good sync. With no backup present it does nothing.
 func BootstrapRollback(ctx context.Context, runningVersion string, log *slog.Logger) (restored bool) {
-	exe, err := resolveExecutable()
+	exe, err := resolveExe()
 	if err != nil {
 		return false
 	}
@@ -460,6 +463,26 @@ func UpdateCommand(upd *protocol.AgentUpdate) protocol.Command {
 		SHA256:   upd.SHA256,
 		TimeoutS: protocol.MaxTimeoutS,
 	}
+}
+
+// resolveExe resolves the running agent executable for the whole self-update
+// machinery: the Updater's swap (through NewUpdater), the start-of-day
+// BootstrapRollback and the FinalizeUpdate backup cleanup all go through it. It is
+// a package variable, defaulting to resolveExecutable, so the cross-package e2e
+// test can point every one of them at a temp "exe" path with
+// SetResolveExecutableForTest and drive the real swap without replacing the real
+// test binary or the container's agent. The agent's own tests inject per-Updater
+// seams with newUpdaterWith instead and never touch this.
+var resolveExe = resolveExecutable
+
+// SetResolveExecutableForTest overrides how self-update resolves the running
+// executable so an end-to-end test can target a temp "exe" path, and returns a
+// function that restores the previous resolver. It must only be called from tests;
+// production never calls it, so resolveExe stays resolveExecutable.
+func SetResolveExecutableForTest(f func() (string, error)) (restore func()) {
+	prev := resolveExe
+	resolveExe = f
+	return func() { resolveExe = prev }
 }
 
 // resolveExecutable returns the absolute, symlink-resolved path of the running

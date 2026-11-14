@@ -111,6 +111,45 @@ that is debuggable or debug-signed, and `SHA256SUMS` is regenerated on every run
 `/dl/` serves single files only (no listing). Rebuild and republish after every upgrade so
 `SHA256SUMS` matches the binaries, or the installers refuse to install.
 
+### 3a. Desktop agent self-update (AU1)
+
+`make agents` also writes `agents.json` (the release manifest) next to the binaries:
+
+```json
+{"version":"0.2.0","files":{
+   "linux-amd64":{"name":"msp-agent-linux-amd64","sha256":"<hex>"},
+   "linux-arm64":{"name":"msp-agent-linux-arm64","sha256":"<hex>"},
+   "windows-amd64":{"name":"msp-agent-windows-amd64.exe","sha256":"<hex>"}}}
+```
+
+`version` is the content of the `VERSION` file at build time; the digests are the real SHA-256s of
+the three desktop binaries. The server reads `MSP_AGENT_DIR/agents.json` on start and re-reads it
+when its mtime or size changes (no restart needed to publish a new build). **If `agents.json` is
+absent or malformed, self-update is simply off** — no update is ever advertised and the dashboard
+shows no released version, so you can run `/dl/` without self-update until you are ready.
+
+To roll a new agent version out:
+
+1. Bump `VERSION`, then `make agents` (with `MSP_AGENT_DIR` set, or copy `dist/` into it). The new
+   binaries, `SHA256SUMS` and `agents.json` land together.
+2. The server picks up the new `agents.json` within seconds. Each desktop whose reported
+   `agent_version` differs from the manifest version now sees `agent_update` on its next sync.
+3. **Auto-update** (default): agents with auto-update on apply it themselves — download, verify the
+   hash, health-check the new binary, swap, restart. Nothing else to do.
+4. **Forced**: on a device page press **Update agent** (admin/operator), or `POST
+   /api/v1/devices/{id}/update`. This works whether or not auto-update is on. It is refused with
+   `409 no_update_available` when the device already runs the released version.
+
+The agent keeps the previous binary as `<exe>.bak` until its next successful sync on the new
+version; if the new binary cannot run its own `version` subcommand at startup, the agent restores
+the backup and restarts (automatic rollback). Android has no self-update (its APK updates are the
+Play/sideload path above).
+
+**Opting a device out.** Install or enroll with `--no-auto-update` (persisted to the config), or
+run the service with `msp-agent run --no-auto-update`. A forced dashboard update still applies.
+Because self-update is the highest-risk action, stage a new version on a pilot group first (leave
+the fleet on `--no-auto-update` and force the update on pilots), then publish the manifest fleet-wide.
+
 ## 4. Installing agents
 
 ### Ubuntu / Linux (systemd)

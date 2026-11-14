@@ -15,7 +15,7 @@ P1 = first build. P2 = next. P3 = after that.
 - SD1 (built) Software deployment and file transfer: a server-side file library, push a file to a desktop device and optionally run it, or install a named package (apt on Linux), hash-verified on the device and audited; Windows installer path NOT VERIFIED on a real host
 - SI1 (built) Installed-software inventory on desktops: the agent reports installed software (dpkg/rpm on Linux, the uninstall registry on Windows; read-only), shown on the device page and searchable fleet-wide for licensing and vulnerability hunting, org-scoped; Windows registry path NOT VERIFIED on a real host
 - P2 Service and process watchlists, event log forwarding
-- P2 Agent self-update
+- AU1 (built) Agent self-update: the server publishes a release manifest (`agents.json` at `/dl/`) and advertises a newer build to each desktop; the agent downloads it over its authenticated channel, verifies the SHA-256, health-checks the new binary and atomically swaps itself, keeping a backup and rolling back on a bad start; automatic by default (opt out with `--no-auto-update`) or forced per device, role-gated and audited; Windows service-swap path NOT VERIFIED on a real host
 - RD1 (built) Remote desktop phase A: official RustDesk client installed by the installer (`--with-rustdesk`), pointed at our relay by `msp-agent rustdesk setup`, id reported in facts
 - P3 Remote desktop phase B: our branded RustDesk build with the relay compiled in (`docs/RUSTDESK-BRANDING.md`)
 - P3 macOS agent

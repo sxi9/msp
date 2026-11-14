@@ -121,6 +121,7 @@ dispatches on it, the fixtures are round-tripped through it.
 | shell   | yes   | yes     | no      | optional shell; timeout = max session (RS1)         |
 | patch   | yes   | yes     | no      | action/mode/reboot/ids; android -> 400 (PM1)        |
 | deploy  | yes   | yes     | no      | source file (file_id/sha256/dest/run) or package; android -> 400 (SD1) |
+| update  | yes   | yes     | no      | version/url/sha256 from the manifest; android -> 400 (AU1) |
 
 Lock is only ever possible for a device enrolled under this server (it needs a valid device
 token to receive the command) and visible to the technician (404 otherwise), never by free
@@ -445,6 +446,65 @@ never both.
   /api/v1/software?q=openssl` returns the device, a sub-2-char `q` is 400, and an operator scoped to
   another org sees no cross-org rows (and a 404 on an explicit foreign `org_id`). The Windows
   registry path is parser-unit-tested and cross-built only, NOT VERIFIED on a real host.
+
+## Agent self-update (AU1, phase 2)
+
+Roll a new desktop-agent build out through the existing command queue and `/dl/` static server,
+with the agent verifying and health-checking the binary before it swaps itself and rolling back on a
+bad start. The server never pushes bytes: it advertises a manifest and queues an `update` command;
+the agent pulls the binary over its own authenticated channel (reusing the SD1 download pattern).
+
+```
+ build ──► scripts/build-agents.sh ──► dist/agents.json + binaries + SHA256SUMS ──► MSP_AGENT_DIR (/dl/)
+ server start/reload ──► manifestLibrary.load (mtime/size reload; absent/bad ⇒ self-update off)
+ agent sync ──► agentUpdateFor(dev, reported_version) ──► SyncResponse.AgentUpdate (newer, platform-arch, not android/revoked)
+ dashboard ──► POST /devices/{id}/update ──► CreateCommand(kind update, version/url/sha256 from manifest) ──► ClaimQueuedCommands
+ agent ──► Updater.RunUpdate: download ─► verify sha256 ─► chmod ─► back up <exe>.bak ─► health-check <tmp> version ─► atomic swap ─► post result ─► exit
+ agent restart ──► BootstrapRollback (restore <exe>.bak if the installed binary cannot run `version`) ──► FinalizeUpdate after next good sync
+```
+
+- **Protocol** (`internal/protocol/types.go`, fixtures `command_update.json`, `sync_response_update.json`):
+  `KindUpdate`; `Command.Version`/`Command.URL` (the hash reuses `Command.SHA256`, shared with deploy);
+  `AgentUpdate{Version,URL,SHA256}` with `Validate` and `SyncResponse.AgentUpdate`
+  (`json:"agent_update,omitempty"`); `ValidAgentVersion` / `ValidUpdateURL`; `KindsFor` (desktop only),
+  `KindSupportedOn` and the `Command.Validate` update arm.
+- **Agent** (`internal/agent/selfupdate.go` + per-platform `selfupdate_windows.go` /
+  `selfupdate_other.go`): an `Updater` with injectable download, health-check executor and
+  resolve-executable seams. `RunUpdate` resolves the running exe (refusing a `go run` temp binary),
+  downloads beside it via `(*Client).downloadUpdate`/`resolveUpdateURL` (same-host only, token in the
+  header, never logged), verifies size + SHA-256 **before** anything, chmods, copies the current exe to
+  `<exe>.bak`, health-checks `<tmp> version` against the target, then atomically swaps (Unix rename;
+  Windows rename-aside). `BootstrapRollback` restores the backup at startup when the installed binary
+  fails its `version` check; `FinalizeUpdate` clears the backup after the next good sync. The Run loop
+  builds the updater once, runs `BootstrapRollback` before the loop, dispatches `KindUpdate` to
+  `RunUpdate`, exits on `ShouldRestart` so the service restarts into the new binary, finalizes once, and
+  auto-applies an advertised update when `cfg.AutoUpdateEnabled()` (config `auto_update`,
+  `--no-auto-update`). The Windows swap path is cross-built and unit-tested on Linux, NOT VERIFIED on a
+  real host.
+- **Store** (`internal/store/commands.go`, migration `0012_update_command`): the `update` kind added to
+  the `commands` kind CHECK and the `version`/`url` columns, rebuilt FK-safely preserving
+  `shell_sessions` (the 0007/0008 pattern); `CreateCommand`/`ClaimQueuedCommands` persist and emit the
+  update fields; `store.Command`/`CreateCommandParams` gain `Version`/`URL`.
+- **Server** (`internal/server/manifest.go`, `dashboard_update.go`): `manifestLibrary` loads/reloads
+  `MSP_AGENT_DIR/agents.json` (mtime/size, last-good kept on a bad reload, absent ⇒ off), wired into the
+  `Server` struct (New/Run). `agentUpdateFor` attaches `AgentUpdate` to the sync response;
+  `POST /api/v1/devices/{id}/update` (admin|operator; device 404 → org-visible RS2 404 → revoked →
+  platform → `no_update_available` 409 → offline 409) fills the command from the manifest and audits
+  `agent.update_requested`; `GET /api/v1/agent-release` serves the manifest for the dashboard. The routes
+  self-register via `dashboardRoutes` (`RegisterUpdate` for a hand-assembled mux).
+- **Build** (`scripts/build-agents.sh`): after the cross-compile it writes `dist/agents.json` with the
+  real SHA-256s of the three desktop binaries, alongside `SHA256SUMS`, copied into `MSP_AGENT_DIR`.
+- **Dashboard** (`web/src/lib/agentver.ts`, the device Update action + fleet agent-version column and
+  outdated filter + released-version banner): pure version-compare/outdated/manifest helpers with a
+  `node --test`.
+- **Proof**: `internal/e2e/selfupdate_test.go` drives the real Linux agent with the swap targeting a
+  temp exe (never the real test binary): a published fake "new" binary is downloaded over `/dl/`,
+  hash-verified, health-checked and swapped (`done`, old→new, `<exe>.bak` kept, `agent.update_requested`
+  audited); a SHA-256 mismatch and a health-check failure each fail with no swap and no dangling backup;
+  the bootstrap rollback restores the backup over a broken binary; an RS2 operator scoped elsewhere gets
+  404, android 400, a device already on the released version 409 `no_update_available`, and a sync
+  carries `agent_update`. Plus `internal/agent/selfupdate_test.go`, `internal/store/update_test.go`,
+  `internal/server/dashboard_update_test.go`, `web/src/lib/agentver.test.ts`.
 
 ## Two-factor authentication (TF1, phase 2)
 

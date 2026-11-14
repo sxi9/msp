@@ -227,6 +227,12 @@ Response `200` (fixtures `sync_response.json`, `sync_response_android.json`):
   (fixture `sync_response_rustdesk.json`), absent otherwise. Agents update their stored
   relay when it is present and differs (the desktop agent rewrites its config file);
   an absent key leaves the stored relay untouched. Android ignores it.
+- `agent_update` **(AU1)**: `{"version":"0.2.0","url":"/dl/msp-agent-linux-amd64","sha256":"<64 hex>"}`
+  (fixture `sync_response_update.json`), sent only when the release manifest has an entry for the
+  device's `platform-arch` whose version differs from the agent's reported `agent_version`;
+  absent otherwise, and never sent to Android or a revoked device. When auto-update is enabled the
+  agent applies it (download → verify → health-check → swap); it is otherwise advisory (the
+  dashboard greys/enables the "Update agent" button). See section 5, "update".
 
 Agent loop (desktop): sync -> for each command spawn a goroutine (max 2 concurrent per
 device) that executes and POSTs the result -> if the response contained commands sync again
@@ -324,11 +330,12 @@ Streams a file-library artifact (section 6, "File library") to an authenticated 
 ## 5. Commands **(A1)**
 
 Command kinds are exactly `exec`, `script`, `lock`, `ping`, `message`, `shell` **(RS1, D3)**,
-`patch` **(PM1)**, `deploy` **(SD1)**.
+`patch` **(PM1)**, `deploy` **(SD1)**, `update` **(AU1)**.
 The Go form is `protocol.Command{ID, Kind, Argv, Shell, Body, Text, Action, Mode, IDs, Reboot,
-Source, FileID, SHA256, Dest, Run, RunArgs, Package,
+Source, FileID, SHA256, Dest, Run, RunArgs, Package, Version, URL,
 TimeoutS, Cols, Rows, ShellSession}` (`Action`/`Mode`/`IDs`/`Reboot` belong to `patch`,
-`Source`/`FileID`/`SHA256`/`Dest`/`Run`/`RunArgs`/`Package` to `deploy`, the last three to
+`Source`/`FileID`/`SHA256`/`Dest`/`Run`/`RunArgs`/`Package` to `deploy`, `Version`/`URL` (with
+`SHA256`, shared with `deploy`) to `update`, the last three to
 `shell`); `Command.Validate()` checks the shape,
 `KindSupportedOn(kind, platform)` checks the platform, `KindsFor(platform)` and
 `ShellsFor(platform)` drive the UI.
@@ -343,6 +350,7 @@ TimeoutS, Cols, Rows, ShellSession}` (`Action`/`Mode`/`IDs`/`Reboot` belong to `
 | `shell`   | linux, windows          | `shell` (optional), `cols`/`rows` (optional), `timeout_s` = max duration | opens a PTY/ConPTY and relays it over a WebSocket (section 6, "Remote shell") |
 | `patch`   | linux, windows          | `action`, `mode`, `ids`, `reboot`, `timeout_s` (max 14400) | scans or installs OS updates via apt / Windows Update (section 5, "patch", PM1) |
 | `deploy`  | linux, windows          | `source`, and for file `file_id`/`sha256`/`dest`/`run`/`run_args`, for package `package` | downloads a library file and optionally runs it, or installs a named package (section 5, "deploy", SD1) |
+| `update`  | linux, windows          | `version`, `url`, `sha256`, `timeout_s` (default 600) | downloads the agent release, verifies the hash, health-checks it and swaps itself, rolling back on a bad start (section 5, "update", AU1) |
 
 Common rules:
 
@@ -472,6 +480,34 @@ agent-facing command JSON carries only the keys of its source:
 - `Command.Validate()`: `source` required; a file source needs `file_id` + a 64-hex `sha256` +
   a valid `dest`; a package source needs a valid package name and must not set the file fields;
   `run_args` only with `run`. Fixture `command_deploy.json`.
+
+### update (desktop only — AU1)
+
+Replaces the running agent binary with a newer release. The server fills `version`, `url` and
+`sha256` from the release manifest (section 6, "Agent releases") at queue time; the technician
+never types them. The agent-facing command JSON is:
+
+```json
+{"id":N,"kind":"update","version":"0.2.0","url":"/dl/msp-agent-linux-amd64","sha256":"<64 hex>","timeout_s":600}
+```
+
+- `url` is relative to the server base; the agent joins it to its own base and refuses a URL on a
+  different host, so the device token never leaves the server.
+- The agent downloads `url` with the device token into a temp file **beside** the running
+  executable, verifies the size and `sha256` **before** anything else (a mismatch aborts with no
+  change and no backup), `chmod 0755`, backs the current executable up to `<exe>.bak` (a copy),
+  **health-checks** the new binary by running `<tmp> version` and confirming it prints `version`
+  (a failure aborts, old binary intact, backup removed), then atomically renames the verified
+  binary into place. The result reports `self-update applied: <old> -> <new>`.
+- After posting the result the agent exits so the service manager restarts into the new binary.
+  On the next start a bootstrap check restores `<exe>.bak` if the installed binary cannot run its
+  own `version` subcommand (rollback); the backup is cleared after the next successful sync.
+- Self-update is applied automatically only when auto-update is enabled for the agent (config
+  `auto_update`, default on; `msp-agent run --no-auto-update` / enroll `--no-auto-update`
+  disables it). A dashboard `update` command forces it regardless.
+- `Command.Validate()`: `version` (1..64 of `[A-Za-z0-9.+_-]`), `url` (1..2048, no spaces or
+  control characters) and a 64-hex `sha256` are required; no deploy/patch/exec field may be set.
+  Fixture `command_update.json`.
 
 ### Android (A1)
 
@@ -826,6 +862,39 @@ name the uploader (`null`/`""` when unknown).
   additionally carries `source`, `file_id`, `sha256`, `dest`, `run`, `run_args` and `package`
   (`omitempty`, so they appear only on a deploy COMMAND).
 
+### Agent releases and self-update (AU1)
+
+The MSP publishes the cross-built agent binaries to `MSP_AGENT_DIR` (served at `/dl/`) together
+with a manifest `agents.json`:
+
+```json
+{"version":"0.2.0","files":{
+   "linux-amd64":{"name":"msp-agent-linux-amd64","sha256":"<hex>"},
+   "linux-arm64":{"name":"msp-agent-linux-arm64","sha256":"<hex>"},
+   "windows-amd64":{"name":"msp-agent-windows-amd64.exe","sha256":"<hex>"}}}
+```
+
+`version` is the single released version; each entry's `name` is the file served at `/dl/<name>`
+and `sha256` is its digest (the agent re-verifies it after download). The server loads the file on
+start and re-reads it when its mtime/size changes (like the preset library); an absent or
+malformed file simply turns self-update off (no update advertised, `version:""`). `scripts/build-agents.sh`
+writes `agents.json` with the real digests alongside the binaries and `SHA256SUMS`.
+
+- `GET /api/v1/agent-release` (viewer) -> the current manifest `{"version":"0.2.0","files":{...}}`,
+  or `{"version":"","files":{}}` when self-update is off. Drives the released-version banner and the
+  fleet "outdated agent" filter.
+- `POST /api/v1/devices/{id}/update` (admin|operator; CSRF), optional body `{"timeout_s":600}`
+  -> `201 {"command":COMMAND}` (a queued `kind update` command). The caller never supplies the
+  `version`/`url`/`sha256`: the server fills them from the manifest for the device's `platform-arch`.
+  Validation order (mirrors the deploy open): device exists (`404`) -> org visible (`404` across
+  orgs, RS2, before any side effect) -> not revoked (`400 unsupported_on_device`) -> desktop
+  platform (`400 unsupported_on_platform`, i.e. android) -> a newer release exists for the device's
+  platform-arch (`409 no_update_available` when the manifest has nothing, or the device already runs
+  the released version) -> online (`409 device_offline`). Then the command is queued, audited
+  (`agent.update_requested` with `from_version`, `to_version`) and the device's parked sync woken.
+  `403 forbidden` for viewer. The update log (old→new, outcome, any rollback) comes back on the
+  command result.
+
 ### Alerts, audit, users
 
 - `GET /api/v1/alerts?state=open|all&org_id=` -> `{"alerts":[{"id":9,"org_id":1,"org_name":"...","device_id":42,"hostname":"ws-01","type":"offline","severity":"high","message":"no sync for 6m","opened_at":"...","resolved_at":null,"acknowledged_by":null,"acknowledged_at":null}]}` (default open; limit 500). Filtered to the caller's visible orgs **(RS2)**; an explicit `?org_id=` outside the visible set is `404 not_found`.
@@ -951,7 +1020,7 @@ enqueue time. The dispatcher retries with backoff and lands `failed` after `maxA
 `device.lock_requested` **(A1)**, `device.remote_desktop_opened` **(RD1)**,
 `shell.opened`, `shell.connected`, `shell.closed` **(RS1)**,
 `patch.scan_requested`, `patch.install_requested` **(PM1)**,
-`file.uploaded`, `file.deleted`, `deploy.requested` **(SD1)**, `command.queued`,
+`file.uploaded`, `file.deleted`, `deploy.requested` **(SD1)**, `agent.update_requested` **(AU1)**, `command.queued`,
 `command.finished`, `command.lost`, `alert.ack`,
 `notify.channel_created`, `notify.channel_updated`, `notify.channel_deleted`,
 `notify.channel_tested`, `notify.rule_created`, `notify.rule_updated`, `notify.rule_deleted`,
@@ -1030,6 +1099,8 @@ Config file JSON `{"server_url","device_token","device_id","interval_s","ca_file
 | `command_result.json`         | CommandResult     | exit 0, RFC3339 UTC times                                  |
 | `sync_patches.json`           | SyncRequest       | like `sync_linux.json` with a `patches` report (PM1): apt, reboot required, three updates incl. a security one |
 | `command_deploy.json`         | Command           | kind `deploy`, source `file` (SD1): file_id, sha256, dest, run, run_args |
+| `command_update.json`         | Command           | kind `update` (AU1): version, url, sha256, timeout_s        |
+| `sync_response_update.json`   | SyncResponse      | poll 30, no commands, `agent_update` version/url/sha256 (AU1) |
 | `error.json`                  | ErrorResponse     | `invalid_device_token`, no detail                          |
 
 A change to any wire shape must update `types.go`, the fixture, `types_test.go` and this
