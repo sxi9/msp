@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sxi9/msp/internal/protocol"
 	"github.com/sxi9/msp/internal/store"
 )
 
@@ -154,7 +155,7 @@ func (s *Server) bodyLimit(next http.Handler) http.Handler {
 			}
 			limit := int64(512 << 10)
 			if strings.HasPrefix(r.URL.Path, "/api/agent/") {
-				limit = 256 << 10
+				limit = int64(protocol.MaxAgentBodyBytes)
 			}
 			r.Body = http.MaxBytesReader(w, r.Body, limit)
 		}

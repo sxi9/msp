@@ -7,6 +7,7 @@ import { argvPreview, parseArgv } from '../lib/argv.ts';
 import { loadPresets, presetFill, presetsFor } from '../lib/presets.ts';
 import { notReportedHint, remoteDesktopError, technicianHint } from '../lib/rustdesk.ts';
 import { appsOf, appsSummary, filterApps, type InstalledApp } from '../lib/apps.ts';
+import { factRows } from '../lib/facts.ts';
 import { filterSoftware, softwareOf, softwareSummary, sourceLabel } from '../lib/software.ts';
 import { patchReportOf, rebootBadge, sortUpdates, summarisePatches } from '../lib/patches.ts';
 import { destError, fileSize, filesForDevice, validPackageName } from '../lib/deploy.ts';
@@ -124,9 +125,11 @@ export function Device({ id, user }: { id: number; user: User }) {
   if (!detail.data) return <p class="muted">Loading…</p>;
   const d = detail.data.device;
   const facts = detail.data.facts ?? {};
-  // The installed-apps inventory has its own panel; every other key is a facts row.
+  // The installed-apps and installed-software inventories have their own panels;
+  // every other facts key is a Facts row (factRows excludes both arrays, which
+  // the server stores inside facts_json).
   const apps = appsOf(facts);
-  const factRows = Object.entries(facts).filter(([k]) => k !== 'apps');
+  const factEntries = factRows(facts);
   const metrics = detail.data.metrics ?? {};
   const disks = (metrics.disks as { mount: string; total_gb: number; used_gb: number }[] | undefined) ?? [];
   const operator = canOperate(user);
@@ -168,8 +171,8 @@ export function Device({ id, user }: { id: number; user: User }) {
         <div>
           <h2>Facts</h2>
           <dl class="kv">
-            {factRows.map(([k, v]) => [<dt key={`k${k}`} title={k}>{FACT_LABELS[k] ?? k}</dt>, <dd key={`v${k}`}>{factText(k, v)}</dd>])}
-            {factRows.length === 0 && <dd class="muted">No facts reported yet.</dd>}
+            {factEntries.map(([k, v]) => [<dt key={`k${k}`} title={k}>{FACT_LABELS[k] ?? k}</dt>, <dd key={`v${k}`}>{factText(k, v)}</dd>])}
+            {factEntries.length === 0 && <dd class="muted">No facts reported yet.</dd>}
           </dl>
         </div>
         <div>

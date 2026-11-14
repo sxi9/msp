@@ -103,9 +103,15 @@ func finalizeSoftware(items []protocol.SoftwareItem) []protocol.SoftwareItem {
 }
 
 // capSoftwareBytes returns the longest prefix of items whose serialised JSON
-// array stays within protocol.MaxSoftwareBytes. It accounts for the enclosing
-// brackets and the comma separators so the bound matches the wire size.
+// array stays within protocol.MaxSoftwareBytes.
 func capSoftwareBytes(items []protocol.SoftwareItem) []protocol.SoftwareItem {
+	return capSoftwareBytesTo(items, protocol.MaxSoftwareBytes)
+}
+
+// capSoftwareBytesTo returns the longest prefix of items whose serialised JSON
+// array stays within limit bytes. It accounts for the enclosing brackets and the
+// comma separators so the bound matches the wire size.
+func capSoftwareBytesTo(items []protocol.SoftwareItem, limit int) []protocol.SoftwareItem {
 	total := len("[]")
 	for i, it := range items {
 		b, err := json.Marshal(it)
@@ -116,12 +122,50 @@ func capSoftwareBytes(items []protocol.SoftwareItem) []protocol.SoftwareItem {
 		if i > 0 {
 			add++ // the comma before this entry
 		}
-		if total+add > protocol.MaxSoftwareBytes {
+		if total+add > limit {
 			return items[:i]
 		}
 		total += add
 	}
 	return items
+}
+
+// boundSyncBody keeps a sync request's serialised body within the agent body
+// budget by trimming the installed-software inventory, the largest and least
+// time-sensitive part of a facts-cadence sync. Each facts field is already
+// bounded on its own (capSoftwareBytes, finalizePatchReport), but the server caps
+// the whole /api/agent/ request at protocol.MaxAgentBodyBytes, and on the facts
+// cadence the facts envelope, a fresh patch report (PM1) and a near-maximum
+// software list (SI1) ride the same sync and together can exceed it — which would
+// 400 the sync before the heartbeat is recorded, bricking the device's sync.
+// Trimming software (never the heartbeat, metrics or patch report) keeps the
+// device manageable. It returns the number of software entries dropped (0 when
+// nothing needed trimming).
+func boundSyncBody(req *protocol.SyncRequest) int {
+	if req.Facts == nil || len(req.Facts.Software) == 0 {
+		return 0
+	}
+	if body, err := json.Marshal(req); err != nil || len(body) <= protocol.AgentBodyBudget {
+		return 0
+	}
+	full := req.Facts.Software
+	// Measure the body without the software array: omitempty drops the key, so the
+	// remaining headroom (minus the "software" key overhead) is what the array may
+	// occupy. The array is Facts' last field, so it serialises as `,"software":[…]`
+	// appended inside the facts object.
+	req.Facts.Software = nil
+	base, err := json.Marshal(req)
+	if err != nil {
+		return len(full) // leave software dropped; the heartbeat still gets through
+	}
+	const softwareKeyOverhead = len(`,"software":`)
+	budget := protocol.AgentBodyBudget - len(base) - softwareKeyOverhead
+	if budget < len("[]") {
+		return len(full) // no room for any software
+	}
+	kept := capSoftwareBytesTo(full, budget)
+	req.Facts.Software = kept
+	return len(full) - len(kept)
 }
 
 // cutBytes truncates s to at most max bytes without splitting a UTF-8 rune

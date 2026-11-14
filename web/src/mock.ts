@@ -361,7 +361,11 @@ function route(method: string, path: string, body: unknown): Reply {
     }
     return ok({
       device: d,
-      facts: d.status === 'pending' ? {} : d.platform === 'android' ? androidFacts(d) : { kernel: '6.8.0-45-generic', cpu_model: 'Intel(R) Core(TM) i5-1345U', cpu_count: 8, mem_total_mb: 16000, manufacturer: 'Dell Inc.', model: 'Latitude 5540', serial: 'ABC123', ips: [d.last_ip] },
+      // The server stores the whole facts object (the installed-software array
+      // included) in devices.facts_json and returns it here, so a real desktop
+      // carries `software` inside facts; the Device view must exclude it from the
+      // Facts panel (it has its own "Installed software" panel). Mirror that here.
+      facts: d.status === 'pending' ? {} : d.platform === 'android' ? androidFacts(d) : { kernel: '6.8.0-45-generic', cpu_model: 'Intel(R) Core(TM) i5-1345U', cpu_count: 8, mem_total_mb: 16000, manufacturer: 'Dell Inc.', model: 'Latitude 5540', serial: 'ABC123', ips: [d.last_ip], software: softwareInventory[d.id] ?? [] },
       metrics: d.status === 'pending' ? {} : { cpu_pct: d.cpu_pct, mem_total_mb: 16000, mem_used_mb: 8120, disks: [{ mount: d.platform === 'windows' ? 'C:' : '/', total_gb: 476, used_gb: 201.3 }], battery_pct: d.battery_pct, ips: [d.last_ip] },
       alerts: alerts.filter((a) => a.device_id === d.id && !a.resolved_at),
       commands: commands.filter((c) => c.device_id === d.id).slice(0, 20).map((c) => ({ ...c, stdout: '', stderr: '' })),

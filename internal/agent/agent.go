@@ -193,6 +193,15 @@ func Run(ctx context.Context, cfg Config, version string, log *slog.Logger) erro
 		if pr := patchCol.Report(ctx, time.Now().UTC()); pr != nil {
 			req.PatchReport = pr
 		}
+		// Keep the whole sync body within the server's agent body limit: on the
+		// facts cadence the facts envelope, a fresh patch report and a near-maximum
+		// software inventory ride the same sync and together can exceed it, which
+		// would 400 the sync before the heartbeat is recorded. Trim the software
+		// inventory (never the heartbeat, metrics or patch report) to fit (SI1).
+		if dropped := boundSyncBody(&req); dropped > 0 {
+			log.Warn("installed-software inventory trimmed to fit the sync body budget",
+				"dropped", dropped, "kept", len(req.Facts.Software), "budget_bytes", protocol.AgentBodyBudget)
+		}
 
 		t0 := time.Now()
 		resp, err := client.Sync(ctx, req)

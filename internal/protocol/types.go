@@ -136,6 +136,18 @@ const (
 	MaxSoftwareVersionLen   = 128
 	MaxSoftwarePublisherLen = 256
 	MaxSoftwareBytes        = 192 * 1024
+	// MaxAgentBodyBytes is the server's cap on an /api/agent/ request body
+	// (enforced by middleware.bodyLimit through http.MaxBytesReader); a larger
+	// body is rejected with 400 invalid_request before the sync is recorded.
+	// AgentBodyBudget is the ceiling the desktop agent keeps each sync under, a
+	// margin below the hard limit. Each facts field is bounded on its own
+	// (capSoftwareBytes, finalizePatchReport), but on the facts cadence the facts
+	// envelope, a fresh patch report (PM1) and a near-maximum installed-software
+	// list (SI1) ride the same sync and together can exceed the limit, so the
+	// agent trims the software inventory last (boundSyncBody) to fit, never
+	// dropping the heartbeat, metrics or the patch report.
+	MaxAgentBodyBytes = 256 * 1024
+	AgentBodyBudget   = MaxAgentBodyBytes - 16*1024
 )
 
 // Installed-software source identifiers (facts.software[].source, SI1): dpkg and
