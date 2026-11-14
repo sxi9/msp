@@ -123,6 +123,27 @@ const (
 	// run_args reuse MaxArgBytes, like exec argv.
 	MaxPackageNameLen = 256
 	SHA256HexLen      = 64
+	// Installed-software inventory (facts.software, desktops in SI1). The entry
+	// cap keeps a sync body with the maximum list well under the 256 KiB agent
+	// body limit; the desktop agent additionally stops adding entries at
+	// MaxSoftwareBytes of serialised software JSON (the Android apps cap
+	// approach) so even maximum-length fields cannot push the body over. A device
+	// sends either apps (Android) or software (desktop), never both. Each field is
+	// length-bounded: name <= MaxSoftwareNameLen, version <= MaxSoftwareVersionLen,
+	// publisher <= MaxSoftwarePublisherLen; source is one of SoftwareSource*.
+	MaxSoftware             = 2000
+	MaxSoftwareNameLen      = 256
+	MaxSoftwareVersionLen   = 128
+	MaxSoftwarePublisherLen = 256
+	MaxSoftwareBytes        = 192 * 1024
+)
+
+// Installed-software source identifiers (facts.software[].source, SI1): dpkg and
+// rpm on Linux, registry (the Windows uninstall keys) on Windows.
+const (
+	SoftwareSourceDpkg     = "dpkg"
+	SoftwareSourceRPM      = "rpm"
+	SoftwareSourceRegistry = "registry"
 )
 
 // RustdeskURIPrefix is the URL scheme the official RustDesk client registers
@@ -163,23 +184,38 @@ type App struct {
 	System  bool   `json:"system"`
 }
 
+// SoftwareItem is one installed program in the facts inventory (SI1): the
+// package/display name, the version ("" when unknown), the publisher ("" when
+// the source does not report one) and the source it came from (dpkg | rpm |
+// registry). Desktops report software; Android reports apps; a device never
+// sends both.
+type SoftwareItem struct {
+	Name      string `json:"name"`
+	Version   string `json:"version"`
+	Publisher string `json:"publisher"`
+	Source    string `json:"source"`
+}
+
 // Facts is the slow-changing inventory sent at enrollment, on the first sync
-// after start and every 120th sync. Two keys are optional: RustdeskID, the
+// after start and every 120th sync. Three keys are optional: RustdeskID, the
 // id of the locally installed RustDesk client (digits, <= MaxRustdeskIDLen),
-// omitted when RustDesk is not installed (RD1); and Apps, the installed-apps
+// omitted when RustDesk is not installed (RD1); Apps, the installed-apps
 // inventory (at most MaxApps entries, non-system apps first, then by label),
-// sent by the Android agent and omitted by the desktop agents in phase 1.
+// sent by the Android agent; and Software, the installed-software inventory (at
+// most MaxSoftware entries sorted by name, SI1), sent by the desktop agents. A
+// device sends apps or software, never both.
 type Facts struct {
-	Kernel       string   `json:"kernel"`
-	CPUModel     string   `json:"cpu_model"`
-	CPUCount     int      `json:"cpu_count"`
-	MemTotalMB   int64    `json:"mem_total_mb"`
-	Manufacturer string   `json:"manufacturer"`
-	Model        string   `json:"model"`
-	Serial       string   `json:"serial"`
-	IPs          []string `json:"ips"`
-	RustdeskID   string   `json:"rustdesk_id,omitempty"`
-	Apps         []App    `json:"apps,omitempty"`
+	Kernel       string         `json:"kernel"`
+	CPUModel     string         `json:"cpu_model"`
+	CPUCount     int            `json:"cpu_count"`
+	MemTotalMB   int64          `json:"mem_total_mb"`
+	Manufacturer string         `json:"manufacturer"`
+	Model        string         `json:"model"`
+	Serial       string         `json:"serial"`
+	IPs          []string       `json:"ips"`
+	RustdeskID   string         `json:"rustdesk_id,omitempty"`
+	Apps         []App          `json:"apps,omitempty"`
+	Software     []SoftwareItem `json:"software,omitempty"`
 }
 
 // PatchUpdate is one pending OS update in a PatchReport (PM1): the package
@@ -431,6 +467,14 @@ func (f Facts) Validate() error {
 			return fmt.Errorf("facts.apps[%d].%w", i, err)
 		}
 	}
+	if len(f.Software) > MaxSoftware {
+		return fmt.Errorf("facts.software has %d entries, at most %d are accepted", len(f.Software), MaxSoftware)
+	}
+	for i, it := range f.Software {
+		if err := it.Validate(); err != nil {
+			return fmt.Errorf("facts.software[%d].%w", i, err)
+		}
+	}
 	return nil
 }
 
@@ -444,6 +488,31 @@ func (a App) Validate() error {
 		return fmt.Errorf("label exceeds %d bytes", MaxAppLabelLen)
 	case len(a.Version) > MaxAppVersionLen:
 		return fmt.Errorf("version exceeds %d bytes", MaxAppVersionLen)
+	}
+	return nil
+}
+
+// ValidSoftwareSource reports whether s is dpkg, rpm or registry (SI1).
+func ValidSoftwareSource(s string) bool {
+	switch s {
+	case SoftwareSourceDpkg, SoftwareSourceRPM, SoftwareSourceRegistry:
+		return true
+	}
+	return false
+}
+
+// Validate checks one software inventory entry (SI1); the error names the field
+// without the "facts.software[i]." prefix, which Facts.Validate adds.
+func (it SoftwareItem) Validate() error {
+	switch {
+	case it.Name == "" || len(it.Name) > MaxSoftwareNameLen:
+		return fmt.Errorf("name must be 1..%d bytes", MaxSoftwareNameLen)
+	case len(it.Version) > MaxSoftwareVersionLen:
+		return fmt.Errorf("version exceeds %d bytes", MaxSoftwareVersionLen)
+	case len(it.Publisher) > MaxSoftwarePublisherLen:
+		return fmt.Errorf("publisher exceeds %d bytes", MaxSoftwarePublisherLen)
+	case !ValidSoftwareSource(it.Source):
+		return fmt.Errorf("source must be one of %s|%s|%s", SoftwareSourceDpkg, SoftwareSourceRPM, SoftwareSourceRegistry)
 	}
 	return nil
 }

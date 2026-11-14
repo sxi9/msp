@@ -72,8 +72,9 @@ Request (fixtures `enroll_linux.json`, `enroll_android.json`):
   digits, omitted when RustDesk is not installed (`400 invalid_request`, detail
   `facts.rustdesk_id must be 1..32 digits`, otherwise). The server stores it in
   `devices.rustdesk_id`; an enrollment without it keeps a previously stored id.
-  `apps`, the installed-apps inventory (section 3.2a), sent by the Android agent and
-  omitted by the desktop agents in phase 1.
+  `apps`, the installed-apps inventory (section 3.2a), sent by the Android agent, and
+  `software`, the installed-software inventory (section 3.2b), sent by the desktop agents.
+  A device sends `apps` **or** `software`, never both.
 
 | facts key      | type     | source (desktop / Android)                                   |
 |----------------|----------|--------------------------------------------------------------|
@@ -86,7 +87,8 @@ Request (fixtures `enroll_linux.json`, `enroll_android.json`):
 | `serial`       | string   | DMI serial / `""` on Android                                 |
 | `ips`          | [string] | non-loopback IPv4 addresses                                  |
 | `rustdesk_id`  | string   | optional (RD1): local RustDesk client id, digits, <= 32      |
-| `apps`         | [App]    | optional: installed apps, Android only in phase 1 (3.2a)     |
+| `apps`         | [App]    | optional: installed apps, Android only (3.2a)                |
+| `software`     | [Software] | optional: installed software, desktop only (SI1, 3.2b)     |
 
 ### 3.2a `facts.apps`: installed-apps inventory
 
@@ -120,8 +122,42 @@ Go form `protocol.App{Package, Label, Version string; System bool}`, fixture
   PackageManager read failed; the server re-marshals facts, so an empty array is stored as
   no key at all (`omitempty`) and the dashboard shows no Installed apps panel until the
   next facts sync carries entries.
-- Desktop agents do not send `apps` in phase 1 (installed-software inventory on desktops is
-  on the roadmap).
+- Desktop agents do not send `apps`; they send `software` (section 3.2b) instead.
+
+### 3.2b `facts.software`: installed-software inventory **(SI1)**
+
+```json
+"software":[{"name":"openssl","version":"3.0.13-0ubuntu3.4","publisher":"Ubuntu Developers","source":"dpkg"},
+            {"name":"7-Zip 24.08 (x64)","version":"24.08","publisher":"Igor Pavlov","source":"registry"}]
+```
+
+Go form `protocol.SoftwareItem{Name, Version, Publisher, Source string}`, fixture
+`sync_software.json`.
+
+- One entry per installed OS package/program. Linux reads `dpkg-query -W -f
+  '${Package}\t${Version}\t${Maintainer}\n'` (`source:dpkg`), falling back to `rpm -qa --qf
+  '%{NAME}\t%{VERSION}-%{RELEASE}\t%{VENDOR}\n'` (`source:rpm`) when dpkg is absent; both are
+  read-only queries. Windows reads the uninstall registry keys (`HKLM\...\Uninstall`, the
+  WOW6432Node and HKCU variants) and emits DisplayName/DisplayVersion/Publisher
+  (`source:registry`), keeping only what Programs-and-Features shows (a DisplayName is
+  required; SystemComponent, child entries with a ParentKeyName, and update/hotfix
+  ReleaseType rows are dropped). `publisher` may be empty; the dpkg maintainer email is
+  stripped and an rpm `(none)` vendor becomes empty.
+- `source` is one of `dpkg` | `rpm` | `registry`. Order: by name (case-insensitive, then
+  version); the dashboard sorts again, so the order is a convenience, not a contract.
+- Cap: at most **2000 entries** (`protocol.MaxSoftware`); entries past the cap are dropped.
+  The agent additionally stops at 192 KiB of serialised software JSON (`MaxSoftwareBytes`) so
+  the sync body stays under the 256 KiB agent body limit. Validation: `name` 1..256 bytes,
+  `version` <= 128 bytes, `publisher` <= 256 bytes, `source` in the enum, at most 2000
+  entries; otherwise `400 invalid_request` with a detail naming the index
+  (`facts.software[3].name must be 1..256 bytes`, `facts.software has 2001 entries, at most
+  2000 are accepted`). The agent cuts its fields to the same limits before sending.
+- Sent whenever facts are sent (enrollment, the first sync after start, every 120th sync);
+  `RecordSoftware` stores the list in `devices.software_json` and refreshes `software_count`
+  and `software_checked_at`. Returned as the sibling `software` array on `GET
+  /api/v1/devices/{id}` (and searchable fleet-wide at `GET /api/v1/software`, section 6). A
+  desktop agent omits the key on a host with no inventory (`omitempty`), which leaves the
+  last stored list untouched.
 
 Response `201 {"device_id":42,"device_token":"dt_...","poll_interval_s":30}`, plus
 `"rustdesk":{"host":"rmm.example.com","key":"<id_ed25519.pub line>"}` **(RD1)** when the
@@ -153,7 +189,9 @@ Request (fixtures `sync_linux.json`, `sync_android.json`):
   replaces `facts_json` when present, and `devices.rustdesk_id` when the facts carry
   `rustdesk_id`; invalid `rustdesk_id` -> `400 invalid_request`, fixture `sync_rustdesk.json`).
   The Android agent's facts carry the installed-apps inventory `apps` (section 3.2a, fixture
-  `sync_android_apps.json`; an invalid entry -> `400 invalid_request` naming the index).
+  `sync_android_apps.json`; an invalid entry -> `400 invalid_request` naming the index); the
+  desktop agents' facts carry the installed-software inventory `software` instead (section
+  3.2b, fixture `sync_software.json`), stored by `RecordSoftware`.
 - `interval_s` = the agent's configured interval (desktop 30, android 60, e2e 2); clamped 1..3600.
 - `wait_s` = how long the server may hold the request; the server clamps it to 0..25.
   Android sends 0.
@@ -547,7 +585,8 @@ DEVICE = {"id":42,"org_id":1,"org_name":"Acme Dental","device_uid":"f2c1...","ho
           "revoked":false,"cpu_pct":12.5,"mem_used_pct":50.8,"disk_used_pct":42.3,"battery_pct":null,
           "battery_charging":null,"uptime_s":86400,"open_alerts":0,"can_run_commands":true,
           "rustdesk_id":null,"pending_patches":2,"security_patches":1,"reboot_required":false,
-          "patches_checked_at":"2026-11-14T10:00:00Z"}
+          "patches_checked_at":"2026-11-14T10:00:00Z","software_count":214,
+          "software_checked_at":"2026-11-14T10:00:00Z"}
 ```
 
 `rustdesk_id` **(RD1)** is the id the agent last reported in its facts, `null` until then.
@@ -558,17 +597,33 @@ DEVICE row (so the list carries the fleet "Updates" column) and `patches_checked
 the first report. The full report is **not** in DEVICE — it is a sibling `patches` object on the
 device-detail response (below).
 
+`software_count` and `software_checked_at` **(SI1)** are denormalised from the device's last
+installed-software inventory (section 3.2b) by `RecordSoftware`; they are on every DEVICE row (so the
+list carries a fleet "Software" count) and `software_checked_at` is `null` until the first report. The
+full list is **not** in DEVICE — it is a sibling `software` array on the device-detail response (below).
+
 `can_run_commands` is true when the device is a desktop platform (`linux|windows`) and not
 revoked: it gates the free-form exec/script console. **(A1)** The built-in kinds lock, ping and
 message are available for every non-revoked device regardless of `can_run_commands`; the
 dashboard decides from `platform` which controls to show.
 
-- `GET /api/v1/devices/{id}` -> `{"device":DEVICE,"facts":{...facts object...},"metrics":{...last metrics object...},"patches":{...patch report...},"alerts":[open ALERT...],"commands":[last 20 COMMAND without stdout/stderr]}`.
+- `GET /api/v1/devices/{id}` -> `{"device":DEVICE,"facts":{...facts object...},"metrics":{...last metrics object...},"patches":{...patch report...},"software":[...SoftwareItem...],"alerts":[open ALERT...],"commands":[last 20 COMMAND without stdout/stderr]}`.
   `facts` is the last facts object the agent sent, verbatim, so for an Android device it
   carries the `apps` array (section 3.2a); the dashboard shows it as the "Installed apps" panel.
   `patches` **(PM1)** is the full `protocol.PatchReport` the agent last sent (section 3.6), `{}` for
   a device that never reported; the dashboard's "Updates" panel reads it.
+  `software` **(SI1)** is the full installed-software list the desktop agent last sent (section
+  3.2b), `[]` for a device that never reported; the dashboard's "Installed software" panel reads it.
 - `GET /api/v1/devices/{id}/heartbeats?limit=120` -> `{"heartbeats":[{"at":"...","cpu_pct":12.5,"mem_used_pct":50.8,"disk_used_pct":42.3,"battery_pct":null,"uptime_s":86400}]}` oldest first.
+- `GET /api/v1/software?q=<substring>&org_id=` (admin|operator|viewer; read) **(SI1)** -> the
+  fleet-wide installed-software search: `{"query":"openssl","results":[{"device_id":42,
+  "hostname":"ws-01","org_id":1,"org_name":"Acme Dental","name":"openssl","version":"3.0.13-0ubuntu3.4"}],
+  "truncated":false}`. `q` is required and must be at least **2 characters** (`400
+  invalid_request` otherwise); the match is a case-insensitive substring of the package name
+  across the caller's visible devices. An optional `org_id` narrows the search to that one org;
+  an `org_id` the caller cannot see is `404 not_found` (RS2), before the search. Results are
+  ordered by org name, hostname then package name and capped at 500 rows (`truncated:true` when
+  the cap cut the result).
 - `POST /api/v1/devices/{id}/commands` (admin|operator) with one of
   `{"kind":"exec","argv":["uname","-a"],"timeout_s":60}`,
   `{"kind":"script","shell":"sh","body":"df -h\n","timeout_s":120}`,

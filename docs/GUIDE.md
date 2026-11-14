@@ -21,13 +21,14 @@ Phase 1 features (built and verified on Linux; Windows and Android runtime need 
 | Users | Roles `viewer` (see), `operator` (act), `admin` (manage users, clients, delete devices) |
 | Enrollment | Per-client tokens with label, max uses, expiry and revoke; install one-liners per OS |
 | Fleet | Every device with online/offline/pending, OS, agent version, last seen, CPU, memory, disk, battery, open alerts; filter by client, status, hostname |
-| Device page | Status, metrics, facts (CPU model, memory, kernel, model, serial), disks, Installed apps (Android: search, system-apps toggle), command console, command history, Lock, Ping, Message, Remote desktop (Connect), Remote shell, Revoke, Delete |
+| Device page | Status, metrics, facts (CPU model, memory, kernel, model, serial), disks, Installed apps (Android: search, system-apps toggle), Installed software (desktop: count, last checked, search), command console, command history, Lock, Ping, Message, Remote desktop (Connect), Remote shell, Revoke, Delete |
 | Remote commands | `exec` (argv, no shell), `script` (sh/bash on Linux, PowerShell/cmd on Windows), presets, timeout, output capped at 64 KiB |
 | Remote lock | Built-in command; only for devices enrolled under your server; operator or admin; audited twice |
 | Remote desktop | Official RustDesk client on the device, your own relay (hbbs/hbbr) next to the server, Connect button on the device page, every connection audited (section 8) |
 | Remote shell | Interactive browser terminal to a desktop device over a server WebSocket relay; operator or admin; opened, connected and closed are audited and the output is transcribed (section 9) |
 | Patching | Pending OS updates per desktop device (apt / Windows Update) with a fleet column, and install all / security / named packages through the command queue; operator or admin; audited (section 10) |
 | Software deployment | A per-client file library, push a file to a desktop device and optionally run it, or install a named package (apt); hash-verified on the device and audited; operator or admin (section 11) |
+| Software inventory | Installed software per desktop device (dpkg/rpm on Linux, the uninstall registry on Windows), shown on the device page, and a fleet-wide package search for licensing and vulnerability hunting; any staff role (section 11) |
 | Alerts | `offline`, `disk_full` (≥ 90 %), `memory_high` (≥ 95 %), `battery_low` (≤ 15 %, not charging); acknowledge; auto-resolve |
 | Audit | Every login, token, enrollment, command, lock, alert ack and user change, with actor and IP; never pruned |
 | Ops | Docker compose, Caddy TLS example, systemd unit, Windows service, Android foreground service, health endpoint |
@@ -409,6 +410,26 @@ a device in a client you can see, a device can only download a file in its own c
 a global one (any other is a 404), destination paths are validated (absolute, no `..`, no symlink
 traversal), and the hash is always re-checked on the device. Every upload, delete and deploy writes
 an audit row (`file.uploaded`, `file.deleted`, `deploy.requested`).
+
+### Software inventory (desktops)
+
+Every desktop agent reports the software installed on its host on the same cadence as its facts
+(the first sync after start, then periodically). On **Linux** the agent runs `dpkg-query` (or `rpm`
+on an RPM distro); on **Windows** it reads the uninstall registry keys that back Programs and
+Features. Both reads are read-only — the agent never installs or removes anything to take the
+inventory. Android phones report their installed **apps** instead (section 1); a device reports one
+or the other, never both.
+
+**On the device page.** A desktop device's page shows an **Installed software** panel: the package
+count, when it was last checked, and a search box that filters the list by name or publisher. Each
+row is Name, Version, Publisher and Source (`dpkg`, `rpm` or `registry`).
+
+**Fleet-wide search.** The **Software** page has an installed-software search: type at least two
+characters of a package name and get every device in your visible clients that has a matching
+package, with its version, each row linking to the device. Use it to answer "who still has
+`log4j`/`openssl 1.x`/that unlicensed app?" across the fleet. The search is scoped to the clients
+you can see (a scoped operator never sees another client's devices or software), case-insensitive,
+and capped at 500 rows (it tells you when more matched). Any staff role can search; it is read-only.
 
 ## 12. Alerts
 

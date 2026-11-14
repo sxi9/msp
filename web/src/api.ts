@@ -4,8 +4,8 @@ import type {
   Alert, AuditEntry, ChannelUpdate, Command, Device, DeviceDetail, EnrollmentToken, Heartbeat,
   LibraryFile, LoginResult, MaintenanceWindow, NewChannel, NewCommand, NewDeploy, NewPatch, NewRule,
   NewShell, NewWindow, NotificationDelivery, NotifyChannel, NotifyRule, Org, OrgAssignment,
-  PresetLibrary, RecoveryCodes, RemoteDesktopOpened, RuleUpdate, RustdeskInfo, ShellOpened, Summary,
-  TokenCreated, TotpSetup, User,
+  PresetLibrary, RecoveryCodes, RemoteDesktopOpened, RuleUpdate, RustdeskInfo, ShellOpened,
+  SoftwareSearchResult, Summary, TokenCreated, TotpSetup, User,
 } from './types.ts';
 import { mockRequest } from './mock.ts';
 
@@ -149,6 +149,10 @@ export const api = {
   // Queues a deploy command (SD1): push a library file (optionally run it) or
   // install a package. 201 with the queued command; the log lands on the result.
   deploy: (deviceId: number, d: NewDeploy) => request<{ command: Command }>('POST', `/api/v1/devices/${deviceId}/deploy`, d),
+  // Installed-software inventory search (SI1): the packages whose name matches the
+  // substring q (>= 2 chars) across the caller's visible devices; org_id narrows
+  // it to one client. Org-scoped server-side (404 on a cross-org org_id).
+  searchSoftware: (q: string, orgId?: number) => request<SoftwareSearchResult>('GET', `/api/v1/software${qs({ q, org_id: orgId })}`),
   rustdesk: () => request<RustdeskInfo>('GET', '/api/v1/rustdesk'),
   remoteDesktop: (deviceId: number) => request<RemoteDesktopOpened>('POST', `/api/v1/devices/${deviceId}/remote-desktop`),
   revokeDevice: (id: number) => request<void>('POST', `/api/v1/devices/${id}/revoke`),

@@ -7,6 +7,7 @@ import { argvPreview, parseArgv } from '../lib/argv.ts';
 import { loadPresets, presetFill, presetsFor } from '../lib/presets.ts';
 import { notReportedHint, remoteDesktopError, technicianHint } from '../lib/rustdesk.ts';
 import { appsOf, appsSummary, filterApps, type InstalledApp } from '../lib/apps.ts';
+import { filterSoftware, softwareOf, softwareSummary, sourceLabel } from '../lib/software.ts';
 import { patchReportOf, rebootBadge, sortUpdates, summarisePatches } from '../lib/patches.ts';
 import { destError, fileSize, filesForDevice, validPackageName } from '../lib/deploy.ts';
 import { COMMAND_DONE, canOperate, isAdmin, type Command, type Device as DeviceT, type NewCommand, type NewDeploy, type NewPatch, type Preset, type RemoteDesktopOpened, type RustdeskInfo, type User } from '../types.ts';
@@ -183,6 +184,7 @@ export function Device({ id, user }: { id: number; user: User }) {
       </div>
 
       {apps && <InstalledApps apps={apps} />}
+      {d.platform !== 'android' && <InstalledSoftware device={d} software={detail.data.software} />}
       {d.platform !== 'android' && <Updates device={d} patches={detail.data.patches} canPatch={operator && !d.revoked && d.status === 'online'} onPatch={queuePatch} />}
       {builtins && <BuiltIns device={d} onQueue={queue} />}
       <RemoteShell device={d} user={user} />
@@ -233,6 +235,50 @@ function InstalledApps({ apps }: { apps: InstalledApp[] }) {
         </div>
       )}
       <p class="muted">{rows.length} of {apps.length} shown. The agent sends the inventory with its facts: on the first sync after start and every 120th sync, non-system apps first, at most 1000 entries.</p>
+    </div>
+  );
+}
+
+/**
+ * The installed-software inventory a desktop agent reports (SI1): the OS packages
+ * (dpkg/rpm) or installed programs (Windows registry), with a count, when it was
+ * last collected, a name/publisher search and a table (Name, Version, Publisher,
+ * Source) inside its own scroll box so a long list never widens the page. Mirrors
+ * the Android "Installed apps" panel; shown for desktops, which send `software`
+ * instead of `apps`.
+ */
+function InstalledSoftware({ device, software }: { device: DeviceT; software?: unknown }) {
+  const [query, setQuery] = useState('');
+  const all = softwareOf(software) ?? [];
+  const rows = filterSoftware(all, query);
+  return (
+    <div class="card apps software">
+      <div class="form-row">
+        <h2>Installed software <span class="muted">{softwareSummary(all)}</span></h2>
+        <input type="search" placeholder="Search name or publisher" value={query} onInput={(e) => setQuery(e.currentTarget.value)} />
+      </div>
+      <dl class="kv">
+        <dt>Last checked</dt><dd>{device.software_checked_at ? ago(device.software_checked_at) : <span class="muted">never</span>}</dd>
+      </dl>
+      {all.length === 0 ? <p class="muted">The agent has not reported installed software yet. It is collected with the device's facts: on the first sync after start and periodically.</p>
+        : rows.length === 0 ? <p class="muted">No package matches.</p> : (
+          <div class="apps-scroll">
+            <table class="grid">
+              <thead><tr><th>Name</th><th>Version</th><th>Publisher</th><th>Source</th></tr></thead>
+              <tbody>
+                {rows.map((s, i) => (
+                  <tr key={`${s.name}-${s.version}-${i}`}>
+                    <td data-label="Name"><code>{s.name}</code></td>
+                    <td data-label="Version">{s.version || '—'}</td>
+                    <td data-label="Publisher">{s.publisher || '—'}</td>
+                    <td data-label="Source" class="muted">{sourceLabel(s.source)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      {all.length > 0 && <p class="muted">{rows.length} of {all.length} shown. Search the whole fleet for a package on the <a href="#/software">Software</a> page.</p>}
     </div>
   );
 }

@@ -1,0 +1,7 @@
+accountsservice	23.13.9-2ubuntu6	Ubuntu Developers <ubuntu-devel-discuss@lists.ubuntu.com>
+base-files	13ubuntu10.2	Santhosh Manohar <santhosh@ubuntu.com>
+curl	8.5.0-2ubuntu10.6	Ubuntu Developers <ubuntu-devel-discuss@lists.ubuntu.com>
+firefox	131.0.3+build1-0ubuntu0.24.04.1	Mozilla <mozilla@example.com>
+openssl	3.0.13-0ubuntu3.4	Ubuntu Developers <ubuntu-devel-discuss@lists.ubuntu.com>
+zlib1g:amd64	1:1.3.dfsg-3.1ubuntu2.1	Ubuntu Developers
+broken-no-version-line

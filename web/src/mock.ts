@@ -6,6 +6,7 @@ import type {
   NewDeploy, NewPatch, NewShell, NotificationDelivery, NotifyChannel, NotifyRule, Org, Preset, User,
 } from './types.ts';
 import type { ShellSocket } from './lib/shell.ts';
+import type { SoftwareHit, SoftwareItem } from './lib/software.ts';
 
 interface Reply { status: number; body: unknown }
 
@@ -54,7 +55,8 @@ const dev = (id: number, org_id: number, hostname: string, platform: Device['pla
   cpu_pct: status === 'pending' ? null : 12.5, mem_used_pct: status === 'pending' ? null : 50.8, disk_used_pct: status === 'pending' ? null : 42.3,
   battery_pct: null, battery_charging: null, uptime_s: status === 'pending' ? null : 86400 * 3 + 4000, open_alerts: 0,
   can_run_commands: platform !== 'android', rustdesk_id: null,
-  pending_patches: 0, security_patches: 0, reboot_required: false, patches_checked_at: null, ...extra,
+  pending_patches: 0, security_patches: 0, reboot_required: false, patches_checked_at: null,
+  software_count: 0, software_checked_at: null, ...extra,
 });
 // The mock relay; add &rustdesk=0 to the URL to see the "not configured" card.
 const rustdesk = new URLSearchParams(location.search).get('rustdesk') === '0'
@@ -84,6 +86,44 @@ const patchReports: Record<number, Record<string, unknown>> = {
   },
   5: { checked_at: iso(7200e3), manager: 'wu', reboot_required: true, count: 0, security_count: 0, error: '', updates: [] },
 };
+// The installed-software inventory a desktop agent reports (SI1), keyed by device
+// id: Linux dpkg packages and Windows registry programs. The device-detail
+// response serves softwareInventory[id] as the device's `software` list, and the
+// fleet software search below scans these. Android devices report apps, not
+// software, so they are absent here. The device software_count is backfilled from
+// these lengths just below.
+const softwareInventory: Record<number, SoftwareItem[]> = {
+  1: [
+    { name: 'openssl', version: '3.0.13-0ubuntu3.4', publisher: 'Ubuntu Developers', source: 'dpkg' },
+    { name: 'curl', version: '8.5.0-2ubuntu10.6', publisher: 'Ubuntu Developers', source: 'dpkg' },
+    { name: 'nginx-core', version: '1.24.0-2ubuntu7', publisher: 'Ubuntu Developers', source: 'dpkg' },
+    { name: 'openssh-server', version: '1:9.6p1-3ubuntu13', publisher: 'Ubuntu Developers', source: 'dpkg' },
+    { name: 'python3', version: '3.12.3-0ubuntu2', publisher: 'Ubuntu Developers', source: 'dpkg' },
+    { name: 'vim', version: '2:9.1.0016-1ubuntu7', publisher: 'Ubuntu Developers', source: 'dpkg' },
+  ],
+  2: [
+    { name: '7-Zip 23.01 (x64)', version: '23.01', publisher: 'Igor Pavlov', source: 'registry' },
+    { name: 'Google Chrome', version: '129.0.6668.70', publisher: 'Google LLC', source: 'registry' },
+    { name: 'Mozilla Firefox (x64 en-US)', version: '131.0.3', publisher: 'Mozilla', source: 'registry' },
+    { name: 'OpenSSL 3.0.13', version: '3.0.13', publisher: 'OpenSSL Project', source: 'registry' },
+    { name: 'Microsoft Edge', version: '129.0.2792.65', publisher: 'Microsoft Corporation', source: 'registry' },
+  ],
+  4: [
+    { name: 'openssl', version: '3.0.13-0ubuntu3.1', publisher: 'Ubuntu Developers', source: 'dpkg' },
+    { name: 'curl', version: '8.5.0-2ubuntu10.1', publisher: 'Ubuntu Developers', source: 'dpkg' },
+    { name: 'docker-ce', version: '5:27.3.1-1~ubuntu.24.04~noble', publisher: 'Docker Inc.', source: 'dpkg' },
+  ],
+  5: [
+    { name: 'Acme VPN Client', version: '2.1.0', publisher: 'Acme Corp', source: 'registry' },
+    { name: 'Google Chrome', version: '129.0.6668.70', publisher: 'Google LLC', source: 'registry' },
+    { name: 'OpenSSL 3.0.13', version: '3.0.13', publisher: 'OpenSSL Project', source: 'registry' },
+    { name: 'Microsoft Visual C++ 2015-2022 Redistributable (x64)', version: '14.40.33810', publisher: 'Microsoft Corporation', source: 'registry' },
+  ],
+};
+for (const d of devices) {
+  const inv = softwareInventory[d.id];
+  if (inv) { d.software_count = inv.length; d.software_checked_at = iso(3600e3); }
+}
 // The server file library (SD1): one global artifact usable by any client and one
 // scoped to Acme Dental (org 1). The Deploy dialog filters these to a device's org.
 const files: LibraryFile[] = [
@@ -326,6 +366,9 @@ function route(method: string, path: string, body: unknown): Reply {
       alerts: alerts.filter((a) => a.device_id === d.id && !a.resolved_at),
       commands: commands.filter((c) => c.device_id === d.id).slice(0, 20).map((c) => ({ ...c, stdout: '', stderr: '' })),
       patches: patchReports[d.id] ?? {},
+      // Installed-software inventory (SI1), a sibling like `patches`; Android
+      // reports apps (in facts), not software.
+      software: d.platform === 'android' ? [] : (softwareInventory[d.id] ?? []),
     });
   }
   if ((x = m(/^\/api\/v1\/devices\/(\d+)\/heartbeats$/))) {
@@ -484,6 +527,28 @@ function route(method: string, path: string, body: unknown): Reply {
       return ok(null, 204);
     }
     return ok({ file: f });
+  }
+  // Installed-software inventory search (SI1): the packages whose name matches the
+  // substring q across the devices (org_id narrows to one client). The mock does
+  // not model per-user org scoping (like the rest of the mock), so it honours only
+  // the org_id filter; the real server scopes to the caller's visible orgs (RS2).
+  if (p === '/api/v1/software') {
+    const raw = (q.get('q') ?? '').trim();
+    if (raw.length < 2) return err(400, 'invalid_request', 'q is required and must be at least 2 characters');
+    const needle = raw.toLowerCase();
+    const orgId = Number(q.get('org_id') ?? 0);
+    const limit = 500;
+    const results: SoftwareHit[] = [];
+    for (const d of devices) {
+      if (orgId && d.org_id !== orgId) continue;
+      for (const s of softwareInventory[d.id] ?? []) {
+        if (results.length >= limit) break;
+        if (s.name.toLowerCase().includes(needle)) {
+          results.push({ device_id: d.id, hostname: d.hostname, org_id: d.org_id, org_name: d.org_name, name: s.name, version: s.version });
+        }
+      }
+    }
+    return ok({ query: raw, results, truncated: results.length >= limit });
   }
   if (p === '/api/v1/presets') return ok({ presets, source: 'builtin', path: '' });
   if ((x = m(/^\/api\/v1\/commands\/(\d+)$/))) {

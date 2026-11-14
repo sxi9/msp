@@ -71,8 +71,8 @@ func fixture(t *testing.T, s *Store) (Org, User, Device, string) {
 // migrationCount is the number of files in migrations/ (0001_init,
 // 0002_heartbeats_at, 0003_shell_sessions, 0004_user_orgs, 0005_notifications,
 // 0006_device_patches, 0007_patch_commands, 0008_files_and_deploy,
-// 0009_two_factor, 0010_totp_last_step).
-const migrationCount = 10
+// 0009_two_factor, 0010_totp_last_step, 0011_device_software).
+const migrationCount = 11
 
 func TestOpenMigratesAndReopens(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "msp.db")
@@ -1040,7 +1040,8 @@ func TestDeviceJSONShape(t *testing.T) {
 	want := []string{"id", "org_id", "org_name", "device_uid", "hostname", "platform", "arch", "os_version", "agent_version",
 		"interval_s", "status", "enrolled_at", "last_seen_at", "last_ip", "revoked", "cpu_pct", "mem_used_pct", "disk_used_pct",
 		"battery_pct", "battery_charging", "uptime_s", "open_alerts", "can_run_commands", "rustdesk_id",
-		"pending_patches", "security_patches", "reboot_required", "patches_checked_at"}
+		"pending_patches", "security_patches", "reboot_required", "patches_checked_at",
+		"software_count", "software_checked_at"}
 	var got []string
 	for k := range m {
 		got = append(got, k)
@@ -1056,6 +1057,10 @@ func TestDeviceJSONShape(t *testing.T) {
 	// A device that has never reported patches: zero counts, no reboot, no check.
 	if m["pending_patches"] != float64(0) || m["security_patches"] != float64(0) || m["reboot_required"] != false || m["patches_checked_at"] != nil {
 		t.Fatalf("DEVICE patch defaults: %s", b)
+	}
+	// A device that has never reported software: zero count, no check (SI1).
+	if m["software_count"] != float64(0) || m["software_checked_at"] != nil {
+		t.Fatalf("DEVICE software defaults: %s", b)
 	}
 	if ts, _ := m["last_seen_at"].(string); ts != "2026-11-13T10:00:00Z" {
 		t.Fatalf("last_seen_at = %q (want RFC3339 UTC second precision)", ts)

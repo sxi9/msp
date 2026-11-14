@@ -3,7 +3,8 @@ import { api, errorText } from '../api.ts';
 import { usePoll } from '../hooks.ts';
 import { when } from '../lib/format.ts';
 import { fileSize, shortHash } from '../lib/deploy.ts';
-import type { LibraryFile, Org, User } from '../types.ts';
+import { groupHitsByDevice, summariseHits } from '../lib/software.ts';
+import type { LibraryFile, Org, SoftwareSearchResult, User } from '../types.ts';
 import { ConfirmButton } from '../components/Confirm.tsx';
 import { CopyButton } from '../components/CopyBlock.tsx';
 
@@ -41,6 +42,7 @@ export function Software({ user }: { user: User }) {
         Upload an installer or file once, then deploy it to a device from its page. Agents download it over
         their authenticated channel and verify the SHA-256 before use; every upload, delete and deploy is audited.
       </p>
+      <SoftwareSearch />
       <UploadForm user={user} orgs={orgList} onUploaded={() => files.reload()} />
       {error && <p class="error">{error}</p>}
       {files.error && <p class="error">{files.error}</p>}
@@ -71,6 +73,74 @@ export function Software({ user }: { user: User }) {
         </div>
       )}
     </section>
+  );
+}
+
+/**
+ * Installed-software inventory search across the fleet (SI1): a query box over the
+ * software every desktop agent reports, scoped server-side to the clients the
+ * caller can see. Results group by device (device -> matching package/version),
+ * each device linking to its page. For license and vulnerability hunting.
+ */
+function SoftwareSearch() {
+  const [query, setQuery] = useState('');
+  const [result, setResult] = useState<SoftwareSearchResult | null>(null);
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+  const q = query.trim();
+  const tooShort = q.length > 0 && q.length < 2;
+
+  const search = async (e: Event) => {
+    e.preventDefault();
+    if (q.length < 2) return;
+    setBusy(true);
+    setError('');
+    try {
+      setResult(await api.searchSoftware(q));
+    } catch (err) {
+      setError(errorText(err));
+      setResult(null);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const groups = result ? groupHitsByDevice(result.results) : [];
+  return (
+    <form class="card software-search" onSubmit={search}>
+      <div class="form-row">
+        <h2>Software inventory search</h2>
+        <input type="search" placeholder="Package or program name, e.g. openssl" value={query} onInput={(e) => setQuery(e.currentTarget.value)} />
+        <button type="submit" class="btn btn-primary" disabled={busy || q.length < 2}>{busy ? 'Searching…' : 'Search'}</button>
+      </div>
+      <p class="muted">Find every device with a package or program installed, across the clients you can see. The name match is a case-insensitive substring; at least two characters.</p>
+      {tooShort && <p class="muted">Type at least two characters.</p>}
+      {error && <p class="error">{error}</p>}
+      {result && (
+        groups.length === 0 ? (
+          <p class="empty">No device has software matching “{result.query}”.</p>
+        ) : (
+          <>
+            <p class="muted">{summariseHits(result.results)} matching “{result.query}”.{result.truncated && ' Showing the first results — narrow the search for more.'}</p>
+            <div class="log-scroll">
+              <table class="grid">
+                <thead><tr><th>Device</th><th>Client</th><th>Package</th><th>Version</th></tr></thead>
+                <tbody>
+                  {groups.map((g) => g.packages.map((pkg, i) => (
+                    <tr key={`${g.device_id}-${pkg.name}-${pkg.version}-${i}`}>
+                      <td data-label="Device"><a href={`#/devices/${g.device_id}`}>{g.hostname}</a></td>
+                      <td data-label="Client" class="muted">{g.org_name}</td>
+                      <td data-label="Package"><code>{pkg.name}</code></td>
+                      <td data-label="Version">{pkg.version || '—'}</td>
+                    </tr>
+                  )))}
+                </tbody>
+              </table>
+            </div>
+          </>
+        )
+      )}
+    </form>
   );
 }
 

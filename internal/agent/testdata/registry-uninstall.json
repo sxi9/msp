@@ -1,0 +1,11 @@
+[
+  {"display_name": "Mozilla Firefox (x64 en-US)", "display_version": "131.0.3", "publisher": "Mozilla", "system_component": 0, "windows_installer": 0, "release_type": "", "parent_key_name": ""},
+  {"display_name": "7-Zip 24.08 (x64)", "display_version": "24.08", "publisher": "Igor Pavlov", "system_component": 0, "windows_installer": 0, "release_type": "", "parent_key_name": ""},
+  {"display_name": "Google Chrome", "display_version": "130.0.6723.70", "publisher": "Google LLC", "system_component": 0, "windows_installer": 0, "release_type": "", "parent_key_name": ""},
+  {"display_name": "Microsoft Visual C++ 2015-2022 Redistributable (x64)", "display_version": "14.40.33810", "publisher": "Microsoft Corporation", "system_component": 0, "windows_installer": 1, "release_type": "", "parent_key_name": ""},
+  {"display_name": "Windows SDK AddOn", "display_version": "10.1.0.0", "publisher": "Microsoft Corporation", "system_component": 1, "windows_installer": 0, "release_type": "", "parent_key_name": ""},
+  {"display_name": "", "display_version": "1.0.0", "publisher": "Nobody", "system_component": 0, "windows_installer": 0, "release_type": "", "parent_key_name": ""},
+  {"display_name": "Security Update for Windows (KB5040442)", "display_version": "", "publisher": "Microsoft Corporation", "system_component": 0, "windows_installer": 0, "release_type": "Security Update", "parent_key_name": ""},
+  {"display_name": "Update for Microsoft Office (KB5002640)", "display_version": "", "publisher": "Microsoft Corporation", "system_component": 0, "windows_installer": 0, "release_type": "Update", "parent_key_name": ""},
+  {"display_name": "KB5041580", "display_version": "", "publisher": "Microsoft Corporation", "system_component": 0, "windows_installer": 0, "release_type": "", "parent_key_name": "Microsoft Windows"}
+]

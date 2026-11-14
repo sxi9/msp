@@ -13,6 +13,7 @@ P1 = first build. P2 = next. P3 = after that.
 - RS1 (built) Interactive remote shell over WebSocket relay (PTY / ConPTY), audited and transcribed; Windows ConPTY cross-builds but is not runtime-verified
 - PM1 (built) Patch status and install: periodic pending-updates report (apt on Linux, Windows Update on Windows, behind an injectable command executor), and install all / security / named-ids through the command queue with a reboot policy; Windows Update path NOT VERIFIED on a real host
 - SD1 (built) Software deployment and file transfer: a server-side file library, push a file to a desktop device and optionally run it, or install a named package (apt on Linux), hash-verified on the device and audited; Windows installer path NOT VERIFIED on a real host
+- SI1 (built) Installed-software inventory on desktops: the agent reports installed software (dpkg/rpm on Linux, the uninstall registry on Windows; read-only), shown on the device page and searchable fleet-wide for licensing and vulnerability hunting, org-scoped; Windows registry path NOT VERIFIED on a real host
 - P2 Service and process watchlists, event log forwarding
 - P2 Agent self-update
 - RD1 (built) Remote desktop phase A: official RustDesk client installed by the installer (`--with-rustdesk`), pointed at our relay by `msp-agent rustdesk setup`, id reported in facts
@@ -55,7 +56,7 @@ P1 = first build. P2 = next. P3 = after that.
 - P1 Login, session, role-aware menus
 - P1 Clients list, client page with enrollment token button
 - P1 Device list: online/offline, OS, last seen, filters
-- P1 Device page: live metrics, inventory, software (Android installed apps panel with search and system toggle; desktop software list is P2), command history, Lock button
+- P1 Device page: live metrics, inventory, software (Android installed apps panel with search and system toggle; desktop installed-software panel with count/last-checked/search, SI1), command history, Lock button
 - P1 Run command / saved script on one device or a group
 - P1 Command preset library: server-served dropdown, editable JSON file (`MSP_PRESETS`) with live reload, builtin fallback
 - P1 Alerts page: acknowledge, resolve

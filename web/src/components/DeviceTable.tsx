@@ -28,11 +28,11 @@ export function DeviceTable({ devices, grouped = true, empty }: { devices: Devic
   return (
     <table class="grid">
       <thead>
-        <tr><th></th><th>Hostname</th><th>OS</th><th>Arch</th><th>Last seen</th><th>CPU</th><th>Memory</th><th>Disk</th><th>Battery</th><th>Alerts</th><th>Updates</th><th>Agent</th></tr>
+        <tr><th></th><th>Hostname</th><th>OS</th><th>Arch</th><th>Last seen</th><th>CPU</th><th>Memory</th><th>Disk</th><th>Battery</th><th>Alerts</th><th>Updates</th><th>Software</th><th>Agent</th></tr>
       </thead>
       <tbody>
         {groups.map((g) => [
-          grouped && <tr class="orghead" key={`org-${g.org_id}`}><td colSpan={12}><a href={`#/orgs/${g.org_id}`}>{g.org_name}</a> <span class="muted">{g.devices.length}</span></td></tr>,
+          grouped && <tr class="orghead" key={`org-${g.org_id}`}><td colSpan={13}><a href={`#/orgs/${g.org_id}`}>{g.org_name}</a> <span class="muted">{g.devices.length}</span></td></tr>,
           ...g.devices.map((d) => (
             <tr key={d.id} class={d.revoked ? 'revoked' : ''}>
               <td data-label="Status"><StatusDot status={d.status} alerting={d.open_alerts > 0} /></td>
@@ -46,6 +46,7 @@ export function DeviceTable({ devices, grouped = true, empty }: { devices: Devic
               <td data-label="Battery"><Battery pct={d.battery_pct} charging={d.battery_charging} /></td>
               <td data-label="Alerts">{d.open_alerts > 0 ? <span class="badge badge-amber">{d.open_alerts}</span> : <span class="muted">0</span>}</td>
               <td data-label="Updates"><Updates device={d} /></td>
+              <td data-label="Software">{d.software_count > 0 ? <a href={`#/devices/${d.id}`} title={`${d.software_count} installed packages`}>{d.software_count}</a> : <span class="muted">0</span>}</td>
               <td data-label="Agent" class="muted">{d.agent_version || '—'}</td>
             </tr>
           )),

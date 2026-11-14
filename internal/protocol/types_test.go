@@ -56,6 +56,7 @@ func TestFixturesRoundTrip(t *testing.T) {
 		{"sync_rustdesk.json", &SyncRequest{}},
 		{"sync_response_rustdesk.json", &SyncResponse{}},
 		{"sync_android_apps.json", &SyncRequest{}},
+		{"sync_software.json", &SyncRequest{}},
 		{"sync_patches.json", &SyncRequest{}},
 		{"command_result.json", &CommandResult{}},
 		{"command_shell.json", &Command{}},
@@ -192,6 +193,31 @@ func TestFixtureSemantics(t *testing.T) {
 	}
 	if sl.Facts.Apps != nil || sa.Facts != nil || srd.Facts.Apps != nil || el.Facts.Apps != nil || ea.Facts.Apps != nil {
 		t.Fatal("plain fixtures must not carry apps")
+	}
+
+	// Installed-software inventory (SI1): a desktop sync whose facts carry
+	// software, in the order the agent sends them (sorted by name). The plain
+	// and apps fixtures carry no software; a software fixture carries no apps.
+	var ssw SyncRequest
+	roundTrip(t, "sync_software.json", &ssw)
+	if ssw.Facts == nil || len(ssw.Facts.Software) != 3 || ssw.Facts.Validate() != nil {
+		t.Fatalf("sync_software facts: %+v", ssw.Facts)
+	}
+	sw := ssw.Facts.Software
+	if sw[0].Name != "curl" || sw[2].Name != "openssl" || sw[1].Source != SoftwareSourceDpkg || sw[1].Publisher != "Mozilla" {
+		t.Fatalf("software: %+v", sw)
+	}
+	for i := 1; i < len(sw); i++ {
+		if sw[i-1].Name > sw[i].Name {
+			t.Fatalf("software must be sorted by name: %+v", sw)
+		}
+	}
+	if ssw.Facts.Apps != nil {
+		t.Fatal("a software fixture must not carry apps")
+	}
+	if sl.Facts.Software != nil || srd.Facts.Software != nil || sapps.Facts.Software != nil ||
+		el.Facts.Software != nil || ea.Facts.Software != nil {
+		t.Fatal("plain and apps fixtures must not carry software")
 	}
 
 	var res CommandResult
@@ -531,6 +557,69 @@ func TestFactsAppsValidate(t *testing.T) {
 	out, _ = json.Marshal(App{Package: "com.example", Label: "Example", Version: "1.2.3", System: true})
 	if string(out) != `{"package":"com.example","label":"Example","version":"1.2.3","system":true}` {
 		t.Fatalf("app JSON shape: %s", out)
+	}
+}
+
+func TestFactsSoftwareValidate(t *testing.T) {
+	sw := func(name, version, publisher, source string) SoftwareItem {
+		return SoftwareItem{Name: name, Version: version, Publisher: publisher, Source: source}
+	}
+	ok := []Facts{
+		{},
+		{Software: []SoftwareItem{}},
+		{Software: []SoftwareItem{sw("openssl", "", "", SoftwareSourceDpkg)}},
+		{Software: []SoftwareItem{sw("Firefox", "131.0", "Mozilla", SoftwareSourceRegistry)}},
+		{Software: []SoftwareItem{sw(strings.Repeat("n", MaxSoftwareNameLen), strings.Repeat("v", MaxSoftwareVersionLen), strings.Repeat("p", MaxSoftwarePublisherLen), SoftwareSourceRPM)}},
+		{Software: make([]SoftwareItem, MaxSoftware)},
+	}
+	for i := range ok[5].Software {
+		ok[5].Software[i] = sw("pkg", "1", "", SoftwareSourceDpkg)
+	}
+	for i, f := range ok {
+		if err := f.Validate(); err != nil {
+			t.Errorf("ok[%d]: unexpected error %v", i, err)
+		}
+	}
+	tooMany := make([]SoftwareItem, MaxSoftware+1)
+	for i := range tooMany {
+		tooMany[i] = sw("pkg", "1", "", SoftwareSourceDpkg)
+	}
+	bad := []struct {
+		f    Facts
+		want string
+	}{
+		{Facts{Software: []SoftwareItem{sw("ok", "", "", SoftwareSourceDpkg), sw("", "1", "", SoftwareSourceDpkg)}}, "facts.software[1].name must be 1..256"},
+		{Facts{Software: []SoftwareItem{sw(strings.Repeat("n", MaxSoftwareNameLen+1), "", "", SoftwareSourceDpkg)}}, "facts.software[0].name must be 1..256"},
+		{Facts{Software: []SoftwareItem{sw("a", strings.Repeat("v", MaxSoftwareVersionLen+1), "", SoftwareSourceDpkg)}}, "facts.software[0].version exceeds 128"},
+		{Facts{Software: []SoftwareItem{sw("a", "", strings.Repeat("p", MaxSoftwarePublisherLen+1), SoftwareSourceDpkg)}}, "facts.software[0].publisher exceeds 256"},
+		{Facts{Software: []SoftwareItem{sw("a", "", "", "winget")}}, "facts.software[0].source must be one of dpkg|rpm|registry"},
+		{Facts{Software: []SoftwareItem{sw("a", "", "", "")}}, "facts.software[0].source must be one of dpkg|rpm|registry"},
+		{Facts{Software: tooMany}, "facts.software has 2001 entries, at most 2000"},
+	}
+	for i, b := range bad {
+		err := b.f.Validate()
+		if err == nil {
+			t.Errorf("bad[%d]: expected error containing %q", i, b.want)
+			continue
+		}
+		if !strings.Contains(err.Error(), b.want) {
+			t.Errorf("bad[%d]: error %q does not contain %q", i, err, b.want)
+		}
+	}
+
+	if !ValidSoftwareSource(SoftwareSourceDpkg) || !ValidSoftwareSource(SoftwareSourceRPM) ||
+		!ValidSoftwareSource(SoftwareSourceRegistry) || ValidSoftwareSource("") || ValidSoftwareSource("winget") {
+		t.Fatal("ValidSoftwareSource")
+	}
+
+	// Omitted when nil or empty; present with exactly the four keys otherwise.
+	out, _ := json.Marshal(Facts{IPs: []string{}, Software: []SoftwareItem{}})
+	if strings.Contains(string(out), "software") {
+		t.Fatalf("empty software must be omitted: %s", out)
+	}
+	out, _ = json.Marshal(SoftwareItem{Name: "openssl", Version: "3.0.2", Publisher: "Ubuntu", Source: SoftwareSourceDpkg})
+	if string(out) != `{"name":"openssl","version":"3.0.2","publisher":"Ubuntu","source":"dpkg"}` {
+		t.Fatalf("software JSON shape: %s", out)
 	}
 }
 

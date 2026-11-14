@@ -97,6 +97,11 @@ func Enroll(ctx context.Context, serverURL, token, caFile string, insecureHTTP b
 		IntervalS:       cfg.IntervalS,
 		Facts:           col.Facts(),
 	}
+	// Attach the installed-software inventory (SI1) so the device page is
+	// populated from first contact; the collector is read-only (dpkg/rpm on
+	// Linux, the Windows uninstall registry) and returns nil where there is
+	// none, so Facts.Software is simply omitted on such a host.
+	req.Facts.Software = NewSoftwareCollector().Collect(ctx)
 	var resp protocol.EnrollResponse
 	for attempt := 1; ; attempt++ {
 		resp, err = client.Enroll(ctx, req)
@@ -147,6 +152,12 @@ func Run(ctx context.Context, cfg Config, version string, log *slog.Logger) erro
 	// executor (package source). The deployer is built once over the same Client
 	// the sync loop uses, like patchCol above.
 	deployer := NewDeployer(client)
+	// Installed-software inventory (SI1): the desktop agent reports the host's
+	// installed packages/programs on the same cadence as facts. The collector
+	// runs dpkg/rpm (Linux) or reads the uninstall registry (Windows); every
+	// call is read-only, and Collect returns nil on a host with no inventory so
+	// Facts.Software (omitempty) is omitted there.
+	swCol := NewSoftwareCollector()
 
 	waitS := min(protocol.MaxWaitS, cfg.IntervalS-1)
 	if waitS < 0 {
@@ -173,6 +184,7 @@ func Run(ctx context.Context, cfg Config, version string, log *slog.Logger) erro
 		}
 		if syncs%factsEvery == 0 {
 			f := col.Facts()
+			f.Software = swCol.Collect(ctx)
 			req.Facts = &f
 		}
 		// The patch report rides the sync when one is due (the first sync after

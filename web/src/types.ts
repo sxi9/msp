@@ -1,6 +1,8 @@
 // Wire types of the dashboard API (docs/PROTOCOL.md section 6). Field names
 // are the JSON names exactly; nullable columns are `| null`.
 
+import type { SoftwareHit, SoftwareItem } from './lib/software.ts';
+
 export type Role = 'admin' | 'operator' | 'viewer';
 export type Platform = 'linux' | 'windows' | 'android';
 export type DeviceStatus = 'online' | 'offline' | 'pending';
@@ -86,7 +88,19 @@ export interface Device {
    */
   pending_patches: number; security_patches: number; reboot_required: boolean;
   patches_checked_at: string | null;
+  /**
+   * Installed-software inventory (SI1), denormalised from the last facts.software
+   * a desktop agent reported. software_count drives the fleet column and the
+   * device-page heading; software_checked_at is when it was last collected. The
+   * full list is the `software` sibling on the device-detail response, not here.
+   * Android devices report apps, not software, so their count is 0 and the device
+   * page shows the apps panel instead.
+   */
+  software_count: number; software_checked_at: string | null;
 }
+
+/** Body of GET /api/v1/software (SI1): the cross-fleet package-search results. */
+export interface SoftwareSearchResult { query: string; results: SoftwareHit[]; truncated: boolean }
 
 /** Body of GET /api/v1/rustdesk: the self-hosted relay, enabled only when the server has host and key. */
 export interface RustdeskInfo { enabled: boolean; host: string; key: string }
@@ -191,6 +205,8 @@ export interface DeviceDetail {
   commands: Command[];
   /** The full patches report (PM1); {} or absent when the device has never reported. Parse with lib/patches.patchReportOf. */
   patches?: Record<string, unknown>;
+  /** The full installed-software list (SI1), a sibling like patches; [] or absent for Android or an unreported desktop. Parse with lib/software.softwareOf. */
+  software?: SoftwareItem[];
 }
 
 // --- NS1 alert notifications -------------------------------------------------

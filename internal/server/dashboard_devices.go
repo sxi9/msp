@@ -60,6 +60,22 @@ func dashJSONObject(raw string) map[string]any {
 	return m
 }
 
+// dashJSONArray passes through a stored JSON array column verbatim (SI1's
+// software_json is written by store.RecordSoftware, so it is already a valid
+// array), substituting "[]" for an empty or unparsable value so the response is
+// always a well-formed JSON array.
+func dashJSONArray(raw string) json.RawMessage {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return json.RawMessage("[]")
+	}
+	var a []json.RawMessage
+	if err := json.Unmarshal([]byte(raw), &a); err != nil {
+		return json.RawMessage("[]")
+	}
+	return json.RawMessage(raw)
+}
+
 // handleGetDevice is GET /api/v1/devices/{id}: the device, its facts and
 // last metrics objects, its open alerts and its last 20 commands without
 // output.
@@ -111,6 +127,7 @@ func (s *Server) handleGetDevice(w http.ResponseWriter, r *http.Request) {
 		"facts":    dashJSONObject(dev.FactsJSON),
 		"metrics":  dashJSONObject(dev.LastMetricsJSON),
 		"patches":  dashJSONObject(dev.PatchesJSON),
+		"software": json.RawMessage(dashJSONArray(dev.SoftwareJSON)),
 		"alerts":   alerts,
 		"commands": cmds,
 	})

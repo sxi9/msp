@@ -22,7 +22,8 @@ SELECT d.id, d.org_id, o.name, d.device_uid, d.hostname, d.platform, d.arch, d.o
        d.cpu_pct, d.mem_used_pct, d.disk_used_pct, d.battery_pct, d.battery_charging, d.uptime_s,
        (SELECT COUNT(*) FROM alerts a WHERE a.device_id = d.id AND a.resolved_at IS NULL),
        d.rustdesk_id,
-       d.patches_json, d.patches_checked_at, d.pending_patches, d.security_patches, d.reboot_required
+       d.patches_json, d.patches_checked_at, d.pending_patches, d.security_patches, d.reboot_required,
+       d.software_json, d.software_count, d.software_checked_at
   FROM devices d JOIN orgs o ON o.id = d.org_id`
 
 func (s *Store) scanDevice(row interface{ Scan(...any) error }) (Device, error) {
@@ -30,6 +31,7 @@ func (s *Store) scanDevice(row interface{ Scan(...any) error }) (Device, error) 
 		d                                      Device
 		enrolled                               string
 		lastSeen, rustdesk, patchesChecked     sql.NullString
+		softwareChecked                        sql.NullString
 		revoked                                int
 		cpu, mem, disk                         sql.NullFloat64
 		battery, batteryCharging, uptime, open sql.NullInt64
@@ -39,11 +41,15 @@ func (s *Store) scanDevice(row interface{ Scan(...any) error }) (Device, error) 
 		&d.AgentVersion, &d.IntervalS, &enrolled, &lastSeen, &d.LastIP,
 		&revoked, &d.FactsJSON, &d.LastMetricsJSON,
 		&cpu, &mem, &disk, &battery, &batteryCharging, &uptime, &open, &rustdesk,
-		&d.PatchesJSON, &patchesChecked, &d.PendingPatches, &d.SecurityPatches, &rebootRequired)
+		&d.PatchesJSON, &patchesChecked, &d.PendingPatches, &d.SecurityPatches, &rebootRequired,
+		&d.SoftwareJSON, &d.SoftwareCount, &softwareChecked)
 	if err != nil {
 		return Device{}, err
 	}
 	if d.PatchesCheckedAt, err = nullTime(patchesChecked); err != nil {
+		return Device{}, err
+	}
+	if d.SoftwareCheckedAt, err = nullTime(softwareChecked); err != nil {
 		return Device{}, err
 	}
 	d.RebootRequired = rebootRequired != 0

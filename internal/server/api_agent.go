@@ -173,6 +173,14 @@ func (s *Server) handleEnroll(w http.ResponseWriter, r *http.Request) {
 			s.log.Error("record patches at enroll", "device", dev.ID, "err", err)
 		}
 	}
+	// Store the installed-software inventory when the enroll request carried one
+	// (SI1, desktop only); like the patch report, a failure here must not fail an
+	// enrollment that already succeeded.
+	if len(req.Facts.Software) > 0 {
+		if err := s.st.RecordSoftware(ctx, dev.ID, req.Facts.Software, s.st.Now()); err != nil {
+			s.log.Error("record software at enroll", "device", dev.ID, "err", err)
+		}
+	}
 	s.audit(ctx, "device", &dev.ID, &dev.OrgID, "device.enrolled", "device", &dev.ID, ip, detail)
 	s.log.Info("device enrolled", "device", dev.ID, "org", dev.OrgID, "hostname", dev.Hostname, "platform", dev.Platform, "re_enrolled", reEnrolled)
 	writeJSON(w, http.StatusCreated, protocol.EnrollResponse{
@@ -225,6 +233,15 @@ func (s *Server) handleSync(w http.ResponseWriter, r *http.Request, dev store.De
 			s.log.Error("record patches", "device", dev.ID, "err", err)
 			writeError(w, http.StatusInternalServerError, "internal", "")
 			return
+		}
+	}
+	// Store the installed-software inventory when the sync carried facts with one
+	// (SI1); a sync without facts.software leaves the last stored list untouched.
+	// A failure is logged but must not fail the heartbeat, so the agent keeps
+	// syncing.
+	if req.Facts != nil && len(req.Facts.Software) > 0 {
+		if err := s.st.RecordSoftware(ctx, dev.ID, req.Facts.Software, s.st.Now()); err != nil {
+			s.log.Error("record software", "device", dev.ID, "err", err)
 		}
 	}
 

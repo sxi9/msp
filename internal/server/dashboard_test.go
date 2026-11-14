@@ -69,13 +69,15 @@ func dashKeys(m map[string]any) []string {
 // dashDeviceKeys is the exact DEVICE key set from docs/PROTOCOL.md. The four
 // patch fields (PM1) are denormalised onto every DEVICE row for the fleet column
 // and the device page; the full report is a sibling "patches" object on the
-// device-detail response, not part of DEVICE.
+// device-detail response, not part of DEVICE. software_count and
+// software_checked_at (SI1) are denormalised likewise; the full list is a sibling
+// "software" array on the device-detail response, not part of DEVICE.
 var dashDeviceKeys = []string{
 	"agent_version", "arch", "battery_charging", "battery_pct", "can_run_commands", "cpu_pct",
 	"device_uid", "disk_used_pct", "enrolled_at", "hostname", "id", "interval_s", "last_ip",
 	"last_seen_at", "mem_used_pct", "open_alerts", "org_id", "org_name", "os_version",
 	"patches_checked_at", "pending_patches", "platform", "reboot_required", "revoked",
-	"rustdesk_id", "security_patches", "status", "uptime_s",
+	"rustdesk_id", "security_patches", "software_checked_at", "software_count", "status", "uptime_s",
 }
 
 func TestDashboardAuthAndRoles(t *testing.T) {
@@ -211,7 +213,7 @@ func TestDashboardDevicesShape(t *testing.T) {
 		t.Fatalf("get device: %d %s", resp.StatusCode, body)
 	}
 	detail := dashDecode(t, body)
-	if got := dashKeys(detail); strings.Join(got, ",") != "alerts,commands,device,facts,metrics,patches" {
+	if got := dashKeys(detail); strings.Join(got, ",") != "alerts,commands,device,facts,metrics,patches,software" {
 		t.Fatalf("detail keys %v", got)
 	}
 	dev := detail["device"].(map[string]any)

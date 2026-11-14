@@ -396,6 +396,56 @@ existing command queue and the agent's existing authenticated channel. No new tr
   the fake `apt-get` on PATH (never the public internet, never a real package); the Windows installer
   path is cross-built only.
 
+## Installed-software inventory (SI1, phase 2)
+
+Report the software installed on each desktop device, show it on the device page, and let a
+technician search the whole fleet for a package (licensing and vulnerability hunting). This mirrors
+the Android installed-apps inventory (`protocol.App` / `Facts.Apps`): it rides the facts the agent
+already sends, with no new transport. A device reports `apps` (Android) or `software` (desktop),
+never both.
+
+```
+ agent (facts cadence) ──► Facts.Software = SoftwareCollector.Collect()  (dpkg/rpm or uninstall registry; read-only)
+ agent ──► enroll/sync facts.software ──► RecordSoftware ──► devices.software_json + software_count + software_checked_at
+ dashboard ──► GET /devices/{id} ──► sibling "software" array (full list)
+ dashboard ──► GET /api/v1/software?q= ──► SoftwareSearch (scan software_json in Go, RS2 org-scoped)
+```
+
+- **Protocol** (`internal/protocol/types.go`, fixture `sync_software.json`): `SoftwareItem{Name,
+  Version, Publisher, Source}` and `Facts.Software []SoftwareItem` (`json:"software,omitempty"`); the
+  `SoftwareSource*` constants (`dpkg`/`rpm`/`registry`) with `ValidSoftwareSource`; the bounds
+  (`MaxSoftware` 2000, name/version/publisher length caps, `MaxSoftwareBytes` 192 KiB) enforced by
+  `Facts.Validate` / `SoftwareItem.Validate`.
+- **Agent** (`internal/agent/software.go` + per-platform `software_dpkg.go` / `software_windows.go` /
+  `software_other.go`): a `SoftwareCollector` over an injectable `softwareLister` (the same executor
+  seam PM1 uses). Linux parses `dpkg-query`, falling back to `rpm`; Windows decodes the uninstall
+  registry keys. The pure parsers (`parseDpkg`/`parseRpm`/`parseRegistry`) are unit-tested against
+  captured fixtures on Linux. `finalizeSoftware` trims/length-bounds each field, sorts by name, and
+  caps at the entry and byte budgets; `Collect` returns nil on a host with none so `Facts.Software`
+  is omitted. The Run loop builds the collector once and sets `f.Software = swCol.Collect(ctx)` in the
+  facts block (and at `Enroll`), beside the metrics collector.
+- **Store** (`internal/store/software.go`, migration `0011_device_software`): the `devices` columns
+  `software_json`/`software_count`/`software_checked_at`; `RecordSoftware` writes all three (nil list
+  stored as `[]`, `ErrNotFound` when the device is gone); `SoftwareSearch(visibleOrgs, query, limit)`
+  scans each visible device's `software_json` in Go (a documented phase-1 choice, so a match is
+  anchored to a package-name boundary rather than a JSON LIKE), returning `[]SoftwareHit` ordered by
+  org/hostname/name, capped at `SoftwareSearchLimit` (500) with a `truncated` flag, org-scoped via
+  `orgInClause` for RS2.
+- **Server** (`internal/server/dashboard_software.go`): `RecordSoftware` called from the sync/enroll
+  handler beside `RecordPatches` (a failure never fails the heartbeat/enroll); the device-detail
+  handler emits the full list as the sibling `software` array (`dashJSONArray(dev.SoftwareJSON)`,
+  like the PM1 `patches` sibling); and `GET /api/v1/software?q=&org_id=` (viewer+, read), `q` ≥ 2
+  chars, an unseen `org_id` a 404 before the search (RS2). The route self-registers via
+  `dashboardRoutes`, with `RegisterSoftware` for a hand-assembled mux.
+- **Dashboard** (`web/src/lib/software.ts`, the device Installed-software panel + the Software-page
+  fleet search): pure filter/sort/source-label helpers with a `node --test`.
+- **Proof**: `internal/e2e/software_test.go` drives the real Linux agent against a fake `dpkg-query`
+  on PATH (a captured inventory, never the container's own packages, never a mutation): the reported
+  software shows on `GET /devices/{id}` with the right count and the full list, `GET
+  /api/v1/software?q=openssl` returns the device, a sub-2-char `q` is 400, and an operator scoped to
+  another org sees no cross-org rows (and a 404 on an explicit foreign `org_id`). The Windows
+  registry path is parser-unit-tested and cross-built only, NOT VERIFIED on a real host.
+
 ## Two-factor authentication (TF1, phase 2)
 
 A TOTP (RFC 6238) second factor for staff logins, with one-time recovery codes and an admin reset

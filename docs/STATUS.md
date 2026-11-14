@@ -135,6 +135,18 @@ Manual test for the `NOT VERIFIED` rows, in order: (1) on a host with Docker, fi
 | End-to-end: the real Linux agent downloads an uploaded marker script over `/api/agent/v1/files/{id}`, verifies the hash, writes dest 0755 and runs it (`done`, marker on disk + in the output, `deploy.requested` audited); a library file whose stored hash != its bytes fails without writing dest; a `..` dest is 400 with no command; `source:package` installs via the fake apt; RS2 operator 404 on deploy and a foreign device token 404 on the file download; android 400 | All | `WORKING` (`internal/e2e` `TestDeployEndToEnd`) |
 | Windows installer (package deploy) on a real Windows host | — | `NOT VERIFIED` (no Windows host in the build container; a package deploy on Windows fails cleanly and no installer path is wired yet) |
 
+## SI1: installed-software inventory on desktops (phase 2)
+
+| Part | Component | Label |
+|---|---|---|
+| Protocol: `SoftwareItem{Name,Version,Publisher,Source}` + `Facts.Software` (`software,omitempty`), `SoftwareSource*` (`dpkg`/`rpm`/`registry`) + `ValidSoftwareSource`, bounds (`MaxSoftware` 2000, name/version/publisher caps, `MaxSoftwareBytes` 192 KiB), `Facts.Validate`/`SoftwareItem.Validate`; fixture `sync_software.json` | Protocol | `WORKING` (`internal/protocol` `types_test.go`) |
+| Agent: `SoftwareCollector` over an injectable `softwareLister` (the PM1 executor seam), Linux `dpkg-query`→`rpm` lister, Windows uninstall-registry lister, pure `parseDpkg`/`parseRpm`/`parseRegistry`, `finalizeSoftware` (trim/length-bound/sort/cap entries+bytes); wired into the Run loop and `Enroll` (`f.Software = swCol.Collect(ctx)`) | Agent | `WORKING` (Linux: `internal/agent` `software_test.go`, parsers against captured dpkg/rpm/registry fixtures) / `NOT VERIFIED` (Windows registry read) |
+| Store: migration `0011_device_software` (the `devices` columns `software_json`/`software_count`/`software_checked_at`), `RecordSoftware`, `SoftwareSearch` (Go scan of `software_json`, RS2 `orgInClause`, `SoftwareSearchLimit` 500 + truncated), `store.SoftwareHit`, `store.Device` software fields | Store | `WORKING` (`internal/store` `software_test.go`; migrationCount 11) |
+| Server: `RecordSoftware` from the sync/enroll handler (beside `RecordPatches`, never fails the heartbeat/enroll), device-detail sibling `software` array (`dashJSONArray(dev.SoftwareJSON)`), `GET /api/v1/software?q=&org_id=` (viewer+, `q` ≥ 2 chars, unseen `org_id` 404 before the search); route self-registered via `dashboardRoutes` (`RegisterSoftware`) | Server | `WORKING` (`internal/server` `dashboard_software_test.go`) |
+| Dashboard: device Installed-software panel (count, last checked, name/publisher search, Name/Version/Publisher/Source table) and the Software-page fleet search (device→package/version, each linking to the device), `web/src/lib/software.ts` pure helpers, `?mock=1` seeded | Dashboard | `WORKING` (`web/src/lib/software.test.ts`; `make web`) |
+| End-to-end: the real Linux agent reports installed software from a fake `dpkg-query` on PATH (a captured inventory, never the container's packages, never a mutation), visible on `GET /devices/{id}` with the right count + the full list; `GET /api/v1/software?q=openssl` returns the device; a sub-2-char `q` is 400; an operator scoped to another org sees no cross-org rows and a 404 on an explicit foreign `org_id` | All | `WORKING` (`internal/e2e` `TestSoftwareEndToEnd`) |
+| Windows registry inventory on a real Windows host | — | `NOT VERIFIED` (no Windows host in the build container; the registry read is cross-built and `parseRegistry` is unit-tested against a captured dump) |
+
 ## Later phases
 
 | Feature | Phase | Label |
@@ -143,6 +155,7 @@ Manual test for the `NOT VERIFIED` rows, in order: (1) on a host with Docker, fi
 | Per-technician org scoping | 2 | `WORKING` (RS2 table above) |
 | Patch status and install (apt / Windows Update) | 2 | `WORKING` (PM1 table above; Linux) / `NOT VERIFIED` (Windows Update) |
 | Software deployment, file transfer | 2 | `WORKING` (SD1 table above; Linux) / `NOT VERIFIED` (Windows installer) |
+| Installed-software inventory on desktops | 2 | `WORKING` (SI1 table above; Linux) / `NOT VERIFIED` (Windows registry) |
 | Alert notifications: email + Slack/webhook, routing, maintenance windows, delivery log | 2 | `WORKING` (NS1 table above) / `NOT VERIFIED` (a real external send) |
 | Notifications: SMS and escalation policies | 2 | `PLANNED` (NS2) |
 | Script library, automations, policy groups, bulk actions | 2 | `PLANNED` |

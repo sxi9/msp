@@ -127,6 +127,10 @@ pre.out { margin: 0; padding: 8px 64px 8px 10px; background: var(--code-bg); bor
 .apps-scroll td { white-space: normal; overflow-wrap: anywhere; }
 .apps-scroll td .chip { margin-left: 6px; }
 .apps tr.system td { color: var(--muted); }
+/* Installed-software inventory (SI1): the device panel reuses .apps/.apps-scroll;
+   the fleet search box grows to fill its row and its results scroll in .log-scroll. */
+.software-search h2 { margin: 0; }
+.software-search input[type=search] { min-width: 0; flex: 1 1 220px; }
 /* Updates panel (PM1): header counts, the reboot badge and the scrollable list
    (reusing .apps-scroll). A security row is tinted to stand out. */
 .updates h2 { margin: 0; }

@@ -89,9 +89,17 @@ type Device struct {
 	SecurityPatches  int        `json:"security_patches"`
 	RebootRequired   bool       `json:"reboot_required"`
 	PatchesCheckedAt *time.Time `json:"patches_checked_at"`
-	FactsJSON        string     `json:"-"`
-	LastMetricsJSON  string     `json:"-"`
-	PatchesJSON      string     `json:"-"`
+	// Installed-software inventory (SI1), denormalised from the last facts.software
+	// by RecordSoftware. SoftwareCount drives the fleet column and the device page
+	// header; the full list is kept in SoftwareJSON (not marshalled into DEVICE,
+	// like FactsJSON/PatchesJSON) and the device-detail handler emits it as the
+	// sibling "software" array. SoftwareCheckedAt is nil until the first report.
+	SoftwareCount     int        `json:"software_count"`
+	SoftwareCheckedAt *time.Time `json:"software_checked_at"`
+	FactsJSON         string     `json:"-"`
+	LastMetricsJSON   string     `json:"-"`
+	PatchesJSON       string     `json:"-"`
+	SoftwareJSON      string     `json:"-"`
 }
 
 // Heartbeat is one throttled metrics sample (at most one per device per
