@@ -4,6 +4,8 @@ package agent
 
 import (
 	"context"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -11,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sxi9/msp/internal/protocol"
 )
@@ -329,7 +332,8 @@ func TestShouldApplyAdvertised(t *testing.T) {
 }
 
 // TestResolveUpdateURL: a bare path joins the base; an absolute URL is accepted
-// only on the same host, so the device token never goes to another host.
+// only on the same host AND scheme, so the device token never goes to another
+// host and is never sent in cleartext.
 func TestResolveUpdateURL(t *testing.T) {
 	c := &Client{base: "https://srv.example"}
 	if got, err := c.resolveUpdateURL("/dl/msp-agent-linux-amd64"); err != nil || got != "https://srv.example/dl/msp-agent-linux-amd64" {
@@ -341,8 +345,120 @@ func TestResolveUpdateURL(t *testing.T) {
 	if _, err := c.resolveUpdateURL("https://evil.example/dl/x"); err == nil {
 		t.Fatal("an update url on another host must be refused")
 	}
+	// Scheme downgrade on the same host must be refused: an http url on an https
+	// server would put the device token on the wire in cleartext.
+	if _, err := c.resolveUpdateURL("http://srv.example/dl/x"); err == nil {
+		t.Fatal("an http update url on an https server must be refused (scheme downgrade)")
+	}
 	if _, err := c.resolveUpdateURL(""); err == nil {
 		t.Fatal("an empty url must be refused")
+	}
+}
+
+// nopPatchReporter stands in for the PatchCollector in Run-loop tests so the loop
+// never touches the real package manager.
+type nopPatchReporter struct{}
+
+func (nopPatchReporter) Report(context.Context, time.Time) *protocol.PatchReport { return nil }
+func (nopPatchReporter) RunPatch(context.Context, protocol.Command) protocol.CommandResult {
+	return protocol.CommandResult{}
+}
+
+// TestSelfUpdateProbationRollsBack is the regression for the reachability half of
+// AU1's rollback: a freshly swapped-in binary that answers its `version`
+// subcommand (so BootstrapRollback keeps it) but can NEVER complete a sync must
+// be rolled back to <exe>.bak rather than backing off forever and bricking the
+// device. It drives the WHOLE Run loop against a temp "exe" with a backup and a
+// server that fails every sync, and asserts Run rolls back and exits.
+func TestSelfUpdateProbationRollsBack(t *testing.T) {
+	dir := t.TempDir()
+	exe := filepath.Join(dir, "msp-agent")
+	// The "new" binary: answers version with 0.2.0 (healthy to the bootstrap
+	// check) but the server below makes every sync fail.
+	newBody := fakeBinary("0.2.0")
+	if err := os.WriteFile(exe, newBody, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// The known-good previous binary kept as the rollback target.
+	oldBody := fakeBinary("0.1.0")
+	if err := os.WriteFile(exe+".bak", oldBody, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	restore := SetResolveExecutableForTest(func() (string, error) { return exe, nil })
+	defer restore()
+
+	// A server whose sync always 500s, so the new binary can never confirm.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `{"error":"boom"}`, http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	// No real waiting and no real package manager during the loop.
+	origSleep := sleepFn
+	sleepFn = func(ctx context.Context, _ time.Duration) bool { return ctx.Err() == nil }
+	defer func() { sleepFn = origSleep }()
+	origPatch := newPatchReporter
+	newPatchReporter = func() PatchReporter { return nopPatchReporter{} }
+	defer func() { newPatchReporter = origPatch }()
+
+	cfg := Config{ServerURL: srv.URL, DeviceToken: "dt_probe", DeviceID: 1, IntervalS: 2}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	done := make(chan error, 1)
+	go func() { done <- Run(ctx, cfg, "0.2.0", logger) }()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run returned %v", err)
+		}
+	case <-ctx.Done():
+		t.Fatal("Run did not roll back and exit while it could never sync on probation")
+	}
+	// The exe was rolled back to the known-good backup, and the backup cleared.
+	if got, _ := os.ReadFile(exe); string(got) != string(oldBody) {
+		t.Fatalf("exe was not rolled back to the backup content; got %q", got)
+	}
+	if _, err := os.Stat(exe + ".bak"); !os.IsNotExist(err) {
+		t.Fatal("backup should be removed after a probation rollback")
+	}
+}
+
+// TestProbationHelpers covers UpdateBackupPending and the rollbackRestore core
+// used by the probation path, against a temp exe.
+func TestProbationHelpers(t *testing.T) {
+	dir := t.TempDir()
+	exe := filepath.Join(dir, "msp-agent")
+	if err := os.WriteFile(exe, fakeBinary("0.2.0"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	restore := SetResolveExecutableForTest(func() (string, error) { return exe, nil })
+	defer restore()
+
+	if UpdateBackupPending() {
+		t.Fatal("no backup present: UpdateBackupPending must be false")
+	}
+	if rollbackRestore(exe, nil) {
+		t.Fatal("rollbackRestore with no backup must be a no-op")
+	}
+
+	oldBody := fakeBinary("0.1.0")
+	if err := os.WriteFile(exe+".bak", oldBody, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if !UpdateBackupPending() {
+		t.Fatal("backup present: UpdateBackupPending must be true")
+	}
+	if !rollbackRestore(exe, nil) {
+		t.Fatal("rollbackRestore with a backup must restore and report true")
+	}
+	if got, _ := os.ReadFile(exe); string(got) != string(oldBody) {
+		t.Fatal("rollbackRestore did not restore the backup content")
+	}
+	if _, err := os.Stat(exe + ".bak"); !os.IsNotExist(err) {
+		t.Fatal("rollbackRestore must clear the backup")
 	}
 }
 

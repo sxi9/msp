@@ -67,6 +67,17 @@ build linux   arm64 msp-agent-linux-arm64       ./cmd/msp-agent
 build windows amd64 msp-agent-windows-amd64.exe ./cmd/msp-agent
 build linux   amd64 msp-server-linux-amd64      ./cmd/msp-server
 
+# Run the non-host build proofs BEFORE writing any release artifact, so a failing
+# proof (e.g. a GOOS=windows vet regression) aborts the whole publish instead of
+# leaving a half-published MSP_AGENT_DIR: a written agents.json but a stale
+# SHA256SUMS and no copy into the serving directory. Nothing below this point may
+# fail-and-leave-partial, so these gates come first.
+echo "compile-only proof: android/arm64 agent"
+GOOS=android GOARCH=arm64 go build -o /dev/null ./cmd/msp-agent
+
+echo "vet: windows build tag"
+GOOS=windows go vet ./internal/agent/ ./cmd/msp-agent/
+
 # Agent self-update release manifest (AU1): agents.json maps each desktop
 # platform-arch to the file served at /dl/<name> and the binary's real SHA-256, so
 # the server advertises the released VERSION and fills an update command's hash.
@@ -79,12 +90,6 @@ cat > dist/agents.json <<EOF
   "windows-amd64":{"name":"msp-agent-windows-amd64.exe","sha256":"$(sha_of dist/msp-agent-windows-amd64.exe)"}}}
 EOF
 echo "wrote dist/agents.json (version $VERSION)"
-
-echo "compile-only proof: android/arm64 agent"
-GOOS=android GOARCH=arm64 go build -o /dev/null ./cmd/msp-agent
-
-echo "vet: windows build tag"
-GOOS=windows go vet ./internal/agent/ ./cmd/msp-agent/
 
 cp deploy/install.sh deploy/install.ps1 dist/
 

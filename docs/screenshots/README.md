@@ -47,6 +47,8 @@ screenshot; the database it belonged to was deleted after the run.
 | Login second-factor prompt (TF1) | [31-login-2fa-prompt-desktop.png](31-login-2fa-prompt-desktop.png) | [31-login-2fa-prompt-phone.png](31-login-2fa-prompt-phone.png) | TF1 two-step login: after `user@example.com` (2FA enabled over the API) entered email + password, `POST /api/v1/login` returned `{"totp_required":true}` and set only the 5-minute pending cookie — no session — so the Login view shows its **Two-factor** step: the **Authenticator code** field, the **Verify** button, and the "Use a recovery code" / "Back" links. The label banner "Login - second factor required after password" was prepended to the page body before the capture. At phone width `scrollWidth` was 400. |
 | Device page Installed-software panel (SI1) | [32-device-software-desktop.png](32-device-software-desktop.png) | [32-device-software-phone.png](32-device-software-phone.png) | SI1 per-device inventory: the device page **Installed software** panel for the online Linux device `vm`. The real Linux agent ran its real `dpkg-query -W` (read-only, no package was installed or removed) and reported **837 packages**, shown in the heading beside "Last checked 2 min ago". The name/publisher search box holds `python`, so the Name / Version / Publisher / Source table is filtered to the Python packages (`libjs-sphinxdoc`, `libpython3-dev`, `libpython3.11`, `libpython3.12t64`, …) with their dpkg versions, publishers (the maintainer line with its email stripped: "Ubuntu Developers", "Matthias Klose", "Debian Python Team") and Source "dpkg (Debian/Ubuntu)"; the footer reads "62 of 837 shown. Search the whole fleet for a package on the Software page." The label banner "Installed software - per-device inventory, searchable" was prepended to the page body before the capture. At phone width `scrollWidth` was 400 (the table collapses to per-row cards). |
 | Fleet software search (SI1) | [33-fleet-software-search-desktop.png](33-fleet-software-search-desktop.png) | [33-fleet-software-search-phone.png](33-fleet-software-search-phone.png) | Same run, the **Software** page **Software inventory search** with `libc` searched across the clients the admin can see: `GET /api/v1/software?q=libc` returned 40 rows on the one device, shown as "40 packages on 1 device matching 'libc'." and a Device / Client / Package / Version table (every row device `vm`, client "Acme Dental"; `libc-bin`, `libc-dev-bin`, `libc6`, `libc6-dbg`, `libc6-dev`, `libcairo2`, … through `linux-libc-dev`, with their dpkg versions), each device cell linking to its page. The search is the live org-scoped endpoint over the real reported inventory. The label banner "Fleet software search - find every device with a given package" was prepended to the page body before the capture. At phone width `scrollWidth` was 400 (the table collapses to per-row cards). |
+| Device page agent-update action (AU1) | [34-device-agent-update-desktop.png](34-device-agent-update-desktop.png) | [34-device-agent-update-phone.png](34-device-agent-update-phone.png) | AU1 agent self-update: the device page **Agent version** card for the online Linux device `vm`. The server was started with an `MSP_AGENT_DIR` holding an `agents.json` manifest advertising released version **0.2.0** (linux-amd64 / linux-arm64 / windows-amd64 entries), while the agent reports **0.1.0**, so the card heading reads "Agent version update available", **Installed** `0.1.0`, **Released** `0.2.0` with an amber **outdated** badge, and the admin sees the **Update agent** button (it confirms a hash-verified, health-checked, rollback-safe swap from 0.1.0 to 0.2.0; it was not clicked here). The card footer notes updating is a role-gated, tenant-scoped, audited command whose swap log and any rollback appear in the command history. The label banner "Agent self-update - hash-verified swap with health-checked rollback" was prepended to the page body before the capture. At phone width `scrollWidth` was 400. |
+| Fleet agent-version column (AU1) | [35-fleet-agent-version-desktop.png](35-fleet-agent-version-desktop.png) | [35-fleet-agent-version-phone.png](35-fleet-agent-version-phone.png) | Same run, the Fleet with the **Agent** column and the released-version banner. The banner reads "Released agent version 0.2.0. 1 device running an older agent — open a device to update it."; the `vm` row's Agent cell shows `0.1.0` in warn colour with an **OUTDATED** chip; the **Outdated agent** filter checkbox and its "1 of 1" match count are in the toolbar. The label banner "Fleet - agent versions, outdated devices flagged" was prepended to the page body before the capture. At phone width `scrollWidth` was 400 (the table collapses to per-row cards and the Agent cell keeps its OUTDATED chip). |
 
 Screenshots 14 and 15 come from a second run on 127.0.0.1:18093 with its own fresh database (also deleted
 afterwards); the enrollment token for that run was created through the CLI and is not shown. Screenshots 16
@@ -152,6 +154,20 @@ search filtered to `python`, the Name/Version/Publisher/Source table with the ma
 live database was deleted afterwards. The label banner was prepended to the page body before each capture and
 at phone width `scrollWidth` was 400 on both pages.
 
+Screenshots 34 and 35 (`34-device-agent-update-*`, `35-fleet-agent-version-*`) come from a thirteenth run (AU1
+agent self-update final verification, fresh SQLite database on a free port, deleted afterwards, admin / org /
+token from the CLI) with a real Linux agent `vm` enrolled under **Acme Dental** at a 2 s interval. The server's
+`MSP_AGENT_DIR` held an `agents.json` manifest advertising released version **0.2.0** for linux-amd64,
+linux-arm64 and windows-amd64, while the enrolled agent reports **0.1.0**, so `GET /api/v1/agent-release`
+returned the 0.2.0 manifest and the device showed as outdated. The agent was run with **auto-update off**
+(`--no-auto-update`), no `update` command was queued, and it was a copy of the binary (so even the swap logic
+could only ever touch the copy); the real agent binary was never downloaded or swapped — the whole swap path is
+exercised separately by `internal/e2e` `TestSelfUpdateEndToEnd` against a temp exe and a fake new binary. 34 is
+the device page Agent-version card (Installed 0.1.0, Released 0.2.0 outdated, the **Update agent** button); 35 is
+the Fleet Agent column with the `vm` row flagged **OUTDATED**, the released-version banner and the
+Outdated-agent filter. The live database and agent dir were deleted afterwards. The label banner was prepended
+to the page body before each capture and at phone width `scrollWidth` was 400 on both pages.
+
 Not shown because they cannot run here: the Windows service and Windows lock (cross-compiled only),
 the Windows Update patch path (PM1; the COM/PowerShell scan and install are cross-compiled and the JSON
 parser is unit-tested against a captured fixture, but need a real Windows host; screenshots 26 and 27 show
@@ -161,7 +177,10 @@ server and dashboard side of its installed-apps inventory), the Windows file-dep
 package-install path is a deferred clean-fail stub; screenshots 28 and 29 show the Linux side, which runs fully
 here), the Windows registry software inventory (SI1; the uninstall-registry read is cross-compiled and
 `parseRegistry` is unit-tested against a captured fixture, but needs a real Windows host; screenshots 32 and 33
-show the dpkg/Linux side, which runs fully here), the Docker image
+show the dpkg/Linux side, which runs fully here), the Windows agent self-update swap (AU1; the
+rename-aside service-swap in `selfupdate_windows.go` is cross-compiled only — the e2e and unit tests exercise
+the Unix swap path, so it is NOT VERIFIED until a real Windows host; screenshots 34 and 35 show the Linux
+side, which runs fully here), the Docker image
 (`docker compose config` validates; no daemon in the container to build it), and the RustDesk screen
 session itself (no display, no RustDesk client, no hbbs/hbbr containers here: the Connect click in 17 only
 proves the endpoint, the URL and the audit entry).

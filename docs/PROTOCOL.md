@@ -492,16 +492,22 @@ never types them. The agent-facing command JSON is:
 ```
 
 - `url` is relative to the server base; the agent joins it to its own base and refuses a URL on a
-  different host, so the device token never leaves the server.
-- The agent downloads `url` with the device token into a temp file **beside** the running
-  executable, verifies the size and `sha256` **before** anything else (a mismatch aborts with no
-  change and no backup), `chmod 0755`, backs the current executable up to `<exe>.bak` (a copy),
-  **health-checks** the new binary by running `<tmp> version` and confirming it prints `version`
-  (a failure aborts, old binary intact, backup removed), then atomically renames the verified
-  binary into place. The result reports `self-update applied: <old> -> <new>`.
-- After posting the result the agent exits so the service manager restarts into the new binary.
-  On the next start a bootstrap check restores `<exe>.bak` if the installed binary cannot run its
-  own `version` subcommand (rollback); the backup is cleared after the next successful sync.
+  different host **or one that downgrades the scheme** (http on an https server), so the device
+  token is never sent off the server or in cleartext.
+- The agent downloads `url` into a temp file **beside** the running executable, verifies the size
+  and `sha256` **before** anything else (a mismatch aborts with no change and no backup),
+  `chmod 0755`, backs the current executable up to `<exe>.bak` (a copy), **health-checks** the new
+  binary by running `<tmp> version` and confirming it prints `version` (a failure aborts, old binary
+  intact, backup removed), then atomically renames the verified binary into place. The result reports
+  `self-update applied: <old> -> <new>`. (The agent sends its device token on the `/dl/` fetch, but
+  `/dl/` serves the agent binaries publicly and does not require it; integrity rests on TLS plus the
+  manifest `sha256` re-check.)
+- After posting the result the agent exits so the service manager restarts into the new binary. Two
+  rollback checks protect the fleet while `<exe>.bak` exists (until the next successful sync clears
+  it): on the next start a bootstrap check restores `<exe>.bak` if the installed binary cannot run its
+  own `version` subcommand; and a binary that answers `version` but cannot complete a successful sync
+  within ~10 minutes / 8 consecutive failures restores `<exe>.bak` and restarts, so a release that
+  starts but cannot reach the server does not brick the device.
 - Self-update is applied automatically only when auto-update is enabled for the agent (config
   `auto_update`, default on; `msp-agent run --no-auto-update` / enroll `--no-auto-update`
   disables it). A dashboard `update` command forces it regardless.

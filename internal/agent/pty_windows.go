@@ -59,7 +59,14 @@ func platformOpenPTY(shell string, cols, rows uint16) (ptySession, error) {
 		windows.CloseHandle(outRead)
 		return nil, fmt.Errorf("spawn: attribute list: %w", err)
 	}
-	if err := attr.Update(windows.PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, unsafe.Pointer(hpc), unsafe.Sizeof(hpc)); err != nil {
+	// The PSEUDOCONSOLE attribute value is the HPCON handle passed BY VALUE as
+	// lpValue (sizeof(HPCON)), per the Win32 ConPTY contract. hpc is a
+	// windows.Handle (a uintptr), so reinterpret its bits as an unsafe.Pointer
+	// via &hpc rather than converting the uintptr directly: a bare
+	// unsafe.Pointer(hpc) is flagged by `go vet` (possible misuse of
+	// unsafe.Pointer) and would fail GOOS=windows vet in scripts/build-agents.sh.
+	hpcValue := *(*unsafe.Pointer)(unsafe.Pointer(&hpc))
+	if err := attr.Update(windows.PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, hpcValue, unsafe.Sizeof(hpc)); err != nil {
 		attr.Delete()
 		windows.ClosePseudoConsole(hpc)
 		windows.CloseHandle(inWrite)

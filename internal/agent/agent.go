@@ -27,6 +27,22 @@ const (
 	// hit it, so a 429 is retried rather than failing the install.
 	enrollRetries    = 6
 	enrollRetryDelay = 10 * time.Second
+	// Self-update probation (AU1). After an update swaps a new binary in, that
+	// binary has this long AND this many consecutive sync failures to complete
+	// ONE successful sync before it is judged a bad release and rolled back to
+	// <exe>.bak. BootstrapRollback already reverts a binary that cannot run its
+	// own `version` subcommand; probation closes the gap the reviewer found — a
+	// release that answers `version` (so it passes the pre-swap health check and
+	// the bootstrap check) but can never sync (a broken request shape the server
+	// 400s every time, a TLS/CA regression, a panic in the sync path) would
+	// otherwise back off forever on the new binary and never roll back, bricking
+	// the device. The window bounds the common "backs off forever" case; the
+	// failure count lets a test with a no-wait sleep reach the rollback quickly.
+	// Rolling back is the safe direction: the restored binary is the known-good
+	// previous release, and if the new one was in fact fine the server simply
+	// re-advertises it.
+	updateProbationWindow      = 10 * time.Minute
+	updateProbationMaxFailures = 8
 )
 
 // PatchReporter is the Run loop's patch surface (PM1): the periodic pending-
@@ -183,6 +199,39 @@ func Run(ctx context.Context, cfg Config, version string, log *slog.Logger) erro
 		log.Warn("rolled back a failed self-update; exiting so the service restarts into the restored binary")
 		return nil
 	}
+	// Self-update probation (AU1): if a prior update left a backup that
+	// BootstrapRollback did NOT roll back, this binary is freshly swapped in and
+	// not yet confirmed good — it answers `version` but has not yet proven it can
+	// sync. It must complete one successful sync within updateProbationWindow /
+	// updateProbationMaxFailures or be rolled back to <exe>.bak, so a release that
+	// starts but cannot reach the server does not brick the device.
+	onProbation := UpdateBackupPending()
+	probationDeadline := time.Now().Add(updateProbationWindow)
+	probationFailures := 0
+	if onProbation {
+		log.Info("self-update on probation; the new binary must sync to be confirmed",
+			"within", updateProbationWindow, "max_failures", updateProbationMaxFailures)
+	}
+	// probationFail records one failed sync during probation and reports whether
+	// the agent should now roll back and exit. Outside probation it is a no-op.
+	probationFail := func(reason string) (rollback bool) {
+		if !onProbation {
+			return false
+		}
+		probationFailures++
+		if probationFailures < updateProbationMaxFailures && !time.Now().After(probationDeadline) {
+			return false
+		}
+		if RollbackNow(log) {
+			log.Warn("self-update could not sync within its probation window; rolled back, exiting so the service restarts into the restored binary",
+				"reason", reason, "failures", probationFailures)
+			return true
+		}
+		// Nothing to roll back (or the restore failed): stop probation so the
+		// agent keeps retrying rather than re-checking a rollback it cannot do.
+		onProbation = false
+		return false
+	}
 	for ctx.Err() == nil {
 		// A self-update that swapped a new binary into place asks the agent to exit
 		// so the service manager restarts into it; the deferred wg.Wait above has
@@ -231,12 +280,18 @@ func Run(ctx context.Context, cfg Config, version string, log *slog.Logger) erro
 			}
 			if errors.Is(err, ErrUnauthorized) {
 				log.Error("token rejected, re-enroll with msp-agent install", "err", err)
+				if probationFail("token rejected") {
+					return nil
+				}
 				if !sleepFn(ctx, unauthorizedSleep) {
 					return nil
 				}
 				continue
 			}
 			log.Warn("sync failed", "err", err, "retry_in", backoff)
+			if probationFail("sync failed") {
+				return nil
+			}
 			if !sleepFn(ctx, backoff) {
 				return nil
 			}
@@ -245,6 +300,9 @@ func Run(ctx context.Context, cfg Config, version string, log *slog.Logger) erro
 		}
 		backoff = backoffMin
 		syncs++
+		// A successful sync confirms a freshly swapped-in binary: probation ends
+		// and FinalizeUpdate (below) clears the backup.
+		onProbation = false
 
 		// The relay the server reports is kept in the config file so
 		// `msp-agent rustdesk setup` works without a re-enrollment; written

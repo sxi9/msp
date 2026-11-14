@@ -299,6 +299,61 @@ func finalizeBackups(exe string, log *slog.Logger) {
 	cleanupSwapArtifacts(exe)
 }
 
+// UpdateBackupPending reports whether a self-update backup <exe>.bak is present,
+// i.e. a new binary has been swapped in and not yet confirmed good by a
+// successful sync. The Run loop reads it once at startup: a present backup means
+// this boot is a post-update probation that must complete one successful sync or
+// be rolled back (the reachability half of the AU1 guarantee). With no backup —
+// the normal case — the agent is never on probation. Best-effort: a resolve
+// failure reports "not pending" so a normal agent is never dragged into
+// probation.
+func UpdateBackupPending() bool {
+	exe, err := resolveExe()
+	if err != nil {
+		return false
+	}
+	_, err = os.Stat(exe + ".bak")
+	return err == nil
+}
+
+// RollbackNow restores <exe>.bak over the running executable and removes the
+// backup. The Run loop calls it when a freshly swapped-in binary cannot complete
+// a successful sync within its probation window: a release that answers its
+// `version` subcommand (so BootstrapRollback keeps it) but cannot actually reach
+// or sync with the server is exactly the fleet-brick AU1 exists to prevent, and
+// this is the documented "cannot reach the server -> rollback" recovery. It
+// returns true when a backup was restored; the caller then exits so the service
+// manager restarts into the restored binary. Best-effort: false when there is
+// nothing to roll back or the restore failed.
+func RollbackNow(log *slog.Logger) bool {
+	exe, err := resolveExe()
+	if err != nil {
+		return false
+	}
+	return rollbackRestore(exe, log)
+}
+
+// rollbackRestore is the testable core of RollbackNow over an injected exe path:
+// it restores <exe>.bak over exe and clears the backup, reusing restoreBackup
+// (the platform swap, rename-aside on Windows).
+func rollbackRestore(exe string, log *slog.Logger) bool {
+	bak := exe + ".bak"
+	if _, err := os.Stat(bak); err != nil {
+		return false // nothing to roll back
+	}
+	if log != nil {
+		log.Error("self-update could not confirm the new binary; restoring the previous one", "exe", exe)
+	}
+	if err := restoreBackup(bak, exe); err != nil {
+		if log != nil {
+			log.Warn("self-update rollback failed", "exe", exe, "err", err)
+		}
+		return false
+	}
+	os.Remove(bak)
+	return true
+}
+
 // BootstrapRollback is the start-of-day rollback guard. If a self-update backup
 // <exe>.bak exists (an update was applied and not yet confirmed good) it
 // health-checks the INSTALLED binary by running "<exe> version" and comparing to
@@ -433,6 +488,12 @@ func (c *Client) resolveUpdateURL(rawURL string) (string, error) {
 	}
 	if !strings.EqualFold(u.Host, base.Host) {
 		return "", fmt.Errorf("refusing an update url on a different host than the server (%s)", u.Host)
+	}
+	// Match the scheme too, and never downgrade: the device token rides the
+	// Authorization header, so an http:// update url on an https server would put
+	// the token on the wire in cleartext even though the host matches. Refuse it.
+	if !strings.EqualFold(u.Scheme, base.Scheme) {
+		return "", fmt.Errorf("refusing an update url that downgrades the scheme (%s, server is %s)", u.Scheme, base.Scheme)
 	}
 	return u.String(), nil
 }
