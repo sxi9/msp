@@ -45,6 +45,8 @@ screenshot; the database it belonged to was deleted after the run.
 | Device Deploy dialog (SD1) | [29-device-deploy-desktop.png](29-device-deploy-desktop.png) | [29-device-deploy-phone.png](29-device-deploy-phone.png) | Same run, the device page **Deploy software** card for the online Linux device `vm`. The "Deploy a file" tab is active with the library file chosen (`acme-setup.sh (59 B)`), a destination path `/opt/acme/acme-setup.sh`, the **Run after copying** toggle ticked and the run-arguments box holding `--silent` (one argv element per line); the "Deploy to vm" button and the "Install a package" tab are shown. The caption notes the agent downloads the file, verifies its SHA-256, writes it to the destination and runs it with the arguments (argv, no shell), and a hash mismatch fails without writing. The label banner "Deploy to a device - push a file and run it, or install a package; audited" was prepended to the page body before the capture. At phone width `scrollWidth` was 400 (the card controls stack). |
 | Account two-factor setup (TF1) | [30-account-2fa-setup-desktop.png](30-account-2fa-setup-desktop.png) | [30-account-2fa-setup-phone.png](30-account-2fa-setup-phone.png) | TF1 two-factor enrolment: the **Account** page **Two-factor authentication** section mid-setup. `admin@example.com` (no 2FA) clicked **Set up two-factor**, so `POST /api/v1/me/totp/setup` returned a pending secret and the setup panel shows the QR code (rendered in-browser from the vendored `web/src/lib/qr.ts` encoder), the manual **Secret** `5YMZ OTWF 3ASE OM4G QLU4 OFKO TJE2 5HAT` with a Copy button, the `Account admin@example.com · issuer MSP · 6 digits · 30s` line, and the 6-digit confirm field. Confirming a code advances to the recovery-codes panel, which lists the ten single-use recovery codes once (the second user's live API confirm in this run returned 10; see the paragraph below). The pending secret is never enabled here because the browser flow stops before confirm. The label banner "Two-factor authentication - TOTP setup with QR and one-time recovery codes" was prepended to the page body before the capture. At phone width `scrollWidth` was 400. |
 | Login second-factor prompt (TF1) | [31-login-2fa-prompt-desktop.png](31-login-2fa-prompt-desktop.png) | [31-login-2fa-prompt-phone.png](31-login-2fa-prompt-phone.png) | TF1 two-step login: after `user@example.com` (2FA enabled over the API) entered email + password, `POST /api/v1/login` returned `{"totp_required":true}` and set only the 5-minute pending cookie — no session — so the Login view shows its **Two-factor** step: the **Authenticator code** field, the **Verify** button, and the "Use a recovery code" / "Back" links. The label banner "Login - second factor required after password" was prepended to the page body before the capture. At phone width `scrollWidth` was 400. |
+| Device page Installed-software panel (SI1) | [32-device-software-desktop.png](32-device-software-desktop.png) | [32-device-software-phone.png](32-device-software-phone.png) | SI1 per-device inventory: the device page **Installed software** panel for the online Linux device `vm`. The real Linux agent ran its real `dpkg-query -W` (read-only, no package was installed or removed) and reported **837 packages**, shown in the heading beside "Last checked 2 min ago". The name/publisher search box holds `python`, so the Name / Version / Publisher / Source table is filtered to the Python packages (`libjs-sphinxdoc`, `libpython3-dev`, `libpython3.11`, `libpython3.12t64`, …) with their dpkg versions, publishers (the maintainer line with its email stripped: "Ubuntu Developers", "Matthias Klose", "Debian Python Team") and Source "dpkg (Debian/Ubuntu)"; the footer reads "62 of 837 shown. Search the whole fleet for a package on the Software page." The label banner "Installed software - per-device inventory, searchable" was prepended to the page body before the capture. At phone width `scrollWidth` was 400 (the table collapses to per-row cards). |
+| Fleet software search (SI1) | [33-fleet-software-search-desktop.png](33-fleet-software-search-desktop.png) | [33-fleet-software-search-phone.png](33-fleet-software-search-phone.png) | Same run, the **Software** page **Software inventory search** with `libc` searched across the clients the admin can see: `GET /api/v1/software?q=libc` returned 40 rows on the one device, shown as "40 packages on 1 device matching 'libc'." and a Device / Client / Package / Version table (every row device `vm`, client "Acme Dental"; `libc-bin`, `libc-dev-bin`, `libc6`, `libc6-dbg`, `libc6-dev`, `libcairo2`, … through `linux-libc-dev`, with their dpkg versions), each device cell linking to its page. The search is the live org-scoped endpoint over the real reported inventory. The label banner "Fleet software search - find every device with a given package" was prepended to the page body before the capture. At phone width `scrollWidth` was 400 (the table collapses to per-row cards). |
 
 Screenshots 14 and 15 come from a second run on 127.0.0.1:18093 with its own fresh database (also deleted
 afterwards); the enrollment token for that run was created through the CLI and is not shown. Screenshots 16
@@ -136,6 +138,20 @@ colour scheme); the label banner was prepended to the page body before each capt
 `document.documentElement.scrollWidth` was 400 on every page. The live database and its files directory were
 deleted after the run.
 
+Screenshots 32 and 33 (`32-device-software-*`, `33-fleet-software-search-*`) come from a twelfth run (SI1
+installed-software inventory, fresh SQLite database on a free port 127.0.0.1:53555, deleted afterwards,
+admin / org / token from the CLI) with the real Linux agent `vm` enrolled under **Acme Dental** at a 3 s
+interval. This is the live-browser proof of the SI1 dashboard with the agent's real software collector
+running: the agent ran its real `dpkg-query -W` (read-only — no package was installed or removed and the
+container's packages were not touched) and reported its **837** installed packages, which reached the server
+(`GET /api/v1/devices/1` showed `software_count` 837, `software_checked_at` set and the full `software`
+array). 32 is the device page Installed-software panel (the 837 count, Last checked, the name/publisher
+search filtered to `python`, the Name/Version/Publisher/Source table with the maintainer email stripped,
+"62 of 837 shown"); 33 is the Software page fleet search with `libc` returning 40 packages on the one device
+(`GET /api/v1/software?q=libc`), the Device/Client/Package/Version table linking each device to its page. The
+live database was deleted afterwards. The label banner was prepended to the page body before each capture and
+at phone width `scrollWidth` was 400 on both pages.
+
 Not shown because they cannot run here: the Windows service and Windows lock (cross-compiled only),
 the Windows Update patch path (PM1; the COM/PowerShell scan and install are cross-compiled and the JSON
 parser is unit-tested against a captured fixture, but need a real Windows host; screenshots 26 and 27 show
@@ -143,7 +159,9 @@ the apt/Linux side), the Android app (the debug APK builds and its JVM tests pas
 server and dashboard side of its installed-apps inventory), the Windows file-deploy and package-install paths
 (SD1; the file-deploy path is cross-compiled and NOT VERIFIED until a real Windows host, the Windows
 package-install path is a deferred clean-fail stub; screenshots 28 and 29 show the Linux side, which runs fully
-here), the Docker image
+here), the Windows registry software inventory (SI1; the uninstall-registry read is cross-compiled and
+`parseRegistry` is unit-tested against a captured fixture, but needs a real Windows host; screenshots 32 and 33
+show the dpkg/Linux side, which runs fully here), the Docker image
 (`docker compose config` validates; no daemon in the container to build it), and the RustDesk screen
 session itself (no display, no RustDesk client, no hbbs/hbbr containers here: the Connect click in 17 only
 proves the endpoint, the URL and the audit entry).
