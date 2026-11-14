@@ -3,9 +3,13 @@
 Push a file to a device and optionally run it, or install a named package from the OS package
 manager. A server-side file library holds the artifacts; agents download them over their existing
 authenticated channel and verify the hash before use. Fully testable in the container on Linux (a
-real agent downloads an uploaded file and runs it; package mode uses the fake apt from PM1). Windows
-package/installer paths are written, cross-built and unit-tested against fixtures, marked NOT VERIFIED
-until a real Windows host. **No test fetches anything from the public internet.**
+real agent downloads an uploaded file and runs it; package mode uses the fake apt from PM1). The
+Windows **file-deploy** path (drive-letter/UNC dest validation, temp+rename+chmod+optional run) is
+written and cross-built (`GOOS=windows go build ./...`), marked NOT VERIFIED until a real Windows
+host. The Windows **package-install** path is deferred in this phase: a package deploy on Windows
+fails cleanly (NOT VERIFIED stub), matching `docs/PROTOCOL.md`; a real installer (e.g. msiexec behind
+the same injectable executor seam, fixture-tested like PM1's `patch_windows.go`) is future work.
+**No test fetches anything from the public internet.**
 
 ## File library (server)
 
@@ -45,8 +49,9 @@ revoked → unsupported_on_device). Agent-facing JSON:
   executes `dest` with `run_args` via argv (no shell), capturing output. A hash mismatch fails the
   command without writing dest.
 - `source:"package"`: `package` (one name, charset `[A-Za-z0-9._+-]`, argv not shell), installed via the
-  PM1 injectable executor: `DEBIAN_FRONTEND=noninteractive apt-get -y install <pkg>` (Linux) or the
-  Windows installer path; captured output in the result.
+  PM1 injectable executor: `DEBIAN_FRONTEND=noninteractive apt-get -y install <pkg>` (Linux). The
+  Windows package-install path is deferred (a NOT VERIFIED clean-fail stub) in this phase; captured
+  output in the result.
 - `protocol`: add `KindDeploy`, the deploy fields on `Command`, `KindsFor`/`KindSupportedOn`/`ValidKind`
   and `Command.Validate` (source required; file needs file_id+sha256+dest; package needs a valid
   package name; run_args only with run; reject a `dest` with `..` or a non-absolute path). Fixture

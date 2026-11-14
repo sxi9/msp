@@ -341,16 +341,23 @@ func (s *Server) handleDeleteFile(w http.ResponseWriter, r *http.Request) {
 	if !s.fileRowVisible(w, r, f.OrgID) {
 		return
 	}
-	if err := s.st.DeleteFile(ctx, id); err != nil {
-		s.dashStoreError(w, err, "delete file")
-		return
-	}
-	// Remove the bytes (best effort: the row is already gone, so a missing or
-	// unremovable file must not fail the request).
+	// Remove the bytes first, then the row. A file is not fully deleted until its
+	// bytes are gone, so a blob removal that fails for any reason other than the
+	// blob already being absent must surface as a 500 and leave the row in place
+	// (the file still appears in the library) rather than report a successful
+	// deletion while the artifact persists on disk. A missing blob is treated as
+	// already gone. Ordering bytes-before-row also means the inverse (row gone,
+	// bytes left) can no longer happen on a removal error.
 	if s.cfg.FilesDir != "" {
 		if err := os.Remove(s.filePath(id)); err != nil && !os.IsNotExist(err) {
 			s.log.Error("file delete: remove bytes", "id", id, "err", err)
+			writeError(w, http.StatusInternalServerError, "internal", "")
+			return
 		}
+	}
+	if err := s.st.DeleteFile(ctx, id); err != nil {
+		s.dashStoreError(w, err, "delete file")
+		return
 	}
 	actor, _ := dashActor(r)
 	s.audit(ctx, "user", actor, f.OrgID, "file.deleted", "file", &id, clientIP(r), map[string]any{
