@@ -121,10 +121,21 @@ type Command struct {
 	// Action/Mode/IDs/Reboot belong to kind patch (PM1); omitempty so they
 	// appear on a patch COMMAND only and every other kind keeps its existing
 	// JSON shape. The web Command type reads them to describe a patch command.
-	Action     string     `json:"action,omitempty"`
-	Mode       string     `json:"mode,omitempty"`
-	IDs        []string   `json:"ids,omitempty"`
-	Reboot     string     `json:"reboot,omitempty"`
+	Action string   `json:"action,omitempty"`
+	Mode   string   `json:"mode,omitempty"`
+	IDs    []string `json:"ids,omitempty"`
+	Reboot string   `json:"reboot,omitempty"`
+	// Source/FileID/SHA256/Dest/Run/RunArgs/Package belong to kind deploy (SD1);
+	// omitempty so they appear on a deploy COMMAND only and every other kind
+	// keeps its existing JSON shape. CreateCommand's KindDeploy case persists
+	// them and ClaimQueuedCommands emits them in the agent command JSON.
+	Source     string     `json:"source,omitempty"`
+	FileID     int64      `json:"file_id,omitempty"`
+	SHA256     string     `json:"sha256,omitempty"`
+	Dest       string     `json:"dest,omitempty"`
+	Run        bool       `json:"run,omitempty"`
+	RunArgs    []string   `json:"run_args,omitempty"`
+	Package    string     `json:"package,omitempty"`
 	TimeoutS   int        `json:"timeout_s"`
 	Status     string     `json:"status"`
 	CreatedAt  time.Time  `json:"created_at"`
@@ -229,5 +240,54 @@ type CreateCommandParams struct {
 	Mode      string
 	IDs       []string
 	Reboot    string
-	TimeoutS  int
+	// Source/FileID/SHA256/Dest/Run/RunArgs/Package belong to kind deploy (SD1):
+	// source is file or package; a file deploy carries FileID+SHA256+Dest and
+	// optionally Run+RunArgs; a package deploy carries Package. They are zero for
+	// every other kind.
+	Source   string
+	FileID   int64
+	SHA256   string
+	Dest     string
+	Run      bool
+	RunArgs  []string
+	Package  string
+	TimeoutS int
+}
+
+// File is a server-side artifact-library entry (SD1): metadata only, the bytes
+// live on disk under MSP_FILES_DIR/<id>. OrgID is nil for a global file usable
+// by any client, or a client org id (RS2 visibility applies). CreatedByEmail is
+// derived at read time (the uploader's email, "" when unknown).
+type File struct {
+	ID             int64     `json:"id"`
+	OrgID          *int64    `json:"org_id"`
+	Name           string    `json:"name"`
+	Size           int64     `json:"size"`
+	SHA256         string    `json:"sha256"`
+	ContentType    string    `json:"content_type"`
+	CreatedAt      time.Time `json:"created_at"`
+	CreatedBy      *int64    `json:"created_by"`
+	CreatedByEmail string    `json:"created_by_email"`
+}
+
+// CreateFileParams is a validated file-library row to insert (SD1). The server
+// has already streamed the bytes into place and computed Size and SHA256. OrgID
+// nil = a global file; CreatedBy nil = no known uploader (e.g. a CLI import).
+type CreateFileParams struct {
+	OrgID       *int64
+	Name        string
+	Size        int64
+	SHA256      string
+	ContentType string
+	CreatedBy   *int64
+}
+
+// FileFilter narrows ListFiles (SD1). OrgID restricts to one client org when
+// set. VisibleOrgs is the caller's RS2 visible org set: nil = no restriction
+// (every file, including global org_id NULL ones), a non-nil slice restricts to
+// files whose org_id is in the set (which excludes global files, so a scoped
+// user does not see them), and a non-nil empty slice matches nothing.
+type FileFilter struct {
+	OrgID       *int64
+	VisibleOrgs []int64
 }

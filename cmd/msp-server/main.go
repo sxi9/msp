@@ -11,7 +11,9 @@
 // (:8080), MSP_BASE_URL, MSP_TLS_CERT + MSP_TLS_KEY, MSP_SECURE_COOKIES (0/1),
 // MSP_TRUST_PROXY (0/1), MSP_AGENT_DIR, MSP_RETENTION_DAYS (7), MSP_PRESETS (JSON
 // command preset library; "" = the builtin set), MSP_RUSTDESK_HOST + MSP_RUSTDESK_KEY
-// (self-hosted RustDesk relay for remote desktop; both or neither).
+// (self-hosted RustDesk relay for remote desktop; both or neither), MSP_FILES_DIR
+// (file library directory, default <dir of MSP_DB>/files), MSP_MAX_FILE_MB (upload
+// size cap, default 200).
 //
 // Exit codes: 0 ok, 1 runtime error, 2 bad arguments.
 package main
@@ -26,6 +28,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -61,12 +64,14 @@ commands:
 
 env: MSP_DB MSP_LISTEN MSP_BASE_URL MSP_TLS_CERT MSP_TLS_KEY MSP_SECURE_COOKIES
      MSP_TRUST_PROXY MSP_AGENT_DIR MSP_RETENTION_DAYS MSP_PRESETS
-     MSP_RUSTDESK_HOST MSP_RUSTDESK_KEY
+     MSP_RUSTDESK_HOST MSP_RUSTDESK_KEY MSP_FILES_DIR MSP_MAX_FILE_MB
      (MSP_PRESETS: JSON command preset library, see deploy/presets.example.json;
       unset = the builtin set; re-read whenever the file changes)
      (MSP_RUSTDESK_HOST bare hostname or IP of the self-hosted RustDesk ID/relay server
       (ports 21116/21117) and MSP_RUSTDESK_KEY its public key, one base64 line: set both
       to enable remote desktop, neither to disable)
+     (MSP_FILES_DIR: directory holding the uploaded file library; unset = <dir of
+      MSP_DB>/files. MSP_MAX_FILE_MB: upload size cap in MiB, default 200)
 `)
 }
 
@@ -165,6 +170,8 @@ func cmdServe(args []string, stderr io.Writer, log *slog.Logger) int {
 	presets := fs.String("presets", envStr("MSP_PRESETS", ""), "JSON command preset library, empty = builtin set (MSP_PRESETS)")
 	rustdeskHost := fs.String("rustdesk-host", envStr("MSP_RUSTDESK_HOST", ""), "self-hosted RustDesk ID/relay server, bare hostname or IP (MSP_RUSTDESK_HOST)")
 	rustdeskKey := fs.String("rustdesk-key", envStr("MSP_RUSTDESK_KEY", ""), "the RustDesk server's public key, content of id_ed25519.pub (MSP_RUSTDESK_KEY)")
+	filesDir := fs.String("files-dir", envStr("MSP_FILES_DIR", ""), "file library directory, empty = <dir of --db>/files (MSP_FILES_DIR)")
+	maxFileMB := fs.Int("max-file-mb", envInt("MSP_MAX_FILE_MB", def.MaxFileMB), "file upload size cap in MiB (MSP_MAX_FILE_MB)")
 	if err := fs.Parse(args); err != nil {
 		return exitUsage
 	}
@@ -179,6 +186,19 @@ func cmdServe(args []string, stderr io.Writer, log *slog.Logger) int {
 	if *retention < 1 {
 		fmt.Fprintln(stderr, "msp-server serve: --retention-days must be >= 1")
 		return exitUsage
+	}
+	if *maxFileMB < 1 {
+		fmt.Fprintln(stderr, "msp-server serve: --max-file-mb must be >= 1")
+		return exitUsage
+	}
+	// Default the file library next to the database (<dir of MSP_DB>/files) and
+	// create it on start (SD1): uploads stream into it and backups include it.
+	if strings.TrimSpace(*filesDir) == "" {
+		*filesDir = filepath.Join(filepath.Dir(*db), "files")
+	}
+	if err := os.MkdirAll(*filesDir, 0o755); err != nil {
+		fmt.Fprintf(stderr, "msp-server serve: files dir %s: %v\n", *filesDir, err)
+		return exitRuntime
 	}
 	*rustdeskHost = strings.TrimSpace(*rustdeskHost)
 	*rustdeskKey = strings.TrimSpace(*rustdeskKey)
@@ -207,6 +227,8 @@ func cmdServe(args []string, stderr io.Writer, log *slog.Logger) int {
 	cfg.PresetsPath = *presets
 	cfg.RustdeskHost = *rustdeskHost
 	cfg.RustdeskKey = *rustdeskKey
+	cfg.FilesDir = *filesDir
+	cfg.MaxFileMB = *maxFileMB
 	cfg.Version = version
 
 	st, ok := openStore(*db, stderr)

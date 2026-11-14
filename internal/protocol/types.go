@@ -30,6 +30,18 @@ const (
 	KindPing    = "ping"
 	KindMessage = "message"
 	KindPatch   = "patch"
+	// KindDeploy (SD1) pushes a file to a device and optionally runs it, or
+	// installs a named package from the OS package manager. Desktop only, like
+	// exec, script, shell and patch.
+	KindDeploy = "deploy"
+)
+
+// Deploy command sources (SD1). "file" downloads a library file to dest and
+// optionally runs it; "package" installs a named package through the PM1
+// injectable executor (apt on Linux, the Windows installer path).
+const (
+	DeploySourceFile    = "file"
+	DeploySourcePackage = "package"
 )
 
 // Patch command fields (PM1). action defaults to install, mode to security and
@@ -105,6 +117,12 @@ const (
 	MaxPatchSourceLen    = 256
 	DefaultPatchTimeoutS = 3600
 	MaxPatchTimeoutS     = 14400
+	// Deploy (SD1): a package name is one argv token of the charset
+	// [A-Za-z0-9._+-], at most MaxPackageNameLen bytes; a library file's hash
+	// is a SHA-256 hex digest, exactly SHA256HexLen characters. A deploy's
+	// run_args reuse MaxArgBytes, like exec argv.
+	MaxPackageNameLen = 256
+	SHA256HexLen      = 64
 )
 
 // RustdeskURIPrefix is the URL scheme the official RustDesk client registers
@@ -275,10 +293,24 @@ type Command struct {
 	// or install (default install), mode is all, security or ids (default
 	// security), IDs names the packages for mode ids, and reboot is never or
 	// if_required (default never). They are omitted for every other kind.
-	Action   string   `json:"action,omitempty"`
-	Mode     string   `json:"mode,omitempty"`
-	IDs      []string `json:"ids,omitempty"`
-	Reboot   string   `json:"reboot,omitempty"`
+	Action string   `json:"action,omitempty"`
+	Mode   string   `json:"mode,omitempty"`
+	IDs    []string `json:"ids,omitempty"`
+	Reboot string   `json:"reboot,omitempty"`
+	// Source, FileID, SHA256, Dest, Run, RunArgs and Package belong to kind
+	// deploy (SD1): Source is file or package. For a file deploy FileID+SHA256
+	// name the library file (the hash is re-checked by the agent after
+	// download) and Dest is where it is written (absolute, no ".."); Run and
+	// RunArgs optionally execute it (argv, no shell). For a package deploy
+	// Package is the one package name to install. All are omitted for every
+	// other kind, so their JSON shape is unchanged.
+	Source   string   `json:"source,omitempty"`
+	FileID   int64    `json:"file_id,omitempty"`
+	SHA256   string   `json:"sha256,omitempty"`
+	Dest     string   `json:"dest,omitempty"`
+	Run      bool     `json:"run,omitempty"`
+	RunArgs  []string `json:"run_args,omitempty"`
+	Package  string   `json:"package,omitempty"`
 	TimeoutS int      `json:"timeout_s"`
 	// Cols, Rows and ShellSession belong to kind shell (RS1, decision D3).
 	// Cols/Rows are the initial terminal size; they are omitted (hence 0,
@@ -444,6 +476,76 @@ func ValidPatchReboot(r string) bool {
 	return r == PatchRebootNever || r == PatchRebootIfRequired
 }
 
+// ValidDeploySource reports whether s is file or package (SD1).
+func ValidDeploySource(s string) bool {
+	return s == DeploySourceFile || s == DeploySourcePackage
+}
+
+// ValidPackageName reports whether p is a single package name the deploy
+// package source accepts (SD1): 1..MaxPackageNameLen characters of
+// [A-Za-z0-9._+-]. It is passed as one argv token, never through a shell, so
+// anything that could split or inject is refused.
+func ValidPackageName(p string) bool {
+	if p == "" || len(p) > MaxPackageNameLen {
+		return false
+	}
+	for i := 0; i < len(p); i++ {
+		c := p[i]
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' ||
+			c == '.' || c == '_' || c == '+' || c == '-') {
+			return false
+		}
+	}
+	return true
+}
+
+// ValidSHA256Hex reports whether h is exactly SHA256HexLen hex characters
+// (either case). It is the library file's stored hash, re-checked by the agent
+// after it downloads the bytes.
+func ValidSHA256Hex(h string) bool {
+	if len(h) != SHA256HexLen {
+		return false
+	}
+	for i := 0; i < len(h); i++ {
+		c := h[i]
+		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f' || c >= 'A' && c <= 'F') {
+			return false
+		}
+	}
+	return true
+}
+
+// ValidDeployDest reports whether dest is an acceptable deploy destination
+// path (SD1): non-empty, absolute (a leading "/", a drive-letter path like
+// C:\ or C:/, or a UNC \\server\share) and with no ".." path component on
+// either separator. The agent additionally resolves the parent and refuses to
+// write through a symlink; this is the platform-independent shape check.
+func ValidDeployDest(dest string) bool {
+	if dest == "" {
+		return false
+	}
+	norm := strings.ReplaceAll(dest, "\\", "/")
+	for _, seg := range strings.Split(norm, "/") {
+		if seg == ".." {
+			return false
+		}
+	}
+	if strings.HasPrefix(dest, "/") {
+		return true
+	}
+	if strings.HasPrefix(dest, `\\`) {
+		return true
+	}
+	if len(dest) >= 3 && isDriveLetter(dest[0]) && dest[1] == ':' && (dest[2] == '/' || dest[2] == '\\') {
+		return true
+	}
+	return false
+}
+
+func isDriveLetter(b byte) bool {
+	return b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z'
+}
+
 // Validate checks a patch report: the manager must be apt, wu or none, the
 // updates list is capped at MaxPatchUpdates entries and each entry's fields are
 // length-bounded. The returned text is the 400 invalid_request detail and names
@@ -560,7 +662,7 @@ func ClampPatchTimeout(n int) int {
 // ValidKind reports whether k is one of the command kinds (RS1 added shell).
 func ValidKind(k string) bool {
 	switch k {
-	case KindExec, KindScript, KindLock, KindPing, KindMessage, KindShell, KindPatch:
+	case KindExec, KindScript, KindLock, KindPing, KindMessage, KindShell, KindPatch, KindDeploy:
 		return true
 	}
 	return false
@@ -588,14 +690,14 @@ func ShellsFor(platform string) []string {
 }
 
 // KindsFor returns the command kinds a platform accepts: exec, script, lock,
-// ping, message, shell and patch on desktop platforms, only lock, ping and
-// message on android, none for an unknown platform. shell (RS1) and patch (PM1)
-// are desktop only, so the server answers 400 unsupported_on_platform for
-// either on android.
+// ping, message, shell, patch and deploy on desktop platforms, only lock, ping
+// and message on android, none for an unknown platform. shell (RS1), patch
+// (PM1) and deploy (SD1) are desktop only, so the server answers 400
+// unsupported_on_platform for any of them on android.
 func KindsFor(platform string) []string {
 	switch platform {
 	case PlatformLinux, PlatformWindows:
-		return []string{KindExec, KindScript, KindLock, KindPing, KindMessage, KindShell, KindPatch}
+		return []string{KindExec, KindScript, KindLock, KindPing, KindMessage, KindShell, KindPatch, KindDeploy}
 	case PlatformAndroid:
 		return []string{KindLock, KindPing, KindMessage}
 	}
@@ -711,8 +813,52 @@ func (c Command) Validate() error {
 		if len(c.Argv) != 0 || c.Shell != "" || c.Body != "" || c.Text != "" {
 			return fmt.Errorf("patch must not set argv, shell, body or text")
 		}
+	case KindDeploy:
+		// A deploy pushes a library file (file source) or installs a package
+		// (package source). The file source needs file_id + sha256 + dest; the
+		// package source needs a valid package name. run_args are only allowed
+		// with run, and only a file source may run.
+		if !ValidDeploySource(c.Source) {
+			return fmt.Errorf("deploy source must be one of file, package")
+		}
+		switch c.Source {
+		case DeploySourceFile:
+			if c.FileID <= 0 {
+				return fmt.Errorf("deploy file source requires file_id")
+			}
+			if !ValidSHA256Hex(c.SHA256) {
+				return fmt.Errorf("deploy file source requires a %d-character hex sha256", SHA256HexLen)
+			}
+			if !ValidDeployDest(c.Dest) {
+				return fmt.Errorf(`deploy dest must be an absolute path with no ".."`)
+			}
+			if c.Package != "" {
+				return fmt.Errorf("deploy file source must not set package")
+			}
+		case DeploySourcePackage:
+			if !ValidPackageName(c.Package) {
+				return fmt.Errorf("deploy package must be 1..%d characters of [A-Za-z0-9._+-]", MaxPackageNameLen)
+			}
+			if c.FileID != 0 || c.SHA256 != "" || c.Dest != "" {
+				return fmt.Errorf("deploy package source must not set file_id, sha256 or dest")
+			}
+			if c.Run || len(c.RunArgs) != 0 {
+				return fmt.Errorf("deploy package source must not set run or run_args")
+			}
+		}
+		if len(c.RunArgs) != 0 && !c.Run {
+			return fmt.Errorf("deploy run_args is only allowed with run")
+		}
+		for i, a := range c.RunArgs {
+			if len(a) > MaxArgBytes {
+				return fmt.Errorf("run_args[%d] exceeds %d bytes", i, MaxArgBytes)
+			}
+		}
+		if len(c.Argv) != 0 || c.Shell != "" || c.Body != "" || c.Text != "" {
+			return fmt.Errorf("deploy must not set argv, shell, body or text")
+		}
 	default:
-		return fmt.Errorf("unknown kind %q (expected exec, script, lock, ping, message, shell or patch)", c.Kind)
+		return fmt.Errorf("unknown kind %q (expected exec, script, lock, ping, message, shell, patch or deploy)", c.Kind)
 	}
 	return nil
 }

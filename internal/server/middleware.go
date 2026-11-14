@@ -145,6 +145,13 @@ func (s *Server) securityHeaders(next http.Handler) http.Handler {
 func (s *Server) bodyLimit(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Body != nil {
+			// The file-library upload (SD1) streams an artifact far larger than a
+			// JSON request; it enforces its own MSP_MAX_FILE_MB cap in the handler
+			// (dashboard_files.go), so it is exempt from the generic limit here.
+			if r.Method == http.MethodPost && r.URL.Path == "/api/v1/files" {
+				next.ServeHTTP(w, r)
+				return
+			}
 			limit := int64(512 << 10)
 			if strings.HasPrefix(r.URL.Path, "/api/agent/") {
 				limit = 256 << 10

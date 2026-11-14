@@ -29,6 +29,7 @@ const (
 const commandSelect = `
 SELECT c.id, c.device_id, c.org_id, c.created_by, COALESCE(u.email, ''), c.kind, c.argv_json, c.shell, c.body,
        c.text, c.action, c.mode, c.reboot, c.patch_ids_json,
+       c.source, c.file_id, c.sha256, c.dest, c.run, c.run_args_json, c.package,
        c.timeout_s, c.status, c.created_at, c.sent_at, c.started_at, c.finished_at,
        c.exit_code, c.stdout, c.stderr, c.truncated, c.error
   FROM commands c LEFT JOIN users u ON u.id = c.created_by`
@@ -38,6 +39,10 @@ func scanCommand(row interface{ Scan(...any) error }) (Command, error) {
 		c                                  Command
 		argvJSON, shell, body, text        sql.NullString
 		action, mode, reboot, patchIDsJSON sql.NullString
+		source, sha256, dest, pkg          sql.NullString
+		runArgsJSON                        sql.NullString
+		fileID                             sql.NullInt64
+		run                                int
 		created                            string
 		sentAt, startedAt, finished        sql.NullString
 		exitCode                           sql.NullInt64
@@ -45,6 +50,7 @@ func scanCommand(row interface{ Scan(...any) error }) (Command, error) {
 	)
 	err := row.Scan(&c.ID, &c.DeviceID, &c.OrgID, &c.CreatedBy, &c.CreatedByEmail, &c.Kind, &argvJSON, &shell, &body,
 		&text, &action, &mode, &reboot, &patchIDsJSON,
+		&source, &fileID, &sha256, &dest, &run, &runArgsJSON, &pkg,
 		&c.TimeoutS, &c.Status, &created, &sentAt, &startedAt, &finished,
 		&exitCode, &c.Stdout, &c.Stderr, &truncated, &c.Error)
 	if err != nil {
@@ -61,6 +67,17 @@ func scanCommand(row interface{ Scan(...any) error }) (Command, error) {
 	c.Mode = nullString(mode)
 	c.Reboot = nullString(reboot)
 	if c.IDs, err = decodePatchIDs(patchIDsJSON); err != nil {
+		return Command{}, err
+	}
+	c.Source = nullString(source)
+	c.SHA256 = nullString(sha256)
+	c.Dest = nullString(dest)
+	c.Package = nullString(pkg)
+	if fileID.Valid {
+		c.FileID = fileID.Int64
+	}
+	c.Run = run != 0
+	if c.RunArgs, err = decodeRunArgs(runArgsJSON); err != nil {
 		return Command{}, err
 	}
 	if c.CreatedAt, err = parseTime(created); err != nil {
@@ -113,6 +130,24 @@ func decodePatchIDs(ns sql.NullString) ([]string, error) {
 	return ids, nil
 }
 
+// decodeRunArgs turns run_args_json into a slice, or nil when the column is
+// NULL/empty. Like decodePatchIDs it returns nil (not []), so Command.RunArgs is
+// omitted (omitempty) for every non-deploy command and for a deploy that runs
+// with no arguments.
+func decodeRunArgs(ns sql.NullString) ([]string, error) {
+	if !ns.Valid || ns.String == "" {
+		return nil, nil
+	}
+	var args []string
+	if err := json.Unmarshal([]byte(ns.String), &args); err != nil {
+		return nil, fmt.Errorf("store: bad run_args_json: %w", err)
+	}
+	if len(args) == 0 {
+		return nil, nil
+	}
+	return args, nil
+}
+
 func getCommand(ctx context.Context, q querier, id int64) (Command, error) {
 	c, err := scanCommand(q.QueryRowContext(ctx, commandSelect+` WHERE c.id = ?`, id))
 	if errors.Is(err, sql.ErrNoRows) {
@@ -131,6 +166,8 @@ func getCommand(ctx context.Context, q querier, id int64) (Command, error) {
 func (s *Store) CreateCommand(ctx context.Context, p CreateCommandParams) (Command, error) {
 	var argvJSON, shell, body, bodySHA, text any
 	var action, mode, reboot, patchIDsJSON any
+	var source, sha256v, dest, pkg, fileID, runArgsJSON any
+	run := 0
 	switch p.Kind {
 	case protocol.KindExec:
 		argv := p.Argv
@@ -167,6 +204,35 @@ func (s *Store) CreateCommand(ctx context.Context, p CreateCommandParams) (Comma
 			}
 			patchIDsJSON = string(b)
 		}
+	case protocol.KindDeploy:
+		// Software deployment (SD1): source (file|package) picks the branch. A
+		// file deploy stores file_id/sha256/dest and optionally run + run_args; a
+		// package deploy stores the package name. ClaimQueuedCommands reads them
+		// back into the agent command JSON. Empty fields stay NULL so the dashboard
+		// COMMAND and agent JSON omit them (omitempty) for the other source.
+		source = p.Source
+		if p.SHA256 != "" {
+			sha256v = p.SHA256
+		}
+		if p.Dest != "" {
+			dest = p.Dest
+		}
+		if p.Package != "" {
+			pkg = p.Package
+		}
+		if p.FileID != 0 {
+			fileID = p.FileID
+		}
+		if p.Run {
+			run = 1
+		}
+		if len(p.RunArgs) > 0 {
+			b, err := json.Marshal(p.RunArgs)
+			if err != nil {
+				return Command{}, fmt.Errorf("store: create command: %w", err)
+			}
+			runArgsJSON = string(b)
+		}
 	case protocol.KindLock, protocol.KindPing:
 	default:
 		return Command{}, fmt.Errorf("store: create command: unknown kind %q", p.Kind)
@@ -181,10 +247,12 @@ func (s *Store) CreateCommand(ctx context.Context, p CreateCommandParams) (Comma
 	res, err := s.db.ExecContext(ctx,
 		`INSERT INTO commands (device_id, org_id, created_by, kind, argv_json, shell, body, body_sha256, text,
 		                       action, mode, reboot, patch_ids_json,
+		                       source, file_id, sha256, dest, run, run_args_json, package,
 		                       timeout_s, status, created_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?)`,
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?)`,
 		p.DeviceID, p.OrgID, p.CreatedBy, p.Kind, argvJSON, shell, body, bodySHA, text,
 		action, mode, reboot, patchIDsJSON,
+		source, fileID, sha256v, dest, run, runArgsJSON, pkg,
 		timeoutS, fmtTime(s.Now()))
 	if err != nil {
 		return Command{}, fmt.Errorf("store: create command: %w", err)
@@ -211,7 +279,8 @@ func (s *Store) ClaimQueuedCommands(ctx context.Context, deviceID int64, max int
 	defer tx.Rollback()
 
 	rows, err := tx.QueryContext(ctx,
-		`SELECT id, kind, argv_json, shell, body, text, action, mode, reboot, patch_ids_json, timeout_s FROM commands
+		`SELECT id, kind, argv_json, shell, body, text, action, mode, reboot, patch_ids_json,
+		        source, file_id, sha256, dest, run, run_args_json, package, timeout_s FROM commands
 		  WHERE device_id = ? AND status = 'queued' ORDER BY id LIMIT ?`, deviceID, max)
 	if err != nil {
 		return nil, fmt.Errorf("store: claim commands: %w", err)
@@ -222,9 +291,14 @@ func (s *Store) ClaimQueuedCommands(ctx context.Context, deviceID int64, max int
 			c                                  protocol.Command
 			argvJSON, shell, body, text        sql.NullString
 			action, mode, reboot, patchIDsJSON sql.NullString
+			source, sha256, dest, pkg          sql.NullString
+			runArgsJSON                        sql.NullString
+			fileID                             sql.NullInt64
+			run                                int
 		)
 		if err := rows.Scan(&c.ID, &c.Kind, &argvJSON, &shell, &body, &text,
-			&action, &mode, &reboot, &patchIDsJSON, &c.TimeoutS); err != nil {
+			&action, &mode, &reboot, &patchIDsJSON,
+			&source, &fileID, &sha256, &dest, &run, &runArgsJSON, &pkg, &c.TimeoutS); err != nil {
 			rows.Close()
 			return nil, fmt.Errorf("store: claim commands: %w", err)
 		}
@@ -242,6 +316,20 @@ func (s *Store) ClaimQueuedCommands(ctx context.Context, deviceID int64, max int
 			c.Mode = nullString(mode)
 			c.Reboot = nullString(reboot)
 			if c.IDs, err = decodePatchIDs(patchIDsJSON); err != nil {
+				rows.Close()
+				return nil, err
+			}
+		}
+		if c.Kind == protocol.KindDeploy {
+			c.Source = nullString(source)
+			c.SHA256 = nullString(sha256)
+			c.Dest = nullString(dest)
+			c.Package = nullString(pkg)
+			if fileID.Valid {
+				c.FileID = fileID.Int64
+			}
+			c.Run = run != 0
+			if c.RunArgs, err = decodeRunArgs(runArgsJSON); err != nil {
 				rows.Close()
 				return nil, err
 			}

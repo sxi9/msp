@@ -59,6 +59,7 @@ func TestFixturesRoundTrip(t *testing.T) {
 		{"sync_patches.json", &SyncRequest{}},
 		{"command_result.json", &CommandResult{}},
 		{"command_shell.json", &Command{}},
+		{"command_deploy.json", &Command{}},
 		{"sync_response_shell.json", &SyncResponse{}},
 		{"error.json", &ErrorResponse{}},
 	}
@@ -257,10 +258,10 @@ func TestPlatformTables(t *testing.T) {
 	if got := ShellsFor(PlatformAndroid); len(got) != 0 {
 		t.Fatalf("android shells %v", got)
 	}
-	if got := KindsFor(PlatformLinux); !reflect.DeepEqual(got, []string{"exec", "script", "lock", "ping", "message", "shell", "patch"}) {
+	if got := KindsFor(PlatformLinux); !reflect.DeepEqual(got, []string{"exec", "script", "lock", "ping", "message", "shell", "patch", "deploy"}) {
 		t.Fatalf("linux kinds %v", got)
 	}
-	if got := KindsFor(PlatformWindows); !reflect.DeepEqual(got, []string{"exec", "script", "lock", "ping", "message", "shell", "patch"}) {
+	if got := KindsFor(PlatformWindows); !reflect.DeepEqual(got, []string{"exec", "script", "lock", "ping", "message", "shell", "patch", "deploy"}) {
 		t.Fatalf("windows kinds %v", got)
 	}
 	if got := KindsFor(PlatformAndroid); !reflect.DeepEqual(got, []string{"lock", "ping", "message"}) {
@@ -269,7 +270,7 @@ func TestPlatformTables(t *testing.T) {
 	if KindsFor("darwin") != nil || KindSupportedOn(KindPing, "darwin") {
 		t.Fatal("unknown platform must support nothing")
 	}
-	for _, k := range []string{KindExec, KindScript, KindLock, KindPing, KindMessage, KindShell, KindPatch} {
+	for _, k := range []string{KindExec, KindScript, KindLock, KindPing, KindMessage, KindShell, KindPatch, KindDeploy} {
 		if !ValidKind(k) {
 			t.Errorf("ValidKind(%s)", k)
 		}
@@ -290,6 +291,13 @@ func TestPlatformTables(t *testing.T) {
 	}
 	if KindSupportedOn(KindPatch, PlatformAndroid) {
 		t.Fatal("patch must not be supported on android")
+	}
+	// deploy (SD1) is desktop only.
+	if !KindSupportedOn(KindDeploy, PlatformLinux) || !KindSupportedOn(KindDeploy, PlatformWindows) {
+		t.Fatal("deploy must be supported on desktop platforms")
+	}
+	if KindSupportedOn(KindDeploy, PlatformAndroid) {
+		t.Fatal("deploy must not be supported on android")
 	}
 }
 
@@ -740,6 +748,115 @@ func TestPatches(t *testing.T) {
 	}
 	if sec != pr.SecurityCount || len(pr.Updates) != pr.Count {
 		t.Fatalf("fixture counts: sec %d/%d count %d/%d", sec, pr.SecurityCount, len(pr.Updates), pr.Count)
+	}
+}
+
+func TestDeploy(t *testing.T) {
+	// Enum + helpers.
+	if !ValidDeploySource(DeploySourceFile) || !ValidDeploySource(DeploySourcePackage) ||
+		ValidDeploySource("") || ValidDeploySource("url") {
+		t.Fatal("ValidDeploySource")
+	}
+	for _, ok := range []string{"htop", "lib.so", "g++-12", "a_b.c+d-e", strings.Repeat("p", MaxPackageNameLen)} {
+		if !ValidPackageName(ok) {
+			t.Errorf("ValidPackageName(%q) must be true", ok)
+		}
+	}
+	for _, bad := range []string{"", "ev il", "pkg;rm", "a/b", "pkg$", "../etc", strings.Repeat("p", MaxPackageNameLen+1)} {
+		if ValidPackageName(bad) {
+			t.Errorf("ValidPackageName(%q) must be false", bad)
+		}
+	}
+	hex64 := strings.Repeat("a", SHA256HexLen)
+	if !ValidSHA256Hex(hex64) || !ValidSHA256Hex(strings.ToUpper(hex64)) ||
+		ValidSHA256Hex("") || ValidSHA256Hex(strings.Repeat("a", 63)) || ValidSHA256Hex(strings.Repeat("g", 64)) {
+		t.Fatal("ValidSHA256Hex")
+	}
+	for _, ok := range []string{"/opt/acme/installer.sh", "/x", `C:\Program Files\app.exe`, "C:/tmp/x", `\\srv\share\f`} {
+		if !ValidDeployDest(ok) {
+			t.Errorf("ValidDeployDest(%q) must be true", ok)
+		}
+	}
+	for _, bad := range []string{"", "relative/path", "./x", "/opt/../etc/passwd", `/a\..\b`, "opt/acme", ".."} {
+		if ValidDeployDest(bad) {
+			t.Errorf("ValidDeployDest(%q) must be false", bad)
+		}
+	}
+
+	// Validate: well-formed file and package deploys.
+	ok := []Command{
+		{Kind: KindDeploy, Source: DeploySourceFile, FileID: 3, SHA256: hex64, Dest: "/opt/x.sh"},
+		{Kind: KindDeploy, Source: DeploySourceFile, FileID: 1, SHA256: hex64, Dest: "/opt/x.sh", Run: true, RunArgs: []string{"--silent"}, TimeoutS: 3600},
+		{Kind: KindDeploy, Source: DeploySourceFile, FileID: 1, SHA256: hex64, Dest: `C:\tmp\a.exe`, Run: true, RunArgs: []string{strings.Repeat("x", MaxArgBytes)}},
+		{Kind: KindDeploy, Source: DeploySourcePackage, Package: "htop"},
+	}
+	for i, c := range ok {
+		if err := c.Validate(); err != nil {
+			t.Errorf("ok[%d] %+v: unexpected error %v", i, c, err)
+		}
+	}
+	bad := []struct {
+		c    Command
+		want string
+	}{
+		{Command{Kind: KindDeploy}, "deploy source"},
+		{Command{Kind: KindDeploy, Source: "url"}, "deploy source"},
+		{Command{Kind: KindDeploy, Source: DeploySourceFile, SHA256: hex64, Dest: "/opt/x"}, "requires file_id"},
+		{Command{Kind: KindDeploy, Source: DeploySourceFile, FileID: 1, SHA256: "nothex", Dest: "/opt/x"}, "hex sha256"},
+		{Command{Kind: KindDeploy, Source: DeploySourceFile, FileID: 1, SHA256: hex64, Dest: "rel"}, "absolute path"},
+		{Command{Kind: KindDeploy, Source: DeploySourceFile, FileID: 1, SHA256: hex64, Dest: "/opt/../e"}, "absolute path"},
+		{Command{Kind: KindDeploy, Source: DeploySourceFile, FileID: 1, SHA256: hex64, Dest: "/opt/x", Package: "htop"}, "must not set package"},
+		{Command{Kind: KindDeploy, Source: DeploySourceFile, FileID: 1, SHA256: hex64, Dest: "/opt/x", RunArgs: []string{"--x"}}, "only allowed with run"},
+		{Command{Kind: KindDeploy, Source: DeploySourceFile, FileID: 1, SHA256: hex64, Dest: "/opt/x", Run: true, RunArgs: []string{strings.Repeat("x", MaxArgBytes+1)}}, "run_args[0] exceeds"},
+		{Command{Kind: KindDeploy, Source: DeploySourceFile, FileID: 1, SHA256: hex64, Dest: "/opt/x", Argv: []string{"a"}}, "must not set argv"},
+		{Command{Kind: KindDeploy, Source: DeploySourcePackage}, "deploy package must be"},
+		{Command{Kind: KindDeploy, Source: DeploySourcePackage, Package: "bad name"}, "deploy package must be"},
+		{Command{Kind: KindDeploy, Source: DeploySourcePackage, Package: "htop", FileID: 2}, "must not set file_id"},
+		{Command{Kind: KindDeploy, Source: DeploySourcePackage, Package: "htop", Run: true}, "must not set run"},
+		{Command{Kind: KindDeploy, Source: DeploySourceFile, FileID: 1, SHA256: hex64, Dest: "/opt/x", TimeoutS: MaxTimeoutS + 1}, "timeout_s"},
+	}
+	for i, b := range bad {
+		err := b.c.Validate()
+		if err == nil {
+			t.Errorf("bad[%d] %+v: expected error containing %q", i, b.c, b.want)
+			continue
+		}
+		if !strings.Contains(err.Error(), b.want) {
+			t.Errorf("bad[%d]: error %q does not contain %q", i, err, b.want)
+		}
+	}
+
+	// Fixture: a Linux file deploy carrying run + run_args.
+	var cmd Command
+	roundTrip(t, "command_deploy.json", &cmd)
+	if cmd.Kind != KindDeploy || cmd.Source != DeploySourceFile || cmd.FileID != 3 ||
+		cmd.SHA256 == "" || cmd.Dest != "/opt/acme/installer.sh" || !cmd.Run ||
+		len(cmd.RunArgs) != 1 || cmd.RunArgs[0] != "--silent" || cmd.TimeoutS != 3600 {
+		t.Fatalf("command_deploy: %+v", cmd)
+	}
+	if err := cmd.Validate(); err != nil {
+		t.Fatalf("command_deploy must validate: %v", err)
+	}
+
+	// JSON shape: a deploy command carries its fields; a non-deploy command omits
+	// every deploy key so its shape is unchanged.
+	out, _ := json.Marshal(cmd)
+	for _, k := range []string{`"source":"file"`, `"file_id":3`, `"dest":"/opt/acme/installer.sh"`, `"run":true`, `"run_args":["--silent"]`} {
+		if !strings.Contains(string(out), k) {
+			t.Fatalf("deploy JSON missing %s: %s", k, out)
+		}
+	}
+	out, _ = json.Marshal(Command{ID: 9, Kind: KindPing, TimeoutS: 30})
+	for _, k := range []string{"source", "file_id", "sha256", "dest", `"run"`, "run_args", "package"} {
+		if strings.Contains(string(out), k) {
+			t.Fatalf("non-deploy command must omit %q: %s", k, out)
+		}
+	}
+	// A package deploy omits the file-only keys.
+	out, _ = json.Marshal(Command{ID: 13, Kind: KindDeploy, Source: DeploySourcePackage, Package: "htop", TimeoutS: 3600})
+	if strings.Contains(string(out), "file_id") || strings.Contains(string(out), "dest") ||
+		strings.Contains(string(out), "run_args") || !strings.Contains(string(out), `"package":"htop"`) {
+		t.Fatalf("package deploy JSON: %s", out)
 	}
 }
 

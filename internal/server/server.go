@@ -26,6 +26,8 @@ type Config struct {
 	TLSCert       string // PEM certificate path; TLS is served when TLSCert and TLSKey are both set
 	TLSKey        string
 	AgentDir      string        // directory served at /dl/ ("" = disabled)
+	FilesDir      string        // directory holding the uploaded file library (SD1); files live at <FilesDir>/<id>
+	MaxFileMB     int           // upload size cap in MiB for the file library (SD1; default 200)
 	PresetsPath   string        // JSON command preset library replacing the builtin set ("" = builtin); re-read when its mtime changes
 	RustdeskHost  string        // self-hosted RustDesk ID/relay server, bare hostname or IP (RD1); enabled only together with RustdeskKey
 	RustdeskKey   string        // the relay's public key (content of id_ed25519.pub)
@@ -46,6 +48,7 @@ func DefaultConfig() Config {
 	return Config{
 		Listen:        ":8080",
 		RetentionDays: 7,
+		MaxFileMB:     200,
 		SampleEvery:   60 * time.Second,
 		LostGrace:     5 * time.Minute,
 		DiskPct:       90,
@@ -90,6 +93,9 @@ func New(st *store.Store, cfg Config, log *slog.Logger) *Server {
 	}
 	if cfg.RetentionDays <= 0 {
 		cfg.RetentionDays = def.RetentionDays
+	}
+	if cfg.MaxFileMB <= 0 {
+		cfg.MaxFileMB = def.MaxFileMB
 	}
 	if cfg.SampleEvery <= 0 {
 		cfg.SampleEvery = def.SampleEvery
