@@ -41,6 +41,70 @@ func registerAutomations(s *Server, mux *http.ServeMux) {
 	with(RoleOperator, "DELETE /api/v1/automations/{id}", s.handleDeleteAutomation)
 }
 
+// automationView is the dashboard-facing shape of an automation (TS Automation):
+// target/schedule/alert are the parsed objects, not the stored JSON strings. The
+// server stores them as JSON (store.Automation.TargetJSON etc.) so the scheduler
+// and the alert hook can parse them, but every HTTP response emits them parsed so
+// the dashboard reads a.target / a.schedule / a.alert directly. schedule is set for
+// a schedule trigger, alert for an alert trigger; the other is null.
+type automationView struct {
+	ID        int64                   `json:"id"`
+	OrgID     *int64                  `json:"org_id"`
+	Name      string                  `json:"name"`
+	Enabled   bool                    `json:"enabled"`
+	Trigger   string                  `json:"trigger"`
+	ScriptID  int64                   `json:"script_id"`
+	Target    store.TargetSpec        `json:"target"`
+	Schedule  *store.ScheduleSpec     `json:"schedule"`
+	Alert     *store.AlertTriggerSpec `json:"alert"`
+	LastRunAt *time.Time              `json:"last_run_at"`
+	NextRunAt *time.Time              `json:"next_run_at"`
+	CreatedAt time.Time               `json:"created_at"`
+	CreatedBy *int64                  `json:"created_by"`
+}
+
+// newAutomationView parses an automation's stored target/schedule/alert JSON into
+// the dashboard shape. An unreadable column is an error (the server wrote it, so
+// this should not happen); the caller turns it into a 500.
+func newAutomationView(a store.Automation) (automationView, error) {
+	target, err := a.TargetSpec()
+	if err != nil {
+		return automationView{}, err
+	}
+	v := automationView{
+		ID: a.ID, OrgID: a.OrgID, Name: a.Name, Enabled: a.Enabled, Trigger: a.Trigger,
+		ScriptID: a.ScriptID, Target: target, LastRunAt: a.LastRunAt, NextRunAt: a.NextRunAt,
+		CreatedAt: a.CreatedAt, CreatedBy: a.CreatedBy,
+	}
+	switch a.Trigger {
+	case store.AutomationTriggerSchedule:
+		sp, err := a.ScheduleSpec()
+		if err != nil {
+			return automationView{}, err
+		}
+		v.Schedule = &sp
+	case store.AutomationTriggerAlert:
+		ap, err := a.AlertSpec()
+		if err != nil {
+			return automationView{}, err
+		}
+		v.Alert = &ap
+	}
+	return v, nil
+}
+
+// writeAutomation writes a single automation in the dashboard shape, or a 500 when
+// its stored JSON cannot be parsed.
+func (s *Server) writeAutomation(w http.ResponseWriter, status int, a store.Automation) {
+	v, err := newAutomationView(a)
+	if err != nil {
+		s.log.Error("automation view", "id", a.ID, "err", err)
+		writeError(w, http.StatusInternalServerError, "internal", "")
+		return
+	}
+	writeJSON(w, status, map[string]any{"automation": v})
+}
+
 type scheduleReq struct {
 	EveryMinutes int    `json:"every_minutes"`
 	Cron         string `json:"cron"`
@@ -73,7 +137,17 @@ func (s *Server) handleListAutomations(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal", "")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"automations": rows})
+	views := make([]automationView, 0, len(rows))
+	for _, a := range rows {
+		v, err := newAutomationView(a)
+		if err != nil {
+			s.log.Error("automation view", "id", a.ID, "err", err)
+			writeError(w, http.StatusInternalServerError, "internal", "")
+			return
+		}
+		views = append(views, v)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"automations": views})
 }
 
 func (s *Server) handleGetAutomation(w http.ResponseWriter, r *http.Request) {
@@ -90,7 +164,7 @@ func (s *Server) handleGetAutomation(w http.ResponseWriter, r *http.Request) {
 	if !s.notifyRowVisible(w, r, a.OrgID) {
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"automation": a})
+	s.writeAutomation(w, http.StatusOK, a)
 }
 
 func (s *Server) handleCreateAutomation(w http.ResponseWriter, r *http.Request) {
@@ -139,7 +213,7 @@ func (s *Server) handleCreateAutomation(w http.ResponseWriter, r *http.Request) 
 	}
 	s.audit(ctx, "user", actor, a.OrgID, "automation.created", "automation", &a.ID, clientIP(r),
 		map[string]any{"name": a.Name, "trigger": a.Trigger, "script_id": a.ScriptID})
-	writeJSON(w, http.StatusCreated, map[string]any{"automation": a})
+	s.writeAutomation(w, http.StatusCreated, a)
 }
 
 func (s *Server) handleUpdateAutomation(w http.ResponseWriter, r *http.Request) {
@@ -196,7 +270,7 @@ func (s *Server) handleUpdateAutomation(w http.ResponseWriter, r *http.Request) 
 	actor, _ := dashActor(r)
 	s.audit(ctx, "user", actor, a.OrgID, "automation.updated", "automation", &a.ID, clientIP(r),
 		map[string]any{"name": a.Name, "trigger": a.Trigger, "script_id": a.ScriptID})
-	writeJSON(w, http.StatusOK, map[string]any{"automation": a})
+	s.writeAutomation(w, http.StatusOK, a)
 }
 
 type enableRequest struct {
