@@ -1,7 +1,7 @@
 // fetch() wrapper for /api/v1 plus one typed function per endpoint. With
 // ?mock=1 in the URL every call is answered in-memory by mock.ts instead.
 import type {
-  Alert, AuditEntry, ChannelUpdate, Command, Device, DeviceDetail, EnrollmentToken, Heartbeat,
+  AgentRelease, Alert, AuditEntry, ChannelUpdate, Command, Device, DeviceDetail, EnrollmentToken, Heartbeat,
   LibraryFile, LoginResult, MaintenanceWindow, NewChannel, NewCommand, NewDeploy, NewPatch, NewRule,
   NewShell, NewWindow, NotificationDelivery, NotifyChannel, NotifyRule, Org, OrgAssignment,
   PresetLibrary, RecoveryCodes, RemoteDesktopOpened, RuleUpdate, RustdeskInfo, ShellOpened,
@@ -138,6 +138,12 @@ export const api = {
   // applies updates (mode all/security/ids). 201 with the queued command; the
   // install log lands on the command result like exec/script.
   queuePatch: (deviceId: number, p: NewPatch) => request<{ command: Command }>('POST', `/api/v1/devices/${deviceId}/patch`, p),
+  // Agent self-update (AU1). agentRelease is the release manifest (version + files
+  // per platform-arch); updateAgent queues an `update` command filled server-side
+  // from the manifest (the technician never types the version/url/sha256). 201 with
+  // the queued command; the swap log lands on the command result like exec/script.
+  agentRelease: () => request<AgentRelease>('GET', '/api/v1/agent-release'),
+  updateAgent: (deviceId: number) => request<{ command: Command }>('POST', `/api/v1/devices/${deviceId}/update`),
   presets: () => request<PresetLibrary>('GET', '/api/v1/presets'),
   // Software deployment (SD1). The file library is staff-only metadata; the bytes
   // are streamed to agents, never to the browser.

@@ -61,7 +61,9 @@ func TestFixturesRoundTrip(t *testing.T) {
 		{"command_result.json", &CommandResult{}},
 		{"command_shell.json", &Command{}},
 		{"command_deploy.json", &Command{}},
+		{"command_update.json", &Command{}},
 		{"sync_response_shell.json", &SyncResponse{}},
+		{"sync_response_update.json", &SyncResponse{}},
 		{"error.json", &ErrorResponse{}},
 	}
 	for _, c := range cases {
@@ -284,10 +286,10 @@ func TestPlatformTables(t *testing.T) {
 	if got := ShellsFor(PlatformAndroid); len(got) != 0 {
 		t.Fatalf("android shells %v", got)
 	}
-	if got := KindsFor(PlatformLinux); !reflect.DeepEqual(got, []string{"exec", "script", "lock", "ping", "message", "shell", "patch", "deploy"}) {
+	if got := KindsFor(PlatformLinux); !reflect.DeepEqual(got, []string{"exec", "script", "lock", "ping", "message", "shell", "patch", "deploy", "update"}) {
 		t.Fatalf("linux kinds %v", got)
 	}
-	if got := KindsFor(PlatformWindows); !reflect.DeepEqual(got, []string{"exec", "script", "lock", "ping", "message", "shell", "patch", "deploy"}) {
+	if got := KindsFor(PlatformWindows); !reflect.DeepEqual(got, []string{"exec", "script", "lock", "ping", "message", "shell", "patch", "deploy", "update"}) {
 		t.Fatalf("windows kinds %v", got)
 	}
 	if got := KindsFor(PlatformAndroid); !reflect.DeepEqual(got, []string{"lock", "ping", "message"}) {
@@ -296,7 +298,7 @@ func TestPlatformTables(t *testing.T) {
 	if KindsFor("darwin") != nil || KindSupportedOn(KindPing, "darwin") {
 		t.Fatal("unknown platform must support nothing")
 	}
-	for _, k := range []string{KindExec, KindScript, KindLock, KindPing, KindMessage, KindShell, KindPatch, KindDeploy} {
+	for _, k := range []string{KindExec, KindScript, KindLock, KindPing, KindMessage, KindShell, KindPatch, KindDeploy, KindUpdate} {
 		if !ValidKind(k) {
 			t.Errorf("ValidKind(%s)", k)
 		}
@@ -324,6 +326,13 @@ func TestPlatformTables(t *testing.T) {
 	}
 	if KindSupportedOn(KindDeploy, PlatformAndroid) {
 		t.Fatal("deploy must not be supported on android")
+	}
+	// update (AU1) is desktop only.
+	if !KindSupportedOn(KindUpdate, PlatformLinux) || !KindSupportedOn(KindUpdate, PlatformWindows) {
+		t.Fatal("update must be supported on desktop platforms")
+	}
+	if KindSupportedOn(KindUpdate, PlatformAndroid) {
+		t.Fatal("update must not be supported on android")
 	}
 }
 
@@ -946,6 +955,134 @@ func TestDeploy(t *testing.T) {
 	if strings.Contains(string(out), "file_id") || strings.Contains(string(out), "dest") ||
 		strings.Contains(string(out), "run_args") || !strings.Contains(string(out), `"package":"htop"`) {
 		t.Fatalf("package deploy JSON: %s", out)
+	}
+}
+
+func TestUpdate(t *testing.T) {
+	hex64 := strings.Repeat("a", SHA256HexLen)
+
+	// Version + URL helpers.
+	for _, ok := range []string{"0.2.0", "0.2.0-rc1", "1", "v1.2.3+build.5", strings.Repeat("9", MaxAgentVersionLen)} {
+		if !ValidAgentVersion(ok) {
+			t.Errorf("ValidAgentVersion(%q) must be true", ok)
+		}
+	}
+	for _, bad := range []string{"", "0.2 .0", "0.2.0 ", "ver sion", "0.2.0\n", strings.Repeat("9", MaxAgentVersionLen+1), "0.2/0"} {
+		if ValidAgentVersion(bad) {
+			t.Errorf("ValidAgentVersion(%q) must be false", bad)
+		}
+	}
+	for _, ok := range []string{"/dl/msp-agent-linux-amd64", "/dl/x.exe", "https://rmm.example.com/dl/a", strings.Repeat("u", MaxUpdateURLLen)} {
+		if !ValidUpdateURL(ok) {
+			t.Errorf("ValidUpdateURL(%q) must be true", ok)
+		}
+	}
+	for _, bad := range []string{"", "/dl/a b", "/dl/a\nb", "/dl/a\tb", strings.Repeat("u", MaxUpdateURLLen+1)} {
+		if ValidUpdateURL(bad) {
+			t.Errorf("ValidUpdateURL(%q) must be false", bad)
+		}
+	}
+
+	// AgentUpdate.Validate.
+	if err := (AgentUpdate{Version: "0.2.0", URL: "/dl/msp-agent-linux-amd64", SHA256: hex64}).Validate(); err != nil {
+		t.Fatalf("valid agent_update: %v", err)
+	}
+	for _, b := range []struct {
+		u    AgentUpdate
+		want string
+	}{
+		{AgentUpdate{Version: "", URL: "/dl/x", SHA256: hex64}, "version"},
+		{AgentUpdate{Version: "0.2.0", URL: "bad url", SHA256: hex64}, "url"},
+		{AgentUpdate{Version: "0.2.0", URL: "/dl/x", SHA256: "nothex"}, "sha256"},
+	} {
+		err := b.u.Validate()
+		if err == nil || !strings.Contains(err.Error(), b.want) {
+			t.Errorf("AgentUpdate{%+v}.Validate = %v, want %q", b.u, err, b.want)
+		}
+	}
+
+	// Command.Validate: a well-formed update, then field fails.
+	ok := []Command{
+		{Kind: KindUpdate, Version: "0.2.0", URL: "/dl/msp-agent-linux-amd64", SHA256: hex64},
+		{Kind: KindUpdate, Version: "0.2.0", URL: "/dl/msp-agent-windows-amd64.exe", SHA256: hex64, TimeoutS: 600},
+	}
+	for i, c := range ok {
+		if err := c.Validate(); err != nil {
+			t.Errorf("ok[%d] %+v: unexpected error %v", i, c, err)
+		}
+	}
+	bad := []struct {
+		c    Command
+		want string
+	}{
+		{Command{Kind: KindUpdate, URL: "/dl/x", SHA256: hex64}, "update version"},
+		{Command{Kind: KindUpdate, Version: "0.2.0", SHA256: hex64}, "update url"},
+		{Command{Kind: KindUpdate, Version: "0.2.0", URL: "/dl/x", SHA256: "nothex"}, "hex sha256"},
+		{Command{Kind: KindUpdate, Version: "0.2.0", URL: "/dl/x", SHA256: hex64, Package: "htop"}, "must not set deploy fields"},
+		{Command{Kind: KindUpdate, Version: "0.2.0", URL: "/dl/x", SHA256: hex64, Source: DeploySourceFile}, "must not set deploy fields"},
+		{Command{Kind: KindUpdate, Version: "0.2.0", URL: "/dl/x", SHA256: hex64, Action: PatchActionScan}, "must not set patch fields"},
+		{Command{Kind: KindUpdate, Version: "0.2.0", URL: "/dl/x", SHA256: hex64, Argv: []string{"a"}}, "must not set argv"},
+		{Command{Kind: KindUpdate, Version: "0.2.0", URL: "/dl/x", SHA256: hex64, TimeoutS: MaxTimeoutS + 1}, "timeout_s"},
+	}
+	for i, b := range bad {
+		err := b.c.Validate()
+		if err == nil {
+			t.Errorf("bad[%d] %+v: expected error containing %q", i, b.c, b.want)
+			continue
+		}
+		if !strings.Contains(err.Error(), b.want) {
+			t.Errorf("bad[%d]: error %q does not contain %q", i, err, b.want)
+		}
+	}
+
+	// Fixture: a Linux update command.
+	var cmd Command
+	roundTrip(t, "command_update.json", &cmd)
+	if cmd.Kind != KindUpdate || cmd.Version != "0.2.0" || cmd.URL != "/dl/msp-agent-linux-amd64" ||
+		cmd.SHA256 == "" || cmd.TimeoutS != 600 {
+		t.Fatalf("command_update: %+v", cmd)
+	}
+	if err := cmd.Validate(); err != nil {
+		t.Fatalf("command_update must validate: %v", err)
+	}
+
+	// JSON shape: an update command carries its fields; a non-update command omits
+	// version/url so its shape is unchanged.
+	out, _ := json.Marshal(cmd)
+	for _, k := range []string{`"kind":"update"`, `"version":"0.2.0"`, `"url":"/dl/msp-agent-linux-amd64"`, `"sha256":`} {
+		if !strings.Contains(string(out), k) {
+			t.Fatalf("update JSON missing %s: %s", k, out)
+		}
+	}
+	out, _ = json.Marshal(Command{ID: 9, Kind: KindPing, TimeoutS: 30})
+	for _, k := range []string{"version", `"url"`} {
+		if strings.Contains(string(out), k) {
+			t.Fatalf("non-update command must omit %q: %s", k, out)
+		}
+	}
+
+	// Fixture: a sync response advertising an agent update.
+	var sr SyncResponse
+	roundTrip(t, "sync_response_update.json", &sr)
+	if sr.AgentUpdate == nil || sr.AgentUpdate.Version != "0.2.0" ||
+		sr.AgentUpdate.URL != "/dl/msp-agent-linux-amd64" || sr.AgentUpdate.SHA256 == "" {
+		t.Fatalf("sync_response_update: %+v", sr.AgentUpdate)
+	}
+	if err := sr.AgentUpdate.Validate(); err != nil {
+		t.Fatalf("fixture agent_update must validate: %v", err)
+	}
+	if len(sr.Commands) != 0 {
+		t.Fatalf("sync_response_update commands: %+v", sr.Commands)
+	}
+
+	// agent_update is omitted when nil and present when set.
+	out, _ = json.Marshal(SyncResponse{PollIntervalS: 30, Commands: []Command{}})
+	if strings.Contains(string(out), "agent_update") {
+		t.Fatalf("nil agent_update must be omitted: %s", out)
+	}
+	out, _ = json.Marshal(SyncResponse{PollIntervalS: 30, Commands: []Command{}, AgentUpdate: &AgentUpdate{Version: "0.2.0", URL: "/dl/x", SHA256: hex64}})
+	if !strings.Contains(string(out), `"agent_update":{"version":"0.2.0","url":"/dl/x","sha256":"`) {
+		t.Fatalf("agent_update JSON shape: %s", out)
 	}
 }
 

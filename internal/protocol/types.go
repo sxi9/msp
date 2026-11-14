@@ -34,6 +34,12 @@ const (
 	// installs a named package from the OS package manager. Desktop only, like
 	// exec, script, shell and patch.
 	KindDeploy = "deploy"
+	// KindUpdate (AU1) replaces the agent binary with a newer release: the
+	// server fills version/url/sha256 from the release manifest at queue time,
+	// the agent downloads the binary, verifies the hash, health-checks it and
+	// swaps itself (rolling back on a bad start). Desktop only, like exec,
+	// script, shell, patch and deploy; Android never gets it.
+	KindUpdate = "update"
 )
 
 // Deploy command sources (SD1). "file" downloads a library file to dest and
@@ -123,6 +129,14 @@ const (
 	// run_args reuse MaxArgBytes, like exec argv.
 	MaxPackageNameLen = 256
 	SHA256HexLen      = 64
+	// Agent self-update (AU1): the update command and the sync-response
+	// agent_update block carry the released version (a short string of
+	// [A-Za-z0-9.+_-], at most MaxAgentVersionLen bytes) and the download URL
+	// (relative to the server base, at most MaxUpdateURLLen bytes, no spaces or
+	// control characters). The binary's hash reuses the SHA-256 hex rule
+	// (SHA256HexLen), re-checked by the agent after download.
+	MaxAgentVersionLen = 64
+	MaxUpdateURLLen    = 2048
 	// Installed-software inventory (facts.software, desktops in SI1). The entry
 	// cap keeps a sync body with the maximum list well under the 256 KiB agent
 	// body limit; the desktop agent additionally stops adding entries at
@@ -352,14 +366,21 @@ type Command struct {
 	// RunArgs optionally execute it (argv, no shell). For a package deploy
 	// Package is the one package name to install. All are omitted for every
 	// other kind, so their JSON shape is unchanged.
-	Source   string   `json:"source,omitempty"`
-	FileID   int64    `json:"file_id,omitempty"`
-	SHA256   string   `json:"sha256,omitempty"`
-	Dest     string   `json:"dest,omitempty"`
-	Run      bool     `json:"run,omitempty"`
-	RunArgs  []string `json:"run_args,omitempty"`
-	Package  string   `json:"package,omitempty"`
-	TimeoutS int      `json:"timeout_s"`
+	Source  string   `json:"source,omitempty"`
+	FileID  int64    `json:"file_id,omitempty"`
+	SHA256  string   `json:"sha256,omitempty"`
+	Dest    string   `json:"dest,omitempty"`
+	Run     bool     `json:"run,omitempty"`
+	RunArgs []string `json:"run_args,omitempty"`
+	Package string   `json:"package,omitempty"`
+	// Version and URL belong to kind update (AU1): Version is the target agent
+	// release, URL the download location (relative to the server base). The
+	// binary's hash reuses SHA256 (above, shared with deploy). The server fills
+	// all three from the release manifest at queue time. They are omitted for
+	// every other kind, so their JSON shape is unchanged.
+	Version  string `json:"version,omitempty"`
+	URL      string `json:"url,omitempty"`
+	TimeoutS int    `json:"timeout_s"`
 	// Cols, Rows and ShellSession belong to kind shell (RS1, decision D3).
 	// Cols/Rows are the initial terminal size; they are omitted (hence 0,
 	// meaning "default") for every other kind and whenever a shell command
@@ -371,12 +392,43 @@ type Command struct {
 	ShellSession *ShellSession `json:"shell_session,omitempty"`
 }
 
+// AgentUpdate advertises a newer agent release on the sync response (AU1). The
+// server sends it only when the release manifest has an entry for the device's
+// platform-arch whose version differs from the device's reported agent_version;
+// Android never gets it. Version is the released version, URL the download
+// location relative to the server base, and SHA256 the binary's hash (the agent
+// re-verifies it after download). Both values are validated with Validate before
+// they are sent and before the agent acts on them.
+type AgentUpdate struct {
+	Version string `json:"version"`
+	URL     string `json:"url"`
+	SHA256  string `json:"sha256"`
+}
+
+// Validate reports why an agent_update block is unusable ("" and nil when it is
+// fine); the text is suitable for a server startup error or an agent log line.
+func (u AgentUpdate) Validate() error {
+	if !ValidAgentVersion(u.Version) {
+		return fmt.Errorf("agent_update version must be 1..%d bytes of [A-Za-z0-9.+_-]", MaxAgentVersionLen)
+	}
+	if !ValidUpdateURL(u.URL) {
+		return fmt.Errorf("agent_update url must be 1..%d bytes with no spaces or control characters", MaxUpdateURLLen)
+	}
+	if !ValidSHA256Hex(u.SHA256) {
+		return fmt.Errorf("agent_update sha256 must be %d hex characters", SHA256HexLen)
+	}
+	return nil
+}
+
 // SyncResponse is the 200 body of POST /api/agent/v1/sync. Commands is always
 // an array, never null. Rustdesk is omitted when the server has no relay.
+// AgentUpdate (AU1) is omitted unless a newer agent release is advertised for
+// this device.
 type SyncResponse struct {
-	PollIntervalS int       `json:"poll_interval_s"`
-	Commands      []Command `json:"commands"`
-	Rustdesk      *Rustdesk `json:"rustdesk,omitempty"`
+	PollIntervalS int          `json:"poll_interval_s"`
+	Commands      []Command    `json:"commands"`
+	Rustdesk      *Rustdesk    `json:"rustdesk,omitempty"`
+	AgentUpdate   *AgentUpdate `json:"agent_update,omitempty"`
 }
 
 // CommandResult is the body of POST /api/agent/v1/commands/{id}/result.
@@ -596,6 +648,40 @@ func ValidSHA256Hex(h string) bool {
 	return true
 }
 
+// ValidAgentVersion reports whether v is a valid agent release string (AU1):
+// 1..MaxAgentVersionLen characters of [A-Za-z0-9.+_-] (e.g. "0.2.0",
+// "0.2.0-rc1"). It is the target version of an update command and the version
+// advertised in an agent_update block.
+func ValidAgentVersion(v string) bool {
+	if v == "" || len(v) > MaxAgentVersionLen {
+		return false
+	}
+	for i := 0; i < len(v); i++ {
+		c := v[i]
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' ||
+			c == '.' || c == '+' || c == '_' || c == '-') {
+			return false
+		}
+	}
+	return true
+}
+
+// ValidUpdateURL reports whether u is an acceptable agent-update download URL
+// (AU1): 1..MaxUpdateURLLen bytes with no spaces or control characters. The
+// server fills it from the manifest (relative to the server base, e.g.
+// "/dl/msp-agent-linux-amd64"); the agent resolves it against its server base.
+func ValidUpdateURL(u string) bool {
+	if u == "" || len(u) > MaxUpdateURLLen {
+		return false
+	}
+	for i := 0; i < len(u); i++ {
+		if u[i] <= ' ' || u[i] == 0x7f {
+			return false
+		}
+	}
+	return true
+}
+
 // ValidDeployDest reports whether dest is an acceptable deploy destination
 // path (SD1): non-empty, absolute (a leading "/", a drive-letter path like
 // C:\ or C:/, or a UNC \\server\share) and with no ".." path component on
@@ -743,7 +829,7 @@ func ClampPatchTimeout(n int) int {
 // ValidKind reports whether k is one of the command kinds (RS1 added shell).
 func ValidKind(k string) bool {
 	switch k {
-	case KindExec, KindScript, KindLock, KindPing, KindMessage, KindShell, KindPatch, KindDeploy:
+	case KindExec, KindScript, KindLock, KindPing, KindMessage, KindShell, KindPatch, KindDeploy, KindUpdate:
 		return true
 	}
 	return false
@@ -771,14 +857,14 @@ func ShellsFor(platform string) []string {
 }
 
 // KindsFor returns the command kinds a platform accepts: exec, script, lock,
-// ping, message, shell, patch and deploy on desktop platforms, only lock, ping
-// and message on android, none for an unknown platform. shell (RS1), patch
-// (PM1) and deploy (SD1) are desktop only, so the server answers 400
-// unsupported_on_platform for any of them on android.
+// ping, message, shell, patch, deploy and update on desktop platforms, only
+// lock, ping and message on android, none for an unknown platform. shell (RS1),
+// patch (PM1), deploy (SD1) and update (AU1) are desktop only, so the server
+// answers 400 unsupported_on_platform for any of them on android.
 func KindsFor(platform string) []string {
 	switch platform {
 	case PlatformLinux, PlatformWindows:
-		return []string{KindExec, KindScript, KindLock, KindPing, KindMessage, KindShell, KindPatch, KindDeploy}
+		return []string{KindExec, KindScript, KindLock, KindPing, KindMessage, KindShell, KindPatch, KindDeploy, KindUpdate}
 	case PlatformAndroid:
 		return []string{KindLock, KindPing, KindMessage}
 	}
@@ -938,8 +1024,31 @@ func (c Command) Validate() error {
 		if len(c.Argv) != 0 || c.Shell != "" || c.Body != "" || c.Text != "" {
 			return fmt.Errorf("deploy must not set argv, shell, body or text")
 		}
+	case KindUpdate:
+		// Agent self-update (AU1): version, url and sha256 are required (the
+		// server fills them from the release manifest at queue time; the agent
+		// re-verifies the hash after download). No deploy/patch field, argv,
+		// shell, body or text may be set.
+		if !ValidAgentVersion(c.Version) {
+			return fmt.Errorf("update version must be 1..%d bytes of [A-Za-z0-9.+_-]", MaxAgentVersionLen)
+		}
+		if !ValidUpdateURL(c.URL) {
+			return fmt.Errorf("update url must be 1..%d bytes with no spaces or control characters", MaxUpdateURLLen)
+		}
+		if !ValidSHA256Hex(c.SHA256) {
+			return fmt.Errorf("update requires a %d-character hex sha256", SHA256HexLen)
+		}
+		if c.Source != "" || c.FileID != 0 || c.Dest != "" || c.Run || len(c.RunArgs) != 0 || c.Package != "" {
+			return fmt.Errorf("update must not set deploy fields (source, file_id, dest, run, run_args, package)")
+		}
+		if c.Action != "" || c.Mode != "" || len(c.IDs) != 0 || c.Reboot != "" {
+			return fmt.Errorf("update must not set patch fields (action, mode, ids, reboot)")
+		}
+		if len(c.Argv) != 0 || c.Shell != "" || c.Body != "" || c.Text != "" {
+			return fmt.Errorf("update must not set argv, shell, body or text")
+		}
 	default:
-		return fmt.Errorf("unknown kind %q (expected exec, script, lock, ping, message, shell, patch or deploy)", c.Kind)
+		return fmt.Errorf("unknown kind %q (expected exec, script, lock, ping, message, shell, patch, deploy or update)", c.Kind)
 	}
 	return nil
 }

@@ -11,6 +11,7 @@ import { factRows } from '../lib/facts.ts';
 import { filterSoftware, softwareOf, softwareSummary, sourceLabel } from '../lib/software.ts';
 import { patchReportOf, rebootBadge, sortUpdates, summarisePatches } from '../lib/patches.ts';
 import { destError, fileSize, filesForDevice, validPackageName } from '../lib/deploy.ts';
+import { isOutdated, selfUpdateEnabled, targetVersion } from '../lib/agentver.ts';
 import { COMMAND_DONE, canOperate, isAdmin, type Command, type Device as DeviceT, type NewCommand, type NewDeploy, type NewPatch, type Preset, type RemoteDesktopOpened, type RustdeskInfo, type User } from '../types.ts';
 import { RemoteShell, ShellResult } from './Shell.tsx';
 import { StatusDot } from '../components/StatusDot.tsx';
@@ -57,6 +58,7 @@ export function describe(c: Command): string {
     case 'deploy':
       if (c.source === 'package') return `deploy: install ${c.package ?? ''}`;
       return `deploy: ${c.dest ?? 'file'}${c.run ? ' (run)' : ''}`;
+    case 'update': return `update agent${c.version ? ` → ${c.version}` : ''}`;
     default: return '';
   }
 }
@@ -106,6 +108,20 @@ export function Device({ id, user }: { id: number; user: User }) {
         : t.startsWith('unsupported_on_platform') ? 'Software deployment is not supported on this platform.'
         : t.startsWith('unsupported_on_device') ? 'This device is revoked; re-enroll it first.'
         : t.startsWith('not_found') ? 'That file is not available for this device.' : t);
+    }
+  };
+  const queueUpdate = async () => {
+    setError('');
+    try {
+      setTracked((await api.updateAgent(id)).command);
+      history.reload();
+      detail.reload();
+    } catch (e) {
+      const t = errorText(e);
+      setError(t.startsWith('device_offline') ? 'The device is offline; it must be online to update the agent.'
+        : t.startsWith('no_update_available') ? 'The agent is already on the released version.'
+        : t.startsWith('unsupported_on_platform') ? 'Agent self-update is not supported on this platform.'
+        : t.startsWith('unsupported_on_device') ? 'This device is revoked; re-enroll it first.' : t);
     }
   };
   // 1 s polling of the command just queued until it reaches a final status.
@@ -189,6 +205,7 @@ export function Device({ id, user }: { id: number; user: User }) {
       {apps && <InstalledApps apps={apps} />}
       {d.platform !== 'android' && <InstalledSoftware device={d} software={detail.data.software} />}
       {d.platform !== 'android' && <Updates device={d} patches={detail.data.patches} canPatch={operator && !d.revoked && d.status === 'online'} onPatch={queuePatch} />}
+      {d.platform !== 'android' && <AgentUpdate device={d} canUpdate={operator && !d.revoked && d.status === 'online'} onUpdate={queueUpdate} />}
       {builtins && <BuiltIns device={d} onQueue={queue} />}
       <RemoteShell device={d} user={user} />
       {!d.revoked && <RemoteDesktop device={d} operator={operator} />}
@@ -343,6 +360,41 @@ function Updates({ device, patches, canPatch, onPatch }: { device: DeviceT; patc
           </div>
         )}
       {updates.length > 0 && <p class="muted">Installing is a role-gated, tenant-scoped, audited command; the result (the install log) appears in the command history below.</p>}
+    </div>
+  );
+}
+
+/**
+ * Agent self-update (AU1): the installed agent version, the released version from
+ * the manifest (GET /api/v1/agent-release, fetched once per card), and — when the
+ * device is behind, online, not revoked and the caller is an operator — an "Update
+ * agent" button. The queued command's result (download, hash verify, health check,
+ * swap, and any rollback) shows in the command history below. Hidden from the Facts
+ * panel: this is its own card, like Updates. Never shown for Android.
+ */
+function AgentUpdate({ device, canUpdate, onUpdate }: { device: DeviceT; canUpdate: boolean; onUpdate: () => Promise<void> }) {
+  const release = usePoll(() => api.agentRelease(), [], 0);
+  const manifest = release.data ?? null;
+  const enabled = selfUpdateEnabled(manifest);
+  const outdated = isOutdated(device, manifest);
+  const target = targetVersion(device, manifest);
+  return (
+    <div class="card agent-update">
+      <div class="form-row">
+        <h2>Agent version{outdated ? <span class="muted"> update available</span> : enabled ? <span class="ok"> up to date</span> : ''}</h2>
+        {canUpdate && outdated && target && (
+          <span class="right">
+            <ConfirmButton label="Update agent" question={`Update the agent on ${device.hostname} from ${device.agent_version || '—'} to ${target}? The agent downloads the new binary, verifies its hash, health-checks it and swaps itself, rolling back automatically if the new binary fails to start.`} onConfirm={onUpdate} />
+          </span>
+        )}
+      </div>
+      {release.error && <p class="error">{release.error}</p>}
+      <dl class="kv">
+        <dt>Installed</dt><dd>{device.agent_version || <span class="muted">—</span>}</dd>
+        <dt>Released</dt><dd>{enabled ? <>{manifest!.version}{outdated && <span class="badge badge-amber">outdated</span>}</> : <span class="muted">self-update is off (no release manifest)</span>}</dd>
+      </dl>
+      {!canUpdate && outdated && device.status !== 'online' && <p class="muted">The device must be online to update the agent.</p>}
+      {outdated && <p class="muted">Updating is a role-gated, tenant-scoped, audited command; the swap log (and any rollback) appears in the command history below.</p>}
     </div>
   );
 }

@@ -67,6 +67,7 @@ type Server struct {
 	loginLimit  *rateLimiter
 	enrollLimit *rateLimiter
 	presets     *presetLibrary
+	manifests   *manifestLibrary
 	pendingTOTP *pendingTOTPStore
 
 	// shutdown is closed when Run starts shutting the listener down so that
@@ -121,6 +122,7 @@ func New(st *store.Store, cfg Config, log *slog.Logger) *Server {
 		loginLimit:  newRateLimiter(10),
 		enrollLimit: newRateLimiter(enrollPerMinute),
 		presets:     newPresetLibrary(cfg.PresetsPath, log),
+		manifests:   newManifestLibrary(cfg.AgentDir, log),
 		pendingTOTP: newPendingTOTPStore(),
 		shutdown:    make(chan struct{}),
 	}
@@ -209,6 +211,10 @@ func (s *Server) Run(ctx context.Context) error {
 	if err := s.presets.load(); err != nil {
 		return err
 	}
+	// Load the agent release manifest (AU1). Unlike presets, a bad or missing
+	// agents.json is not fatal: the safe default is self-update off, so the error
+	// is logged (inside load) and the server still starts.
+	_ = s.manifests.load()
 	srv := &http.Server{
 		Addr:              s.cfg.Listen,
 		Handler:           s.Handler(),

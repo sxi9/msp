@@ -144,6 +144,12 @@ pre.out { margin: 0; padding: 8px 64px 8px 10px; background: var(--code-bg); bor
 .deploy h2 { margin: 0; }
 .deploy .deploy-dest { flex: 1 1 260px; min-width: 0; }
 .deploy textarea { margin: 8px 0; }
+/* Agent self-update (AU1): the Agent version card reuses .card/.form-row/.kv; the
+   fleet released-version banner is a thin highlighted note above the table. */
+.agent-update h2 { margin: 0; }
+.agent-update .badge-amber { margin-left: 8px; }
+.banner { margin: 10px 0; padding: 8px 12px; border: 1px solid var(--line); border-left: 3px solid var(--accent); border-radius: 6px; background: var(--panel); color: var(--text); font-size: 13px; }
+.banner strong { color: var(--text); }
 /* Remote shell: the xterm viewport scrolls inside its own fixed-height box, so a
    long session never grows the page and the fit addon keeps cols within width. */
 .shell-card h2 { margin: 0; }

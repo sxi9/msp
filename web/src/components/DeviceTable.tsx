@@ -1,6 +1,7 @@
-import type { Device } from '../types.ts';
+import type { AgentManifest, Device } from '../types.ts';
 import { groupByOrg, sortDevices } from '../lib/status.ts';
 import { hasPendingSecurity } from '../lib/patches.ts';
+import { isOutdated } from '../lib/agentver.ts';
 import { ago, pct } from '../lib/format.ts';
 import { StatusDot } from './StatusDot.tsx';
 import { Bar } from './Bar.tsx';
@@ -20,8 +21,17 @@ export function Updates({ device: d }: { device: Device }) {
   return <span title={title}>{d.pending_patches}</span>;
 }
 
+/** Fleet Agent cell: the reported version, flagged "outdated" when the release manifest has a newer one (AU1). */
+export function AgentCell({ device: d, manifest }: { device: Device; manifest?: AgentManifest | null }) {
+  if (!d.agent_version) return <span class="muted">—</span>;
+  if (isOutdated(d, manifest ?? null)) {
+    return <span class="warn" title={`outdated — released ${manifest!.version}`}>{d.agent_version}<span class="chip chip-lock">outdated</span></span>;
+  }
+  return <span class="muted">{d.agent_version}</span>;
+}
+
 /** Fleet table: sorted by urgency, grouped under org header rows (the Org page hides them). */
-export function DeviceTable({ devices, grouped = true, empty }: { devices: Device[]; grouped?: boolean; empty: string }) {
+export function DeviceTable({ devices, grouped = true, empty, manifest }: { devices: Device[]; grouped?: boolean; empty: string; manifest?: AgentManifest | null }) {
   if (devices.length === 0) return <p class="empty">{empty}</p>;
   const sorted = sortDevices(devices);
   const groups = grouped ? groupByOrg(sorted) : [{ org_id: 0, org_name: '', devices: sorted }];
@@ -47,7 +57,7 @@ export function DeviceTable({ devices, grouped = true, empty }: { devices: Devic
               <td data-label="Alerts">{d.open_alerts > 0 ? <span class="badge badge-amber">{d.open_alerts}</span> : <span class="muted">0</span>}</td>
               <td data-label="Updates"><Updates device={d} /></td>
               <td data-label="Software">{d.software_count > 0 ? <a href={`#/devices/${d.id}`} title={`${d.software_count} installed packages`}>{d.software_count}</a> : <span class="muted">0</span>}</td>
-              <td data-label="Agent" class="muted">{d.agent_version || '—'}</td>
+              <td data-label="Agent"><AgentCell device={d} manifest={manifest} /></td>
             </tr>
           )),
         ])}

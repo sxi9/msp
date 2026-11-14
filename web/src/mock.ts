@@ -2,7 +2,7 @@
 // (add &role=viewer|operator to try a weaker role). Lets the dashboard be
 // developed and demoed without a backend. Nothing here ships to the server.
 import type {
-  Alert, AuditEntry, Command, Device, EnrollmentToken, LibraryFile, MaintenanceWindow, NewCommand,
+  AgentManifest, Alert, AuditEntry, Command, Device, EnrollmentToken, LibraryFile, MaintenanceWindow, NewCommand,
   NewDeploy, NewPatch, NewShell, NotificationDelivery, NotifyChannel, NotifyRule, Org, Preset, User,
 } from './types.ts';
 import type { ShellSocket } from './lib/shell.ts';
@@ -62,10 +62,26 @@ const dev = (id: number, org_id: number, hostname: string, platform: Device['pla
 const rustdesk = new URLSearchParams(location.search).get('rustdesk') === '0'
   ? { enabled: false, host: '', key: '' }
   : { enabled: true, host: 'rmm.example.com', key: 'OeVuKk5nlHiXp+7qsR6CbcHBGxhU4PJkNbvoX3P5X0k=' };
+// The agent release manifest (AU1): the single released version and the published
+// desktop binaries per platform-arch. Add &selfupdate=0 to the URL to see the
+// "self-update off" state (empty manifest). Most mock devices report 0.1.0 (older),
+// so they show as outdated; ws-xray below runs 0.2.0 and shows as up to date.
+const agentManifest: AgentManifest = new URLSearchParams(location.search).get('selfupdate') === '0'
+  ? { version: '', files: {} }
+  : {
+    version: '0.2.0',
+    files: {
+      'linux-amd64': { name: 'msp-agent-linux-amd64', sha256: 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855' },
+      'linux-arm64': { name: 'msp-agent-linux-arm64', sha256: '1b4f0e9851971998e732078544c96b36c3d01cedf7caa332359d6f1d83567014' },
+      'windows-amd64': { name: 'msp-agent-windows-amd64.exe', sha256: '60303ae22b998861bce3b28f33eec1be758a213c86c93c076dbe9f558c11c752' },
+    },
+  };
 const devices: Device[] = [
-  // A device with pending updates including a security one (PM1).
+  // A device with pending updates including a security one (PM1); agent 0.1.0, older
+  // than the released 0.2.0, so it shows as an outdated agent (AU1).
   dev(1, 1, 'ws-reception-01', 'linux', 'online', { rustdesk_id: '123456789', pending_patches: 3, security_patches: 1, patches_checked_at: iso(3600e3) }),
-  dev(2, 1, 'ws-xray', 'windows', 'online', { disk_used_pct: 93.1, open_alerts: 1, rustdesk_id: '987654321' }),
+  // An up-to-date agent (0.2.0): no update offered (AU1).
+  dev(2, 1, 'ws-xray', 'windows', 'online', { disk_used_pct: 93.1, open_alerts: 1, rustdesk_id: '987654321', agent_version: '0.2.0' }),
   dev(3, 1, 'Pixel 8', 'android', 'online', { battery_pct: 12, battery_charging: false, open_alerts: 1 }),
   dev(4, 1, 'ws-backoffice', 'linux', 'offline', { open_alerts: 1 }),
   // A reboot-required device: everything installed, a reboot is pending (PM1).
@@ -249,6 +265,18 @@ function finish(c: Command) {
         ? `Reading package lists...\nInstalling ${c.package} ...\nSetting up ${c.package} ...\ndone.\n`
         : `Downloaded ${c.dest} (sha256 ${c.sha256?.slice(0, 12)}… verified)\n` +
           (c.run ? `Running ${c.dest} ${(c.run_args ?? []).join(' ')}\nmarker written\n` : 'wrote file (not run)\n');
+    }
+    else if (c.kind === 'update') {
+      c.status = 'done'; c.exit_code = 0;
+      const d = devices.find((x) => x.id === c.device_id);
+      const from = d?.agent_version ?? '?';
+      c.stdout = `agent ${from} -> ${c.version}\n` +
+        `Downloaded ${c.url} (sha256 ${c.sha256?.slice(0, 12)}… verified)\n` +
+        `Health check: ${c.version} version OK\n` +
+        `Swapped binary (backup kept at <exe>.bak)\n` +
+        `Restarting into ${c.version} …\n`;
+      // Reflect the successful swap so the device page shows the new version.
+      if (d && c.version) d.agent_version = c.version;
     }
     else { c.status = 'done'; c.exit_code = 0; c.stdout = out[c.kind]; }
     c.finished_at = iso(-700);
@@ -506,6 +534,25 @@ function route(method: string, path: string, body: unknown): Reply {
     setTimeout(() => finish(c), 400); // the device is online here (checked above)
     return ok({ command: c }, 201);
   }
+  if ((x = m(/^\/api\/v1\/devices\/(\d+)\/update$/))) {
+    const r = needRole('operator'); if (r) return r;
+    const d = devices.find((d) => d.id === Number(x![1])); if (!d) return err(404, 'not_found');
+    if (d.revoked) return err(400, 'unsupported_on_device');
+    if (d.platform === 'android') return err(400, 'unsupported_on_platform');
+    const entry = agentManifest.files[`${d.platform}-${d.arch}`];
+    if (!agentManifest.version || !entry || agentManifest.version === d.agent_version) return err(409, 'no_update_available');
+    if (d.status !== 'online') return err(409, 'device_offline');
+    const c: Command = {
+      id: nextId++, device_id: d.id, org_id: d.org_id, created_by: me.id, created_by_email: me.email, kind: 'update',
+      argv: [], shell: '', body: '', text: '', timeout_s: 600, status: 'queued',
+      created_at: iso(0), sent_at: null, started_at: null, finished_at: null, exit_code: null, stdout: '', stderr: '', truncated: false, error: '',
+      version: agentManifest.version, url: `/dl/${entry.name}`, sha256: entry.sha256,
+    };
+    commands.unshift(c);
+    log('agent.update_requested', 'command', c.id, d.org_id, { from_version: d.agent_version, to_version: agentManifest.version, hostname: d.hostname });
+    setTimeout(() => finish(c), 400); // the device is online here (checked above)
+    return ok({ command: c }, 201);
+  }
   if (p === '/api/v1/files' && method === 'GET') {
     const orgId = Number(q.get('org_id') ?? 0);
     return ok({ files: files.filter((f) => !orgId || f.org_id === orgId) });
@@ -554,6 +601,7 @@ function route(method: string, path: string, body: unknown): Reply {
     }
     return ok({ query: raw, results, truncated: results.length >= limit });
   }
+  if (p === '/api/v1/agent-release') return ok(agentManifest);
   if (p === '/api/v1/presets') return ok({ presets, source: 'builtin', path: '' });
   if ((x = m(/^\/api\/v1\/commands\/(\d+)$/))) {
     const c = commands.find((c) => c.id === Number(x![1]));

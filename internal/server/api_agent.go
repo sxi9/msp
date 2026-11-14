@@ -287,7 +287,13 @@ func (s *Server) handleSync(w http.ResponseWriter, r *http.Request, dev store.De
 	} else if more {
 		poll = 5
 	}
-	writeJSON(w, http.StatusOK, protocol.SyncResponse{PollIntervalS: poll, Commands: cmds, Rustdesk: s.rustdeskInfo()})
+	resp := protocol.SyncResponse{PollIntervalS: poll, Commands: cmds, Rustdesk: s.rustdeskInfo()}
+	// Agent self-update advertise (AU1): attach an agent_update block when the
+	// release manifest has a newer binary for this device's platform-arch than the
+	// version the agent just reported. nil (the common case) is omitted. See
+	// agentUpdateFor in dashboard_update.go.
+	resp.AgentUpdate = s.agentUpdateFor(dev, req.AgentVersion)
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // handleResult is POST /api/agent/v1/commands/{id}/result.

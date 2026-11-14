@@ -2,11 +2,14 @@
 // are the JSON names exactly; nullable columns are `| null`.
 
 import type { SoftwareHit, SoftwareItem } from './lib/software.ts';
+import type { AgentManifest } from './lib/agentver.ts';
+
+export type { AgentManifest, AgentManifestFile } from './lib/agentver.ts';
 
 export type Role = 'admin' | 'operator' | 'viewer';
 export type Platform = 'linux' | 'windows' | 'android';
 export type DeviceStatus = 'online' | 'offline' | 'pending';
-export type CommandKind = 'exec' | 'script' | 'lock' | 'ping' | 'message' | 'shell' | 'patch' | 'deploy';
+export type CommandKind = 'exec' | 'script' | 'lock' | 'ping' | 'message' | 'shell' | 'patch' | 'deploy' | 'update';
 /** Deploy command source (SD1): push a library file, or install an OS package. */
 export type DeploySource = 'file' | 'package';
 export type CommandStatus = 'queued' | 'sent' | 'done' | 'failed' | 'timeout' | 'lost' | 'cancelled';
@@ -130,7 +133,16 @@ export interface Command {
    */
   source?: DeploySource; file_id?: number; sha256?: string; dest?: string; run?: boolean;
   run_args?: string[]; package?: string;
+  /**
+   * Present only for kind `update` (AU1): the target agent version and the download
+   * URL the server filled from the release manifest. sha256 (above, shared with
+   * deploy) carries the new binary's hash, which the agent re-verifies.
+   */
+  version?: string; url?: string;
 }
+
+/** GET /api/v1/agent-release body (AU1): the release manifest, `{ version: '', files: {} }` when self-update is off. */
+export type AgentRelease = AgentManifest;
 
 /**
  * A server-side file-library entry (SD1): the metadata the staff endpoints return;

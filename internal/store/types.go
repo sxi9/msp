@@ -139,13 +139,20 @@ type Command struct {
 	// omitempty so they appear on a deploy COMMAND only and every other kind
 	// keeps its existing JSON shape. CreateCommand's KindDeploy case persists
 	// them and ClaimQueuedCommands emits them in the agent command JSON.
-	Source     string     `json:"source,omitempty"`
-	FileID     int64      `json:"file_id,omitempty"`
-	SHA256     string     `json:"sha256,omitempty"`
-	Dest       string     `json:"dest,omitempty"`
-	Run        bool       `json:"run,omitempty"`
-	RunArgs    []string   `json:"run_args,omitempty"`
-	Package    string     `json:"package,omitempty"`
+	Source  string   `json:"source,omitempty"`
+	FileID  int64    `json:"file_id,omitempty"`
+	SHA256  string   `json:"sha256,omitempty"`
+	Dest    string   `json:"dest,omitempty"`
+	Run     bool     `json:"run,omitempty"`
+	RunArgs []string `json:"run_args,omitempty"`
+	Package string   `json:"package,omitempty"`
+	// Version/URL belong to kind update (AU1); omitempty so they appear on an
+	// update COMMAND only and every other kind keeps its existing JSON shape.
+	// SHA256 (above, shared with deploy) carries the update binary's hash.
+	// CreateCommand's KindUpdate case persists them and ClaimQueuedCommands emits
+	// them in the agent command JSON.
+	Version    string     `json:"version,omitempty"`
+	URL        string     `json:"url,omitempty"`
 	TimeoutS   int        `json:"timeout_s"`
 	Status     string     `json:"status"`
 	CreatedAt  time.Time  `json:"created_at"`
@@ -254,13 +261,18 @@ type CreateCommandParams struct {
 	// source is file or package; a file deploy carries FileID+SHA256+Dest and
 	// optionally Run+RunArgs; a package deploy carries Package. They are zero for
 	// every other kind.
-	Source   string
-	FileID   int64
-	SHA256   string
-	Dest     string
-	Run      bool
-	RunArgs  []string
-	Package  string
+	Source  string
+	FileID  int64
+	SHA256  string
+	Dest    string
+	Run     bool
+	RunArgs []string
+	Package string
+	// Version/URL belong to kind update (AU1): the server fills Version, URL and
+	// SHA256 from the release manifest at queue time. They are zero for every
+	// other kind.
+	Version  string
+	URL      string
 	TimeoutS int
 }
 
