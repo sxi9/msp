@@ -139,6 +139,14 @@ func (s *Server) open(ctx context.Context, pass *evalPass, d store.Device, typ, 
 	}
 	if created {
 		s.log.Info("alert opened", "device", d.ID, "hostname", d.Hostname, "type", typ, "message", message)
+		// NS1: enqueue notifications for the newly opened alert. Load the row so
+		// the enqueue has its id, severity and message (OpenAlert returns only a
+		// created flag).
+		if alert, err := s.st.GetOpenAlert(ctx, d.ID, typ); err == nil {
+			s.EnqueueAlertNotifications(ctx, alert, store.EventOpened)
+		} else {
+			s.log.Error("notify enqueue: load opened alert", "device", d.ID, "type", typ, "err", err)
+		}
 	}
 }
 
@@ -146,9 +154,18 @@ func (s *Server) resolve(ctx context.Context, pass *evalPass, d store.Device, ty
 	if !pass.isOpen(d.ID, typ) {
 		return
 	}
+	// NS1: capture the alert row before it is closed so a resolved-event
+	// notification can be enqueued with its id, severity and message.
+	alert, aerr := s.st.GetOpenAlert(ctx, d.ID, typ)
 	if err := s.st.ResolveAlert(ctx, d.ID, typ); err != nil {
 		s.log.Error("resolve alert", "device", d.ID, "type", typ, "err", err)
+		return
 	}
+	if aerr != nil {
+		s.log.Error("notify enqueue: load resolved alert", "device", d.ID, "type", typ, "err", aerr)
+		return
+	}
+	s.EnqueueAlertNotifications(ctx, alert, store.EventResolved)
 }
 
 // humanDuration renders "45s", "6m", "3h" or "2d" for alert messages.

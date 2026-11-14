@@ -421,3 +421,75 @@ their last known relay (harmless). To rotate the key, stop `hbbs`, delete `id_ed
 start it, put the new `.pub` line into `MSP_RUSTDESK_KEY`, restart the server, and re-run
 `msp-agent rustdesk setup` on every endpoint and the client settings on every technician PC
 (the agents receive the new key in their next sync but only `setup` applies it to RustDesk).
+
+## 11. Notifications (email and Slack/webhook) (NS1)
+
+Alert notifications send an email or an HTTP webhook when an alert opens or resolves, routed
+per client org and severity, muted during maintenance windows. There is nothing to configure
+in the environment: channels, routing rules and maintenance windows are created in the
+dashboard (Notifications section) or over `/api/v1/notify/*` (docs/PROTOCOL.md). The dispatcher
+is always running.
+
+### 11a. The dispatcher
+
+A background goroutine started in `Run` alongside the alert evaluator and the pruner (stopped
+on shutdown). Every few seconds it claims the `pending` deliveries whose retry lease has
+expired, renders the message for the channel kind, sends it through the real sender
+(`net/smtp` for email, `net/http` for webhooks), and marks the row `sent` or records the
+failure. Retries use a per-delivery backoff (the claim stamps `updated_at`, which both leases
+the row so two ticks never grab it and schedules the next attempt); after `maxAttempts` (5) a
+delivery is left `failed`. Enqueue is idempotent — one row per `(alert, rule, event)` — so the
+evaluator running twice never double-sends. Nothing is tunable by env in NS1; the constants
+live in `internal/server/notify_dispatch.go`.
+
+### 11b. Channels
+
+- **Email**: `config` = `{"host","port","from","to":[...],"starttls":true,"username":"..."}`,
+  plus a write-only `secret` (the SMTP password, used only when `username` is set). STARTTLS is
+  used when `starttls` is true and the server advertises it; the default port is 587. The
+  message is plain text with the subject `[MSP] <severity> <type> on <hostname> (<org>)` and a
+  dashboard link when `MSP_BASE_URL` is set.
+- **Webhook**: `config` = `{"url","flavor":"slack"|"generic"}`. `slack` posts
+  `{"text":"<subject> — <message>"}` (a Slack incoming webhook). `generic` posts
+  `{alert_id, org, device, type, severity, message, event, at}`; if a `secret` is set it adds
+  `X-MSP-Signature: sha256=<hmac of the body>` so the receiver can verify authenticity.
+
+Use **Send test** on a channel to enqueue a `test` delivery immediately and watch it in the
+delivery log; the dispatcher sends it on its next tick.
+
+### 11c. Routing rules and maintenance windows
+
+A rule routes matching alerts to one channel: it matches by org (a rule scoped to an org, or a
+global rule), `min_severity` (the alert's severity must be at least this), an optional alert-type
+list (empty = all of `offline`, `disk_full`, `memory_high`, `battery_low`), and the event
+(on-open / on-resolve). A maintenance window mutes an org's (or all orgs') deliveries between an
+absolute start and end: alerts still open, but their deliveries are recorded `suppressed` and
+nothing is sent. Suppression is an operational mute, not a security control (docs/SECURITY.md
+section 12).
+
+### 11d. Firewall and secrets
+
+The server makes **outbound** connections to the SMTP host/port and to each webhook URL, so the
+server's egress must allow them (a locked-down host that only accepts inbound 443 will see every
+delivery fail and land `failed` after the retries). Channel secrets are stored in the database in
+the clear because they are credentials in use (docs/SECURITY.md section 2 and 13); they are
+write-only over the API, never logged, and never placed in a delivery's `detail_json`, and
+tokened URLs are redacted to `scheme://host` in logs and the delivery log. Keep the database and
+backups private accordingly.
+
+### 11e. Reading the delivery log
+
+`GET /api/v1/notify/deliveries?status=&org_id=&limit=` (the Delivery log view) shows every
+attempt newest first: time, org, device/alert, channel, event, a status chip
+(`pending`/`sent`/`failed`/`suppressed`), the attempt count and the last error. A row stuck
+`pending` with rising attempts points at an unreachable SMTP host or webhook (check egress and
+the channel config); a `failed` row has given up after `maxAttempts`. All of it is org-scoped
+for staff exactly like the rest of the dashboard.
+
+### 11f. Not configured in the build container
+
+No outbound mail or internet is available in the cloud build container, so the senders are
+tested against a local fake SMTP listener and `httptest` webhooks (`internal/e2e`
+`TestNotificationsDelivery`, `internal/server` `TestStdSenderEmailAgainstFakeSMTP`); a real
+email to an inbox or a post to a real Slack workspace must be confirmed on a deployed host with
+egress.

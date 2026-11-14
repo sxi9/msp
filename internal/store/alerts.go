@@ -80,6 +80,22 @@ func (s *Store) GetAlert(ctx context.Context, id int64) (Alert, error) {
 	return a, nil
 }
 
+// GetOpenAlert returns the open (unresolved) alert of a type on a device, with
+// org_name and hostname joined in, for the NS1 notification enqueue wiring: the
+// evaluator opens or resolves an alert and then hands the row to
+// EnqueueAlertNotifications. ErrNotFound when no open alert of that type exists.
+func (s *Store) GetOpenAlert(ctx context.Context, deviceID int64, typ string) (Alert, error) {
+	a, err := scanAlert(s.db.QueryRowContext(ctx,
+		alertSelect+` WHERE a.device_id = ? AND a.type = ? AND a.resolved_at IS NULL`, deviceID, typ))
+	if errors.Is(err, sql.ErrNoRows) {
+		return Alert{}, ErrNotFound
+	}
+	if err != nil {
+		return Alert{}, fmt.Errorf("store: get open alert: %w", err)
+	}
+	return a, nil
+}
+
 // ListAlerts returns alerts newest first, optionally only open ones and only
 // for one org, with org_name and hostname joined in. visible restricts the
 // result to a caller's visible org set (RS2): nil = every org, a non-nil but

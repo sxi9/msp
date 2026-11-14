@@ -32,6 +32,13 @@ What the system protects, what it does not, and what must be true before it grow
 | session cookie    | `ss_` + 32 random bytes (base64url) | sha256 hex                              | 12 h, deleted on logout         |
 | enrollment token  | `et_` + 32 random bytes             | sha256 hex + first 10 chars for display | ttl (default 7 d), max uses, revocable |
 | device token      | `dt_` + 32 random bytes             | sha256 hex in `devices.token_hash`      | until revoke or re-enrollment   |
+| channel secret **(NS1)** | SMTP password / webhook signing secret | **plaintext** in `notify_channels.secret` | until changed or the channel is deleted |
+
+The channel secret is the one exception to hashing: it is a credential the server must *use* to
+authenticate an SMTP session or to compute an HMAC, not a value it verifies, so it is stored in
+the clear (like any outbound password a mailer keeps). It is **write-only over the API** — never
+returned (`"secret_set":bool` only), never logged, and never placed in a delivery's `detail_json`;
+see section 12.
 
 Every token is generated with `crypto/rand`, shown exactly once, and only its hash is kept, so
 the database alone does not let anyone authenticate. Revocation is immediate: a revoked device
@@ -238,7 +245,8 @@ delete path, and it is never pruned. Each row names the actor type (`user`, `dev
 the actor, the org, the action, the target and the client IP. Actions: logins (success and
 failure), user and org changes, token creation and revocation, enrollment, revocation and
 deletion of devices, command queued/finished/lost, lock requests, remote desktop sessions
-opened, remote shell opened/connected/closed, alert acknowledgements.
+opened, remote shell opened/connected/closed, alert acknowledgements, and notification
+channel/rule/window create/update/delete and channel test **(NS1)**.
 Export it with your backups; SIEM forwarding is phase 2.
 
 ## 11. Preconditions before scaling to many clients (phase 2)
@@ -256,7 +264,39 @@ the Nth client, in this order:
    allowlisting at the proxy.
 5. Windows job-object process-tree kill and a reviewed script library.
 
-## 12. Reporting a vulnerability
+## 12. Notification secrets and suppression (NS1)
+
+Alert notifications add outbound SMTP and HTTP from the server and one new kind of stored
+credential. What that changes:
+
+- **Secrets are credentials in use, not hashes.** A channel's `secret` (the SMTP password or the
+  webhook signing secret) must be presented to the SMTP server or fed to the HMAC, so it is stored
+  in the clear in `notify_channels.secret` (section 2). Protect it exactly like the device tokens:
+  whoever holds the database holds these secrets. It is **write-only over the API** — the channel
+  JSON carries only `"secret_set":true|false`; `PUT` with the field omitted keeps the stored value,
+  `""` is rejected, a value replaces it. It is never written to a log line and never placed in a
+  delivery's `detail_json`.
+- **Redaction.** The server never logs a channel secret, and it reduces any `http(s)` URL that
+  appears in a log line, a `last_error`, or a delivery `detail_json` to `scheme://host` — dropping
+  userinfo, path and query — so a Slack incoming-webhook path or a `?token=` is not leaked through
+  the delivery log or the server log. Webhook signing uses HMAC-SHA256 over the exact request body,
+  sent as `X-MSP-Signature: sha256=<hex>`; the receiver verifies it with the shared secret.
+- **Maintenance-window suppression is not a security control.** A window mutes deliveries for an
+  org (or all orgs) between two absolute times; it is an operational convenience so a planned
+  outage does not page anyone. It does not stop alerts being opened, gate any access, or hide data —
+  anyone who can see the org still sees the alert and the suppressed delivery row. Do not rely on it
+  to withhold information.
+- **Outbound reachability.** The dispatcher connects out to the configured SMTP host/port and
+  webhook URLs; those egress paths must be allowed from the server (docs/OPS.md). Like every other
+  server-initiated connection it is subject to the server's own network position; a server
+  compromise can both read these secrets and send as these channels, which is the same blast radius
+  as the rest of the server (section 1).
+- **Org scoping (RS2).** Channels, rules, windows and the delivery log follow the same two-layer
+  tenant isolation and 404-not-403 rule as every other staff resource (section 4): a scoped
+  operator manages only their orgs' rows, a global `org_id null` row is visible only to all-orgs
+  staff, and a cross-org resource is indistinguishable from one that does not exist.
+
+## 13. Reporting a vulnerability
 
 Report privately to the maintainers of this repository (open a security advisory on the
 repository, or e-mail the address listed in its README once published). Please include the

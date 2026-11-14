@@ -364,8 +364,34 @@ monitoring process.
 
 There is one open alert per device and type. **Alerts** page: Open or All, filter by client,
 **Ack** to acknowledge (recorded with your user and time). Thresholds are server config
-(`DiskPct`, `MemPct`, `BatteryPct` in `internal/server`). Email, SMS and Slack notifications
-are phase 2.
+(`DiskPct`, `MemPct`, `BatteryPct` in `internal/server`).
+
+### Notifications: email and Slack/webhook (NS1)
+
+The **Notifications** section (admin and operator; a viewer sees only the read-only delivery
+log) sends an email or an HTTP webhook when an alert opens or resolves. There is nothing to
+configure in the environment — set it up in three panels:
+
+1. **Channels** — where notifications go. Add an **email** channel (SMTP host, port, from, one or
+   more recipients, STARTTLS, optional username + password) or a **webhook** channel (a URL and a
+   flavor: **Slack** posts the Slack incoming-webhook shape, **generic** posts a JSON object). The
+   secret (SMTP password or webhook signing secret) is **write-only**: the form shows "set / not
+   set" and a replace affordance; it is never shown again. Use **Send test** to enqueue a test
+   delivery and watch it turn `sent` (or `failed`) in the log.
+2. **Rules** — what to route. A rule picks a channel and matches by client (one client or all), a
+   minimum severity, an optional list of alert types (none = all), and whether it fires on open,
+   on resolve, or both. An alert that opens or resolves creates one delivery per matching rule.
+3. **Maintenance windows** — when to stay quiet. A window mutes a client's (or everyone's)
+   deliveries between a start and end time, with an "active now" badge. Alerts still open during a
+   window, but their deliveries are recorded **suppressed** and nothing is sent — a mute for
+   planned work, not a way to hide anything.
+
+The **Delivery log** lists every attempt newest first: time, client, device/alert, channel,
+event, a status chip (pending / sent / failed / suppressed), attempts and the last error; filter
+by status and client. A row stuck `pending` with rising attempts usually means the SMTP host or
+webhook URL is unreachable from the server — the server connects **out** to them, so that egress
+must be allowed (docs/OPS.md section 11). Everything here is scoped to your clients exactly like
+the rest of the dashboard. SMS and multi-step escalation policies are the NS2 follow-ons.
 
 ## 11. Users, roles, audit
 

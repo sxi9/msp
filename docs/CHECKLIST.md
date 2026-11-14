@@ -204,3 +204,28 @@ Acme Dental) at 1280 px and 400 px; the operator's org filter listed only "All o
 held no Riverside device, confirming the isolation. The server and agent were stopped and the live database deleted.
 
 - [x] Live run confirms a scoped operator sees only their assigned client in the real dashboard: Fleet, org filter and header counts reduced to Acme Dental, Riverside (visible to the admin) absent; admin Edit-access dialog edits the per-client checklist; phone `scrollWidth` 400 on all four pages; database deleted afterwards
+
+## NS1: alert notifications (phase 2)
+
+- [x] Model: migration `0005_notifications` — `notify_channels`, `notify_rules`, `maintenance_windows`, `notification_deliveries`, each with a nullable `org_id` (null = global) and RS2 org indexes; UNIQUE `(alert_id, rule_id, event)` makes enqueue idempotent; `updated_at` doubles as the retry lease; channel `secret` stored in the clear but `json:"-"` (`store_test.go` migrationCount 5)
+- [x] Store: channel/rule/window/delivery CRUD + `MatchRules` (org/severity/type/event), `ActiveMaintenance`, `EnqueueDelivery` (ON CONFLICT DO NOTHING), `ClaimPendingDeliveries` (immediate-tx lease), `MarkDeliverySent`/`MarkDeliveryFailed`, `ListDeliveries` with the RS2 `org_id IN (…)` filter, `GetOpenAlert` for the enqueue wiring (`internal/store` `notify_test.go`)
+- [x] Enqueue wired into the evaluator: `open()` enqueues on a newly created alert, `resolve()` fetches the row before closing it and enqueues a resolved event; idempotent across two evaluator ticks (`internal/server` `TestEnqueueIdempotentAtServer`, e2e idempotence assertion)
+- [x] Dispatcher started in `Run` beside the evaluator/pruner on the jobs context and stopped on shutdown; claims pending rows, renders per kind, sends through the `Sender`, retries with backoff, gives up at `maxAttempts` → `failed` (`TestDispatchFailingSenderReachesFailed`)
+- [x] Renderers + real sender: email plain-text subject/body naming the device and alert (`net/smtp`, STARTTLS, PLAIN auth), Slack `{"text"}`, generic JSON, `X-MSP-Signature` HMAC-SHA256; URLs redacted to `scheme://host` (`TestRenderers`, `TestRedaction`, `TestStdSenderEmailAgainstFakeSMTP`, `TestStdSenderWebhookGenericAndSignature`, `TestStdSenderWebhookNon2xxFails`)
+- [x] API: `/api/v1/notify/channels|rules|windows|deliveries` + `/channels/{id}/test`, viewer read-only / operator write, CSRF on writes, write-only secret (`secret_set`; omit keeps, `""` rejected, value replaces), audit `notify.*` (`TestNotifyChannelSecretWriteOnly`, `TestNotifyTestSendEnqueues`, `TestNotifyRoles`)
+- [x] RS2 scoping on every notify resource: a scoped operator lists only their orgs' rows (no global), gets `404 not_found` with no side effect on a channel/rule/window in another org, sees only their deliveries, and cannot create a global (`org_id` null) row (`403`); admin unaffected; a grant lets them manage the new org (`internal/server` `TestNotifyOrgScoping`, `internal/e2e` `TestNotificationsOrgScoping`)
+- [x] Dashboard: Notifications section (Channels, Rules, Maintenance windows with "active now", Send test), Delivery log (status chips, status/org filters), write-only secret fields, `web/src/lib/notify.ts` helpers + `web/src/lib/notify.test.ts`, `?mock=1` seeded (`make web` typecheck + build)
+- [x] End-to-end: `internal/e2e/notify_test.go` — real evaluator + production dispatcher (net/smtp + net/http) against a local fake SMTP server and httptest webhooks on a fake clock: an opened alert in org A with an email rule and a Slack rule yields two `sent` deliveries (SMTP names the device + "no sync for", webhook gets `{"text":…}` naming the device); a `min_severity=high` rule does not fire on a low alert; an active maintenance window suppresses (nothing sent) while another org outside a window sends; a failing webhook reaches `failed` after `maxAttempts` and enqueue is idempotent across two ticks; and the RS2 404-not-403 isolation + global-row rule through the real HTTP API
+- [ ] A real external send (an email to an inbox, a post to a real Slack workspace) — not verified: no outbound mail or internet in the build container; the senders are proven only against a local fake SMTP listener and httptest
+- [x] Docs: PROTOCOL (the `/notify/*` endpoints + shapes + the write-only secret rule + `notify.*` audit actions), SECURITY (channel-secret storage, HMAC signing, maintenance-window suppression is not a security control — section 12), OPS (section 11: configuring SMTP/Slack, the dispatcher, retry/backoff, outbound egress), GUIDE (Notifications under Alerts), ARCHITECTURE (NS1 section), FEATURES, STATUS (NS1 table), ROADMAP (NS1 ticked, SMS/escalation left as NS2), CHECKLIST
+
+### Final verification pass (2026-11-14, NS1)
+
+Re-run in the cloud build container (Go 1.24.7, Node 22.23.4, no display, no outbound mail):
+`CGO_ENABLED=0 go build ./...` ok, `go vet ./...` ok, `CGO_ENABLED=0 go test ./... -count=1` ok
+(agent 3.19 s, e2e 11.60 s incl. `TestNotificationsDelivery` + `TestNotificationsOrgScoping`,
+protocol 0.01 s, server 54.31 s, store 0.42 s), `GOOS=windows GOARCH=amd64 go build ./...` ok,
+`make web` (npm ci, 49 web unit tests incl. `web/src/lib/notify.test.ts`, `tsc --noEmit`, esbuild
+`app.js` 443.4 kB + `app.css` 14.4 kB, server rebuilt), `scripts/e2e.sh` ends with "E2E OK"
+(36 PASS, 0 FAIL). The notification senders are exercised against a local fake SMTP listener and
+`httptest` webhooks; a real external send is the one `NOT VERIFIED` item (no egress here).

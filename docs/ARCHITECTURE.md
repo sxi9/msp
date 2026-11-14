@@ -240,3 +240,55 @@ user, a *visible org set* and enforces it on every read and write.
   endpoint is needed.
 - **Package rules unchanged**: this is store queries plus server handlers and a Preact dialog; no
   new dependency, and `internal/agent` is untouched.
+
+## Alert notifications (NS1, phase 2)
+
+Outbound delivery of alerts over email and webhooks, built on the existing evaluator and store
+with no new transport and no new dependency (stdlib `net/smtp` and `net/http` only).
+
+```
+ evaluator open()/resolve() ──► EnqueueAlertNotifications ──► MatchRules + ActiveMaintenance
+   (alerts.go, on a created/                  │                      │
+    resolved alert)                           ▼                      ▼
+                              notification_deliveries (pending | suppressed), idempotent on
+                              (alert_id, rule_id, event)
+                                              │
+ Run ──► NotifyDispatcher.Run(jobsCtx) ──tick──► ClaimPendingDeliveries ──► render ──► stdSender
+   (alongside the evaluator/pruner)               (lease via updated_at)     per kind    net/smtp
+   stopped on shutdown                                                                   net/http
+                                              │
+                                   MarkDeliverySent | MarkDeliveryFailed (backoff, maxAttempts)
+```
+
+- **Model** (`internal/store/notify.go`, migration `0005_notifications`): four tables —
+  `notify_channels`, `notify_rules`, `maintenance_windows`, `notification_deliveries` — each with
+  a nullable `org_id` (null = global) so the RS2 `orgInClause` filter scopes staff visibility. A
+  UNIQUE index on `(alert_id, rule_id, event)` makes enqueue idempotent; `updated_at` doubles as
+  the dispatcher's retry lease. Channel secrets are stored in the clear (credentials in use) and
+  tagged `json:"-"` so they never leave the store; callers expose `SecretSet`.
+- **Enqueue** (`internal/server/alerts.go` → `EnqueueAlertNotifications`): the evaluator's
+  `open()` (when `OpenAlert` reports created) and `resolve()` (fetching the row before it closes)
+  hand the `store.Alert` to the enqueue, which finds matching enabled rules (`MatchRules`:
+  org/severity/type/event) and upserts one `pending` delivery per rule — `suppressed` when the
+  alert's org is inside an active maintenance window at enqueue time. It never sends.
+- **Dispatcher** (`internal/server/notify_dispatch.go`): a background goroutine started in `Run`
+  beside the other jobs on the jobs context (stopped on shutdown). Each tick claims a batch of due
+  `pending` rows (the claim stamps `updated_at` inside an immediate write tx so two ticks never
+  grab the same row), renders the message for the channel kind, sends it through the `Sender`
+  interface, and marks `sent` or increments `attempts` with a redacted `last_error`, giving up at
+  `maxAttempts`. The `Sender` and the clock (`s.now`) are injectable, so tests drive it with a
+  fake clock and a fake sender, or exercise the real `stdSender` against a local fake SMTP server
+  and `httptest`. `EvaluateNow`/`DispatchNotificationsNow` expose one synchronous pass each for
+  the e2e test.
+- **Renderers**: email is plain text (`net/smtp`, STARTTLS and PLAIN auth when configured);
+  webhook is Slack (`{"text":…}`) or generic JSON, with an optional `X-MSP-Signature`
+  HMAC-SHA256 over the body. URLs are redacted to `scheme://host` before any log or `detail_json`.
+- **API + dashboard** (`internal/server/dashboard_notify.go`, wired by `notify_wire.go`): the
+  `/api/v1/notify/*` CRUD + `/test` + delivery log, reached through a small `NotifyStore` adapter
+  over `*store.Store` so the handler package builds and tests on its own; RS2 404-not-403 via the
+  shared `dashVisibleOrgs`/`dashOrgVisible` helpers; write-only secrets; audit `notify.*`. The web
+  dashboard adds the Notifications panels and the Delivery log with `web/src/lib/notify.ts` pure
+  helpers.
+- **Package rules unchanged**: store queries + server handlers + a dispatcher goroutine + Preact
+  views; no new module (stdlib `net/smtp`/`net/http`), and `internal/agent` is untouched. NS2 (SMS
+  as another channel `kind`, multi-step escalation) reuses this shape and adds no table.

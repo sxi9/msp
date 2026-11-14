@@ -216,7 +216,21 @@ func (s *Server) Run(ctx context.Context) error {
 	jobsDone := make(chan struct{})
 	go func() {
 		defer close(jobsDone)
-		s.runJobs(jobsCtx)
+		var wg sync.WaitGroup
+		wg.Add(2)
+		// Alert evaluator, lost-command sweeper and pruner.
+		go func() {
+			defer wg.Done()
+			s.runJobs(jobsCtx)
+		}()
+		// NS1 notification dispatcher: drains pending deliveries on its own
+		// ticker with the production sender, stopping when jobsCtx is cancelled
+		// on shutdown.
+		go func() {
+			defer wg.Done()
+			NewNotifyDispatcher(s, newStdSender()).Run(jobsCtx)
+		}()
+		wg.Wait()
 	}()
 
 	errc := make(chan error, 1)

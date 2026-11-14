@@ -592,6 +592,83 @@ A scoped user who is later **promoted to admin** becomes all-orgs at once (the v
 keys off role); **demoting an admin** to operator keeps `all_orgs:true` until an admin scopes them
 through `PUT …/orgs`.
 
+### Notifications (NS1)
+
+Alert notifications: email (SMTP) and webhook (Slack-compatible + generic JSON), routed per
+client and severity, suppressed during maintenance windows, with a retrying dispatcher and a
+delivery log. All four resources are **org-scoped for staff visibility exactly like RS2**: a
+scoped operator/viewer sees and manages only channels/rules/windows/deliveries whose `org_id`
+is in their visible set; a global `org_id null` row is visible only to all-orgs users; a
+cross-org single resource is `404 not_found`, resolved before any side effect (docs/SECURITY.md
+section 4). GETs require `viewer`; writes require `operator`; a global (`org_id null`) row may be
+created only by an all-orgs caller (`403 forbidden` otherwise). CSRF header on every write.
+
+**Channel secret is write-only.** A channel's `secret` (SMTP password or webhook signing
+secret) is never returned; a channel is shown with `"secret_set":true|false`. On `PUT`, omitting
+`secret` leaves the stored value unchanged, sending `""` is rejected (`400 invalid_request`), and
+sending a value replaces it.
+
+- `GET /api/v1/notify/channels` -> `{"channels":[CHANNEL...]}` (org-scoped).
+
+```
+CHANNEL = {"id":3,"kind":"email"|"webhook","name":"Ops email","org_id":1|null,
+           "config":{...},"secret_set":true,"enabled":true,"created_at":"...","created_by":1}
+```
+
+`config` for email: `{"host","port","from","to":[...],"starttls":bool,"username"}`; for webhook:
+`{"url","flavor":"slack"|"generic"}`.
+- `POST /api/v1/notify/channels {"kind","name","org_id":1|null,"config":{...},"secret":"...","enabled":true}`
+  (admin, or operator for an org they can see) -> `201 {"channel":CHANNEL}`. Validates the
+  kind-specific config (`400 invalid_request` with a detail). Audit `notify.channel_created`.
+- `PUT /api/v1/notify/channels/{id}` (same auth + org scope; `org_id` and `kind` are immutable) ->
+  `200 {"channel":CHANNEL}`. `404 not_found` across orgs. Audit `notify.channel_updated`.
+- `DELETE /api/v1/notify/channels/{id}` -> `204` (rules cascade; the delivery log keeps the
+  dangling `channel_id`). Audit `notify.channel_deleted`.
+- `POST /api/v1/notify/channels/{id}/test` -> `201 {"delivery":DELIVERY}`: enqueues a `test`
+  delivery immediately (status `pending`); the dispatcher sends it on its next tick. Audit
+  `notify.channel_tested`.
+- `GET /api/v1/notify/rules` -> `{"rules":[RULE...]}`.
+
+```
+RULE = {"id":5,"name":"High to Slack","org_id":1|null,"min_severity":"low"|"medium"|"high",
+        "alert_types":["offline","disk_full"],"on_open":true,"on_resolve":false,
+        "channel_id":3,"enabled":true,"created_at":"...","created_by":1}
+```
+
+`alert_types` empty = all types. A rule fires when org matches (rule `org_id` null or == the
+alert's org), `alert severity >= min_severity`, the type is listed (or the list is empty), and
+the event matches (`on_open` for opened, `on_resolve` for resolved).
+- `POST /api/v1/notify/rules`, `PUT /api/v1/notify/rules/{id}` (`org_id` immutable on update),
+  `DELETE /api/v1/notify/rules/{id}` (same auth + org scope). `channel_id` must reference a
+  channel the caller can see (`400 invalid_request` otherwise, not revealing another org's
+  channel). Audit `notify.rule_created`/`updated`/`deleted`.
+- `GET /api/v1/notify/windows` -> `{"windows":[WINDOW...]}`.
+
+```
+WINDOW = {"id":2,"org_id":1|null,"starts_at":"...","ends_at":"...","reason":"patching",
+          "active_now":true,"created_at":"...","created_by":1}
+```
+
+One-shot absolute times; `active_now` is computed server-side (`starts_at <= now < ends_at`).
+- `POST /api/v1/notify/windows {"org_id":1|null,"starts_at","ends_at","reason"}`
+  (`ends_at` must be after `starts_at`), `DELETE /api/v1/notify/windows/{id}`. Audit
+  `notify.window_created`/`deleted`.
+- `GET /api/v1/notify/deliveries?status=pending|sent|failed|suppressed&org_id=&limit=` ->
+  `{"deliveries":[DELIVERY...]}` newest first (read, org-scoped). The delivery log.
+
+```
+DELIVERY = {"id":9,"alert_id":9|null,"rule_id":5|null,"channel_id":3|null,"org_id":1|null,
+            "event":"opened"|"resolved"|"test","status":"pending"|"sent"|"failed"|"suppressed",
+            "attempts":0,"last_error":"","detail":{...redacted...},"created_at":"...","updated_at":"..."}
+```
+
+One row per `(alert_id, rule_id, event)` (a UNIQUE index makes enqueue idempotent so the
+dispatcher never double-sends; a `test` row has `alert_id` null and is always its own row). An
+alert newly opened (`OpenAlert` returned created) or resolved enqueues one `pending` row per
+matching rule, or `suppressed` when the alert's org is inside an active maintenance window at
+enqueue time. The dispatcher retries with backoff and lands `failed` after `maxAttempts`.
+`detail` and `last_error` are redacted of any secret or tokened URL (docs/SECURITY.md).
+
 ### Other paths and headers
 
 - `GET /healthz` -> `200 {"ok":true}` when the DB answers `SELECT 1`, else `503`.
@@ -612,7 +689,10 @@ through `PUT …/orgs`.
 `token.created`, `token.revoked`, `device.enrolled`, `device.revoked`, `device.deleted`,
 `device.lock_requested` **(A1)**, `device.remote_desktop_opened` **(RD1)**,
 `shell.opened`, `shell.connected`, `shell.closed` **(RS1)**, `command.queued`,
-`command.finished`, `command.lost`, `alert.ack`.
+`command.finished`, `command.lost`, `alert.ack`,
+`notify.channel_created`, `notify.channel_updated`, `notify.channel_deleted`,
+`notify.channel_tested`, `notify.rule_created`, `notify.rule_updated`, `notify.rule_deleted`,
+`notify.window_created`, `notify.window_deleted` **(NS1)**.
 
 ## 8. Alert thresholds
 
