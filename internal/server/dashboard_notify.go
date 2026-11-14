@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net"
 	"net/http"
 	"net/url"
@@ -31,12 +32,21 @@ import (
 const (
 	notifyKindEmail   = "email"
 	notifyKindWebhook = "webhook"
+	notifyKindSMS     = "sms"
 
 	webhookFlavorSlack   = "slack"
 	webhookFlavorGeneric = "generic"
 
+	smsProviderTwilio  = "twilio"
+	smsProviderGeneric = "generic"
+
 	notifyMaxName   = 100
 	notifyMaxReason = 500
+
+	// Escalation policy limits (NS2). A policy is a short ordered list of steps,
+	// each firing its channels after a bounded delay from the alert opening.
+	notifyMaxSteps       = 10
+	notifyMaxStepMinutes = 40320 // 4 weeks: the furthest a step may be delayed
 )
 
 // deliveryStatuses and deliveryEvents mirror the notification_deliveries CHECK
@@ -73,6 +83,15 @@ type NotifyStore interface {
 	UpdateNotifyRule(ctx context.Context, p UpdateNotifyRuleParams) (NotifyRule, error)
 	DeleteNotifyRule(ctx context.Context, id int64) error
 
+	// Escalation policies (NS2). A policy is an ordered list of steps; each step
+	// fires its channels after a delay from an alert opening. Every List takes the
+	// RS2 visible org set, as the channel/rule lists do.
+	ListEscalationPolicies(ctx context.Context, visible []int64) ([]EscalationPolicy, error)
+	GetEscalationPolicy(ctx context.Context, id int64) (EscalationPolicy, error)
+	CreateEscalationPolicy(ctx context.Context, p CreateEscalationPolicyParams) (EscalationPolicy, error)
+	UpdateEscalationPolicy(ctx context.Context, p UpdateEscalationPolicyParams) (EscalationPolicy, error)
+	DeleteEscalationPolicy(ctx context.Context, id int64) error
+
 	ListMaintenanceWindows(ctx context.Context, visible []int64) ([]MaintenanceWindow, error)
 	GetMaintenanceWindow(ctx context.Context, id int64) (MaintenanceWindow, error)
 	CreateMaintenanceWindow(ctx context.Context, p CreateMaintenanceWindowParams) (MaintenanceWindow, error)
@@ -103,19 +122,41 @@ type NotifyChannel struct {
 	CreatedBy  *int64
 }
 
-// NotifyRule routes matching alerts to a channel.
+// NotifyRule routes matching alerts to a channel. EscalationPolicyID, when set,
+// names a policy that drives timed deliveries in addition to the rule's own
+// on_open channel (NS2).
 type NotifyRule struct {
-	ID          int64
-	Name        string
-	OrgID       *int64
-	MinSeverity string
-	AlertTypes  string // comma list, empty = all types
-	OnOpen      bool
-	OnResolve   bool
-	ChannelID   int64
-	Enabled     bool
-	CreatedAt   time.Time
-	CreatedBy   *int64
+	ID                 int64
+	Name               string
+	OrgID              *int64
+	MinSeverity        string
+	AlertTypes         string // comma list, empty = all types
+	OnOpen             bool
+	OnResolve          bool
+	ChannelID          int64
+	EscalationPolicyID *int64
+	Enabled            bool
+	CreatedAt          time.Time
+	CreatedBy          *int64
+}
+
+// EscalationPolicy is an ordered list of escalation steps (NS2). OrgID nil = a
+// global policy usable by any rule; else it scopes the policy to one client.
+type EscalationPolicy struct {
+	ID        int64
+	Name      string
+	OrgID     *int64
+	Steps     []EscalationStep
+	CreatedAt time.Time
+	CreatedBy *int64
+}
+
+// EscalationStep fires ChannelIDs AfterMinutes from the alert opening, while the
+// alert is still open and unacknowledged. Steps are ordered by StepOrder (1..n).
+type EscalationStep struct {
+	StepOrder    int
+	AfterMinutes int
+	ChannelIDs   []int64
 }
 
 // MaintenanceWindow suppresses deliveries for an org (or all orgs) between two
@@ -130,7 +171,9 @@ type MaintenanceWindow struct {
 	CreatedBy *int64
 }
 
-// NotificationDelivery is one row of the delivery log.
+// NotificationDelivery is one row of the delivery log. Step is set only for an
+// escalation delivery (NS2) and carries that step's 1-based order; it is nil for
+// an ordinary on_open/on_resolve/test delivery.
 type NotificationDelivery struct {
 	ID         int64
 	AlertID    *int64
@@ -142,6 +185,7 @@ type NotificationDelivery struct {
 	Attempts   int
 	LastError  string
 	DetailJSON string
+	Step       *int
 	CreatedAt  time.Time
 	UpdatedAt  time.Time
 }
@@ -168,26 +212,45 @@ type UpdateNotifyChannelParams struct {
 }
 
 type CreateNotifyRuleParams struct {
-	Name        string
-	OrgID       *int64
-	MinSeverity string
-	AlertTypes  string
-	OnOpen      bool
-	OnResolve   bool
-	ChannelID   int64
-	Enabled     bool
-	CreatedBy   *int64
+	Name               string
+	OrgID              *int64
+	MinSeverity        string
+	AlertTypes         string
+	OnOpen             bool
+	OnResolve          bool
+	ChannelID          int64
+	EscalationPolicyID *int64
+	Enabled            bool
+	CreatedBy          *int64
 }
 
 type UpdateNotifyRuleParams struct {
-	ID          int64
-	Name        string
-	MinSeverity string
-	AlertTypes  string
-	OnOpen      bool
-	OnResolve   bool
-	ChannelID   int64
-	Enabled     bool
+	ID                 int64
+	Name               string
+	MinSeverity        string
+	AlertTypes         string
+	OnOpen             bool
+	OnResolve          bool
+	ChannelID          int64
+	EscalationPolicyID *int64
+	Enabled            bool
+}
+
+// CreateEscalationPolicyParams is a validated policy to insert (NS2). Steps are
+// in order; the store assigns each a 1-based StepOrder by position.
+type CreateEscalationPolicyParams struct {
+	Name      string
+	OrgID     *int64
+	Steps     []EscalationStep
+	CreatedBy *int64
+}
+
+// UpdateEscalationPolicyParams replaces a policy's name and its full ordered step
+// list (NS2). OrgID is immutable, like a channel's.
+type UpdateEscalationPolicyParams struct {
+	ID    int64
+	Name  string
+	Steps []EscalationStep
 }
 
 type CreateMaintenanceWindowParams struct {
@@ -236,6 +299,12 @@ func registerNotify(s *Server, mux *http.ServeMux) {
 	with(RoleOperator, "POST /api/v1/notify/rules", s.handleCreateNotifyRule)
 	with(RoleOperator, "PUT /api/v1/notify/rules/{id}", s.handleUpdateNotifyRule)
 	with(RoleOperator, "DELETE /api/v1/notify/rules/{id}", s.handleDeleteNotifyRule)
+
+	// Escalation policies (NS2).
+	get("/api/v1/notify/policies", s.handleListNotifyPolicies)
+	with(RoleOperator, "POST /api/v1/notify/policies", s.handleCreateNotifyPolicy)
+	with(RoleOperator, "PUT /api/v1/notify/policies/{id}", s.handleUpdateNotifyPolicy)
+	with(RoleOperator, "DELETE /api/v1/notify/policies/{id}", s.handleDeleteNotifyPolicy)
 
 	// Maintenance windows.
 	get("/api/v1/notify/windows", s.handleListMaintenanceWindows)
@@ -343,24 +412,56 @@ func toChannelView(c NotifyChannel) notifyChannelView {
 }
 
 type notifyRuleView struct {
-	ID          int64     `json:"id"`
-	Name        string    `json:"name"`
-	OrgID       *int64    `json:"org_id"`
-	MinSeverity string    `json:"min_severity"`
-	AlertTypes  []string  `json:"alert_types"`
-	OnOpen      bool      `json:"on_open"`
-	OnResolve   bool      `json:"on_resolve"`
-	ChannelID   int64     `json:"channel_id"`
-	Enabled     bool      `json:"enabled"`
-	CreatedAt   time.Time `json:"created_at"`
-	CreatedBy   *int64    `json:"created_by"`
+	ID                 int64     `json:"id"`
+	Name               string    `json:"name"`
+	OrgID              *int64    `json:"org_id"`
+	MinSeverity        string    `json:"min_severity"`
+	AlertTypes         []string  `json:"alert_types"`
+	OnOpen             bool      `json:"on_open"`
+	OnResolve          bool      `json:"on_resolve"`
+	ChannelID          int64     `json:"channel_id"`
+	EscalationPolicyID *int64    `json:"escalation_policy_id"`
+	Enabled            bool      `json:"enabled"`
+	CreatedAt          time.Time `json:"created_at"`
+	CreatedBy          *int64    `json:"created_by"`
 }
 
 func toRuleView(ru NotifyRule) notifyRuleView {
 	return notifyRuleView{
 		ID: ru.ID, Name: ru.Name, OrgID: ru.OrgID, MinSeverity: ru.MinSeverity,
 		AlertTypes: splitAlertTypes(ru.AlertTypes), OnOpen: ru.OnOpen, OnResolve: ru.OnResolve,
-		ChannelID: ru.ChannelID, Enabled: ru.Enabled, CreatedAt: ru.CreatedAt, CreatedBy: ru.CreatedBy,
+		ChannelID: ru.ChannelID, EscalationPolicyID: ru.EscalationPolicyID, Enabled: ru.Enabled,
+		CreatedAt: ru.CreatedAt, CreatedBy: ru.CreatedBy,
+	}
+}
+
+// --- escalation policy views (NS2) ----------------------------------------
+
+type escalationStepView struct {
+	AfterMinutes int     `json:"after_minutes"`
+	ChannelIDs   []int64 `json:"channel_ids"`
+}
+
+type escalationPolicyView struct {
+	ID        int64                `json:"id"`
+	Name      string               `json:"name"`
+	OrgID     *int64               `json:"org_id"`
+	Steps     []escalationStepView `json:"steps"`
+	CreatedAt time.Time            `json:"created_at"`
+	CreatedBy *int64               `json:"created_by"`
+}
+
+func toPolicyView(p EscalationPolicy) escalationPolicyView {
+	steps := make([]escalationStepView, 0, len(p.Steps))
+	for _, st := range p.Steps {
+		ids := st.ChannelIDs
+		if ids == nil {
+			ids = []int64{}
+		}
+		steps = append(steps, escalationStepView{AfterMinutes: st.AfterMinutes, ChannelIDs: ids})
+	}
+	return escalationPolicyView{
+		ID: p.ID, Name: p.Name, OrgID: p.OrgID, Steps: steps, CreatedAt: p.CreatedAt, CreatedBy: p.CreatedBy,
 	}
 }
 
@@ -398,8 +499,11 @@ type deliveryView struct {
 	Attempts  int             `json:"attempts"`
 	LastError string          `json:"last_error"`
 	Detail    json.RawMessage `json:"detail"`
-	CreatedAt time.Time       `json:"created_at"`
-	UpdatedAt time.Time       `json:"updated_at"`
+	// Step is the 1-based escalation step for an escalation delivery (NS2), null
+	// for an ordinary open/resolve/test delivery.
+	Step      *int      `json:"step"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 func toDeliveryView(d NotificationDelivery) deliveryView {
@@ -410,7 +514,7 @@ func toDeliveryView(d NotificationDelivery) deliveryView {
 	return deliveryView{
 		ID: d.ID, AlertID: d.AlertID, RuleID: d.RuleID, ChannelID: d.ChannelID, OrgID: d.OrgID,
 		Event: d.Event, Status: d.Status, Attempts: d.Attempts, LastError: d.LastError,
-		Detail: detail, CreatedAt: d.CreatedAt, UpdatedAt: d.UpdatedAt,
+		Detail: detail, Step: d.Step, CreatedAt: d.CreatedAt, UpdatedAt: d.UpdatedAt,
 	}
 }
 
@@ -675,9 +779,77 @@ func validateChannel(kind, name string, raw json.RawMessage) (string, string) {
 		}
 		b, _ := json.Marshal(c)
 		return string(b), ""
+	case notifyKindSMS:
+		var c struct {
+			Provider   string   `json:"provider"`
+			From       string   `json:"from"`
+			To         []string `json:"to"`
+			AccountSID string   `json:"account_sid"`
+			URL        string   `json:"url"`
+		}
+		if err := json.Unmarshal(raw, &c); err != nil {
+			return "", "config is not a valid object"
+		}
+		if c.Provider != smsProviderTwilio && c.Provider != smsProviderGeneric {
+			return "", "config.provider must be twilio or generic"
+		}
+		if strings.TrimSpace(c.From) == "" {
+			return "", "config.from is required for an sms channel"
+		}
+		if !e164ish(c.From) {
+			return "", "config.from must be a phone number (E.164, e.g. +15551234567)"
+		}
+		if len(c.To) == 0 {
+			return "", "config.to must list at least one recipient number"
+		}
+		for _, to := range c.To {
+			if strings.TrimSpace(to) == "" {
+				return "", "config.to entries cannot be empty"
+			}
+			if !e164ish(to) {
+				return "", "config.to entries must be phone numbers (E.164, e.g. +15551234567)"
+			}
+		}
+		switch c.Provider {
+		case smsProviderTwilio:
+			if strings.TrimSpace(c.AccountSID) == "" {
+				return "", "config.account_sid is required for the twilio provider"
+			}
+			// A Twilio channel addresses the Messages API by account_sid; a custom
+			// url is not used, so drop it from the canonical config.
+			c.URL = ""
+		case smsProviderGeneric:
+			if detail := validateWebhookURL(c.URL); detail != "" {
+				return "", detail
+			}
+			// account_sid is a Twilio concept; drop it for a generic channel.
+			c.AccountSID = ""
+		}
+		b, _ := json.Marshal(c)
+		return string(b), ""
 	default:
-		return "", "kind must be email or webhook"
+		return "", "kind must be email, webhook or sms"
 	}
+}
+
+// e164ish reports whether s is a plausible E.164 phone number: an optional
+// leading '+' then 7..15 digits. It is a shape check, not a validity check
+// against a numbering plan; it exists so an SMS channel cannot be configured with
+// a value carrying control characters or obvious garbage.
+func e164ish(s string) bool {
+	s = strings.TrimSpace(s)
+	if strings.HasPrefix(s, "+") {
+		s = s[1:]
+	}
+	if len(s) < 7 || len(s) > 15 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // --- webhook URL SSRF guard -----------------------------------------------
@@ -736,14 +908,15 @@ func ipBlocked(ip net.IP) bool {
 // --- rules ----------------------------------------------------------------
 
 type ruleRequest struct {
-	Name        string   `json:"name"`
-	OrgID       *int64   `json:"org_id"`
-	MinSeverity string   `json:"min_severity"`
-	AlertTypes  []string `json:"alert_types"`
-	OnOpen      *bool    `json:"on_open"`
-	OnResolve   *bool    `json:"on_resolve"`
-	ChannelID   int64    `json:"channel_id"`
-	Enabled     *bool    `json:"enabled"`
+	Name               string   `json:"name"`
+	OrgID              *int64   `json:"org_id"`
+	MinSeverity        string   `json:"min_severity"`
+	AlertTypes         []string `json:"alert_types"`
+	OnOpen             *bool    `json:"on_open"`
+	OnResolve          *bool    `json:"on_resolve"`
+	ChannelID          int64    `json:"channel_id"`
+	EscalationPolicyID *int64   `json:"escalation_policy_id"`
+	Enabled            *bool    `json:"enabled"`
 }
 
 func (s *Server) handleListNotifyRules(w http.ResponseWriter, r *http.Request) {
@@ -791,6 +964,9 @@ func (s *Server) handleCreateNotifyRule(w http.ResponseWriter, r *http.Request) 
 	if !s.channelReferenceOK(w, r, req.ChannelID) {
 		return
 	}
+	if !s.policyReferenceOK(w, r, req.EscalationPolicyID) {
+		return
+	}
 	onOpen := true
 	if req.OnOpen != nil {
 		onOpen = *req.OnOpen
@@ -806,7 +982,8 @@ func (s *Server) handleCreateNotifyRule(w http.ResponseWriter, r *http.Request) 
 	actor, _ := dashActor(r)
 	ru, err := ns.CreateNotifyRule(ctx, CreateNotifyRuleParams{
 		Name: name, OrgID: req.OrgID, MinSeverity: req.MinSeverity, AlertTypes: types,
-		OnOpen: onOpen, OnResolve: onResolve, ChannelID: req.ChannelID, Enabled: enabled, CreatedBy: actor,
+		OnOpen: onOpen, OnResolve: onResolve, ChannelID: req.ChannelID,
+		EscalationPolicyID: req.EscalationPolicyID, Enabled: enabled, CreatedBy: actor,
 	})
 	if err != nil {
 		s.dashStoreError(w, err, "create notify rule")
@@ -850,6 +1027,9 @@ func (s *Server) handleUpdateNotifyRule(w http.ResponseWriter, r *http.Request) 
 	if !s.channelReferenceOK(w, r, req.ChannelID) {
 		return
 	}
+	if !s.policyReferenceOK(w, r, req.EscalationPolicyID) {
+		return
+	}
 	onOpen := true
 	if req.OnOpen != nil {
 		onOpen = *req.OnOpen
@@ -864,7 +1044,8 @@ func (s *Server) handleUpdateNotifyRule(w http.ResponseWriter, r *http.Request) 
 	}
 	ru, err := ns.UpdateNotifyRule(ctx, UpdateNotifyRuleParams{
 		ID: id, Name: name, MinSeverity: req.MinSeverity, AlertTypes: types,
-		OnOpen: onOpen, OnResolve: onResolve, ChannelID: req.ChannelID, Enabled: enabled,
+		OnOpen: onOpen, OnResolve: onResolve, ChannelID: req.ChannelID,
+		EscalationPolicyID: req.EscalationPolicyID, Enabled: enabled,
 	})
 	if err != nil {
 		s.dashStoreError(w, err, "update notify rule")
@@ -936,6 +1117,42 @@ func (s *Server) channelReferenceOK(w http.ResponseWriter, r *http.Request, chan
 	return true
 }
 
+// policyReferenceOK reports whether the caller may attach a rule to the given
+// (optional) escalation policy: a nil id is fine (no policy); otherwise the
+// policy must exist and be visible to the caller. A missing or invisible policy
+// is a 400 (not a 404) that does not reveal whether it exists in another org,
+// matching channelReferenceOK.
+func (s *Server) policyReferenceOK(w http.ResponseWriter, r *http.Request, policyID *int64) bool {
+	if policyID == nil {
+		return true
+	}
+	ns, ok := s.notifyStore(w)
+	if !ok {
+		return false
+	}
+	u := userFrom(r.Context())
+	if u == nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized", "")
+		return false
+	}
+	p, err := ns.GetEscalationPolicy(r.Context(), *policyID)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", "escalation_policy_id not found")
+		return false
+	}
+	vis, err := s.notifyOrgVisibleQuiet(r.Context(), u.ID, p.OrgID)
+	if err != nil {
+		s.log.Error("policy reference visibility", "err", err)
+		writeError(w, http.StatusInternalServerError, "internal", "")
+		return false
+	}
+	if !vis {
+		writeError(w, http.StatusBadRequest, "invalid_request", "escalation_policy_id not found")
+		return false
+	}
+	return true
+}
+
 // validateRule validates the rule fields and returns the canonical comma list of
 // alert types, or a non-empty detail.
 func validateRule(name, minSeverity string, types []string, channelID int64) (string, string) {
@@ -993,6 +1210,217 @@ func splitAlertTypes(s string) []string {
 		}
 	}
 	return out
+}
+
+// --- escalation policies (NS2) --------------------------------------------
+
+type policyStepRequest struct {
+	AfterMinutes int     `json:"after_minutes"`
+	ChannelIDs   []int64 `json:"channel_ids"`
+}
+
+type policyRequest struct {
+	Name  string              `json:"name"`
+	OrgID *int64              `json:"org_id"`
+	Steps []policyStepRequest `json:"steps"`
+}
+
+func (s *Server) handleListNotifyPolicies(w http.ResponseWriter, r *http.Request) {
+	ns, ok := s.notifyStore(w)
+	if !ok {
+		return
+	}
+	visible, vok := s.dashVisibleOrgs(w, r)
+	if !vok {
+		return
+	}
+	rows, err := ns.ListEscalationPolicies(r.Context(), visible)
+	if err != nil {
+		s.log.Error("list escalation policies", "err", err)
+		writeError(w, http.StatusInternalServerError, "internal", "")
+		return
+	}
+	out := make([]escalationPolicyView, 0, len(rows))
+	for _, p := range rows {
+		out = append(out, toPolicyView(p))
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"policies": out})
+}
+
+func (s *Server) handleCreateNotifyPolicy(w http.ResponseWriter, r *http.Request) {
+	ns, ok := s.notifyStore(w)
+	if !ok {
+		return
+	}
+	var req policyRequest
+	if err := readJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	name := strings.TrimSpace(req.Name)
+	steps, detail := validatePolicy(name, req.Steps)
+	if detail != "" {
+		writeError(w, http.StatusBadRequest, "invalid_request", detail)
+		return
+	}
+	if !s.notifyCreateAllowed(w, r, req.OrgID) {
+		return
+	}
+	// Every channel the policy fires must exist and be visible to the caller.
+	if !s.policyChannelsOK(w, r, steps) {
+		return
+	}
+	actor, _ := dashActor(r)
+	ctx := r.Context()
+	p, err := ns.CreateEscalationPolicy(ctx, CreateEscalationPolicyParams{
+		Name: name, OrgID: req.OrgID, Steps: steps, CreatedBy: actor,
+	})
+	if err != nil {
+		s.dashStoreError(w, err, "create escalation policy")
+		return
+	}
+	s.audit(ctx, "user", actor, p.OrgID, "notify.policy_created", "escalation_policy", &p.ID, clientIP(r),
+		map[string]any{"name": p.Name, "steps": len(p.Steps)})
+	writeJSON(w, http.StatusCreated, map[string]any{"policy": toPolicyView(p)})
+}
+
+func (s *Server) handleUpdateNotifyPolicy(w http.ResponseWriter, r *http.Request) {
+	ns, ok := s.notifyStore(w)
+	if !ok {
+		return
+	}
+	id, ok := pathInt(r, "id")
+	if !ok {
+		writeError(w, http.StatusNotFound, "not_found", "")
+		return
+	}
+	ctx := r.Context()
+	// Load first so an update across orgs 404s before any change (RS2).
+	existing, err := ns.GetEscalationPolicy(ctx, id)
+	if err != nil {
+		s.dashStoreError(w, err, "get escalation policy")
+		return
+	}
+	if !s.notifyRowVisible(w, r, existing.OrgID) {
+		return
+	}
+	var req policyRequest
+	if err := readJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	name := strings.TrimSpace(req.Name)
+	steps, detail := validatePolicy(name, req.Steps)
+	if detail != "" {
+		writeError(w, http.StatusBadRequest, "invalid_request", detail)
+		return
+	}
+	if !s.policyChannelsOK(w, r, steps) {
+		return
+	}
+	p, err := ns.UpdateEscalationPolicy(ctx, UpdateEscalationPolicyParams{ID: id, Name: name, Steps: steps})
+	if err != nil {
+		s.dashStoreError(w, err, "update escalation policy")
+		return
+	}
+	actor, _ := dashActor(r)
+	s.audit(ctx, "user", actor, p.OrgID, "notify.policy_updated", "escalation_policy", &p.ID, clientIP(r),
+		map[string]any{"name": p.Name, "steps": len(p.Steps)})
+	writeJSON(w, http.StatusOK, map[string]any{"policy": toPolicyView(p)})
+}
+
+func (s *Server) handleDeleteNotifyPolicy(w http.ResponseWriter, r *http.Request) {
+	ns, ok := s.notifyStore(w)
+	if !ok {
+		return
+	}
+	id, ok := pathInt(r, "id")
+	if !ok {
+		writeError(w, http.StatusNotFound, "not_found", "")
+		return
+	}
+	ctx := r.Context()
+	existing, err := ns.GetEscalationPolicy(ctx, id)
+	if err != nil {
+		s.dashStoreError(w, err, "get escalation policy")
+		return
+	}
+	if !s.notifyRowVisible(w, r, existing.OrgID) {
+		return
+	}
+	if err := ns.DeleteEscalationPolicy(ctx, id); err != nil {
+		s.dashStoreError(w, err, "delete escalation policy")
+		return
+	}
+	actor, _ := dashActor(r)
+	s.audit(ctx, "user", actor, existing.OrgID, "notify.policy_deleted", "escalation_policy", &id, clientIP(r), nil)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// policyChannelsOK reports whether every channel referenced by the policy's steps
+// exists and is visible to the caller (same rule as channelReferenceOK). A
+// missing/invisible channel is a 400 that does not reveal cross-org existence.
+func (s *Server) policyChannelsOK(w http.ResponseWriter, r *http.Request, steps []EscalationStep) bool {
+	seen := map[int64]bool{}
+	for _, st := range steps {
+		for _, id := range st.ChannelIDs {
+			if seen[id] {
+				continue
+			}
+			seen[id] = true
+			if !s.channelReferenceOK(w, r, id) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// validatePolicy validates the policy name and its ordered steps and returns the
+// canonical EscalationStep slice (step_order assigned by position, channel ids
+// deduped), or a non-empty detail describing the first problem. Channel
+// visibility is checked separately (policyChannelsOK) against the caller.
+func validatePolicy(name string, steps []policyStepRequest) ([]EscalationStep, string) {
+	if name == "" {
+		return nil, "name is required"
+	}
+	if len(name) > notifyMaxName {
+		return nil, "name exceeds 100 characters"
+	}
+	if len(steps) == 0 {
+		return nil, "a policy needs at least one step"
+	}
+	if len(steps) > notifyMaxSteps {
+		return nil, fmt.Sprintf("a policy may have at most %d steps", notifyMaxSteps)
+	}
+	out := make([]EscalationStep, 0, len(steps))
+	prev := -1
+	for i, st := range steps {
+		if st.AfterMinutes < 0 || st.AfterMinutes > notifyMaxStepMinutes {
+			return nil, fmt.Sprintf("step %d: after_minutes must be between 0 and %d", i+1, notifyMaxStepMinutes)
+		}
+		if st.AfterMinutes < prev {
+			return nil, "steps must be ordered by non-decreasing after_minutes"
+		}
+		prev = st.AfterMinutes
+		seen := map[int64]bool{}
+		ids := make([]int64, 0, len(st.ChannelIDs))
+		for _, id := range st.ChannelIDs {
+			if id <= 0 {
+				return nil, fmt.Sprintf("step %d: channel ids must be positive", i+1)
+			}
+			if seen[id] {
+				continue
+			}
+			seen[id] = true
+			ids = append(ids, id)
+		}
+		if len(ids) == 0 {
+			return nil, fmt.Sprintf("step %d: at least one channel is required", i+1)
+		}
+		out = append(out, EscalationStep{StepOrder: i + 1, AfterMinutes: st.AfterMinutes, ChannelIDs: ids})
+	}
+	return out, ""
 }
 
 // --- maintenance windows --------------------------------------------------

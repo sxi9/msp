@@ -450,6 +450,182 @@ func TestListDeliveries(t *testing.T) {
 	}
 }
 
+// --- escalation (NS2) -------------------------------------------------------
+
+func TestPolicyCRUD(t *testing.T) {
+	s, _ := openTest(t)
+	ctx := context.Background()
+	orgA, admin, _, _ := fixture(t, s)
+	orgB, _ := s.CreateOrg(ctx, "Beta")
+
+	chA, _ := s.CreateChannel(ctx, CreateChannelParams{Kind: ChannelSMS, Name: "sms-a", OrgID: &orgA.ID, ConfigJSON: `{"provider":"generic"}`, Secret: "tok", CreatedBy: &admin.ID})
+	chB, _ := s.CreateChannel(ctx, CreateChannelParams{Kind: ChannelEmail, Name: "email-a", OrgID: &orgA.ID, ConfigJSON: "{}", CreatedBy: &admin.ID})
+
+	pol, err := s.CreatePolicy(ctx, CreatePolicyParams{
+		OrgID: &orgA.ID, Name: "oncall", CreatedBy: &admin.ID,
+		Steps: []CreatePolicyStep{
+			{AfterMinutes: 0, ChannelIDs: []int64{chA.ID}},
+			{AfterMinutes: 15, ChannelIDs: []int64{chA.ID, chB.ID}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreatePolicy: %v", err)
+	}
+	if pol.Name != "oncall" || pol.OrgID == nil || *pol.OrgID != orgA.ID || len(pol.Steps) != 2 {
+		t.Fatalf("policy = %+v", pol)
+	}
+	if pol.Steps[0].StepOrder != 1 || pol.Steps[0].AfterMinutes != 0 || len(pol.Steps[0].ChannelIDs) != 1 || pol.Steps[0].ChannelIDs[0] != chA.ID {
+		t.Fatalf("step 1 = %+v", pol.Steps[0])
+	}
+	if pol.Steps[1].StepOrder != 2 || pol.Steps[1].AfterMinutes != 15 || len(pol.Steps[1].ChannelIDs) != 2 {
+		t.Fatalf("step 2 = %+v", pol.Steps[1])
+	}
+
+	got, err := s.GetPolicy(ctx, pol.ID)
+	if err != nil || got.ID != pol.ID || len(got.Steps) != 2 {
+		t.Fatalf("GetPolicy = %+v err %v", got, err)
+	}
+
+	// A global policy and a B-scoped policy to test visibility.
+	if _, err := s.CreatePolicy(ctx, CreatePolicyParams{OrgID: nil, Name: "global", Steps: []CreatePolicyStep{{AfterMinutes: 5, ChannelIDs: []int64{chA.ID}}}}); err != nil {
+		t.Fatalf("CreatePolicy global: %v", err)
+	}
+	if _, err := s.CreatePolicy(ctx, CreatePolicyParams{OrgID: &orgB.ID, Name: "b", Steps: nil}); err != nil {
+		t.Fatalf("CreatePolicy B: %v", err)
+	}
+
+	all, _ := s.ListPolicies(ctx, nil)
+	if len(all) != 3 {
+		t.Fatalf("ListPolicies(nil) = %d, want 3", len(all))
+	}
+	scoped, _ := s.ListPolicies(ctx, []int64{orgA.ID})
+	if len(scoped) != 1 || scoped[0].ID != pol.ID {
+		t.Fatalf("ListPolicies([A]) = %+v", scoped)
+	}
+	if none, _ := s.ListPolicies(ctx, []int64{}); len(none) != 0 {
+		t.Fatalf("ListPolicies([]) = %d, want 0", len(none))
+	}
+
+	// Delete cascades to steps and detaches referencing rules.
+	rule, _ := s.CreateRule(ctx, CreateRuleParams{Name: "r", OrgID: &orgA.ID, MinSeverity: "low", OnOpen: true, ChannelID: chB.ID, Enabled: true})
+	if err := s.SetRulePolicy(ctx, rule.ID, &pol.ID); err != nil {
+		t.Fatalf("SetRulePolicy: %v", err)
+	}
+	pfr, _ := s.PoliciesForRule(ctx, rule.ID)
+	if len(pfr) != 1 || pfr[0].ID != pol.ID {
+		t.Fatalf("PoliciesForRule = %+v", pfr)
+	}
+	if err := s.DeletePolicy(ctx, pol.ID); err != nil {
+		t.Fatalf("DeletePolicy: %v", err)
+	}
+	if _, err := s.GetPolicy(ctx, pol.ID); err != ErrNotFound {
+		t.Fatalf("GetPolicy after delete = %v, want ErrNotFound", err)
+	}
+	var nsteps int
+	s.db.QueryRow(`SELECT COUNT(*) FROM escalation_steps WHERE policy_id = ?`, pol.ID).Scan(&nsteps)
+	if nsteps != 0 {
+		t.Fatalf("steps after policy delete = %d, want 0 (cascade)", nsteps)
+	}
+	if pfr, _ := s.PoliciesForRule(ctx, rule.ID); len(pfr) != 0 {
+		t.Fatalf("rule still references a deleted policy: %+v", pfr)
+	}
+	if err := s.DeletePolicy(ctx, pol.ID); err != ErrNotFound {
+		t.Fatalf("double delete = %v, want ErrNotFound", err)
+	}
+	// PoliciesForRule on a missing rule is empty, not an error.
+	if pfr, err := s.PoliciesForRule(ctx, 99999); err != nil || len(pfr) != 0 {
+		t.Fatalf("PoliciesForRule(missing) = %+v err %v", pfr, err)
+	}
+}
+
+func TestDueEscalations(t *testing.T) {
+	s, c := openTest(t)
+	ctx := context.Background()
+	orgA, admin, dev, _ := fixture(t, s)
+	orgB, _ := s.CreateOrg(ctx, "Beta")
+
+	chA, _ := s.CreateChannel(ctx, CreateChannelParams{Kind: ChannelSMS, Name: "sms", OrgID: &orgA.ID, ConfigJSON: `{"provider":"generic"}`, CreatedBy: &admin.ID})
+	chB, _ := s.CreateChannel(ctx, CreateChannelParams{Kind: ChannelEmail, Name: "mail", OrgID: &orgA.ID, ConfigJSON: "{}", CreatedBy: &admin.ID})
+
+	pol, _ := s.CreatePolicy(ctx, CreatePolicyParams{OrgID: &orgA.ID, Name: "p", Steps: []CreatePolicyStep{
+		{AfterMinutes: 0, ChannelIDs: []int64{chA.ID}},
+		{AfterMinutes: 15, ChannelIDs: []int64{chB.ID}},
+	}})
+	// A high-severity, on_open rule for org A with the policy attached.
+	rule, _ := s.CreateRule(ctx, CreateRuleParams{Name: "r", OrgID: &orgA.ID, MinSeverity: "high", OnOpen: true, ChannelID: chB.ID, Enabled: true})
+	if err := s.SetRulePolicy(ctx, rule.ID, &pol.ID); err != nil {
+		t.Fatalf("SetRulePolicy: %v", err)
+	}
+
+	now := c.now()
+	alertID := openAlertID(t, s, orgA.ID, dev.ID, "offline", "high")
+
+	// At open: only step 1 (0 min) is due.
+	due, err := s.DueEscalations(ctx, now)
+	if err != nil {
+		t.Fatalf("DueEscalations: %v", err)
+	}
+	if len(due) != 1 || due[0].Step.StepOrder != 1 || due[0].Alert.ID != alertID || due[0].Rule.ID != rule.ID {
+		t.Fatalf("due at open = %+v", due)
+	}
+
+	// 15 min later: both steps are due.
+	due, _ = s.DueEscalations(ctx, now.Add(15*time.Minute))
+	if len(due) != 2 {
+		t.Fatalf("due at +15m = %d, want 2", len(due))
+	}
+
+	// A low-severity alert does not meet the high rule -> no due steps.
+	lowDev, _, _ := s.UpsertDevice(ctx, UpsertDeviceParams{OrgID: orgA.ID, DeviceUID: "low", Hostname: "low", Platform: "linux", IntervalS: 30})
+	openAlertID(t, s, orgA.ID, lowDev.ID, "disk_full", "low")
+	for _, d := range mustDue(t, s, now.Add(time.Hour)) {
+		if d.Alert.DeviceID == lowDev.ID {
+			t.Fatalf("low alert produced a due step: %+v", d)
+		}
+	}
+
+	// Acknowledging the alert stops escalation entirely.
+	if err := s.AckAlert(ctx, alertID, admin.ID); err != nil {
+		t.Fatalf("AckAlert: %v", err)
+	}
+	if due, _ = s.DueEscalations(ctx, now.Add(time.Hour)); len(due) != 0 {
+		t.Fatalf("acked alert still due: %+v", due)
+	}
+
+	// A fresh open alert in org B is not matched by the A-scoped rule.
+	devB, _, _ := s.UpsertDevice(ctx, UpsertDeviceParams{OrgID: orgB.ID, DeviceUID: "b", Hostname: "b", Platform: "linux", IntervalS: 30})
+	openAlertID(t, s, orgB.ID, devB.ID, "offline", "high")
+	for _, d := range mustDue(t, s, now.Add(time.Hour)) {
+		if d.Alert.OrgID == orgB.ID {
+			t.Fatalf("A-scoped rule matched a B alert: %+v", d)
+		}
+	}
+
+	// Resolving removes the alert from escalation too.
+	devC, _, _ := s.UpsertDevice(ctx, UpsertDeviceParams{OrgID: orgA.ID, DeviceUID: "c", Hostname: "c", Platform: "linux", IntervalS: 30})
+	cID := openAlertID(t, s, orgA.ID, devC.ID, "offline", "high")
+	if n := len(mustDue(t, s, now.Add(time.Hour))); n == 0 {
+		t.Fatalf("expected C's open alert to be due")
+	}
+	if err := s.ResolveAlert(ctx, devC.ID, "offline"); err != nil {
+		t.Fatalf("ResolveAlert: %v", err)
+	}
+	for _, d := range mustDue(t, s, now.Add(time.Hour)) {
+		if d.Alert.ID == cID {
+			t.Fatalf("resolved alert still due: %+v", d)
+		}
+	}
+}
+
+func mustDue(t *testing.T, s *Store, now time.Time) []DueEscalation {
+	t.Helper()
+	due, err := s.DueEscalations(context.Background(), now)
+	if err != nil {
+		t.Fatalf("DueEscalations: %v", err)
+	}
+	return due
+}
+
 // --- test helpers ---
 
 func mustMatch(t *testing.T, s *Store, a Alert, event string) []NotifyRule {

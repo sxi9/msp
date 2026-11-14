@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -21,6 +22,7 @@ import (
 const (
 	ChannelEmail   = "email"
 	ChannelWebhook = "webhook"
+	ChannelSMS     = "sms"
 
 	EventOpened   = "opened"
 	EventResolved = "resolved"
@@ -52,17 +54,18 @@ type NotifyChannel struct {
 // (empty = all types); MinSeverity gates by severity; OnOpen/OnResolve gate by
 // event.
 type NotifyRule struct {
-	ID          int64     `json:"id"`
-	Name        string    `json:"name"`
-	OrgID       *int64    `json:"org_id"`
-	MinSeverity string    `json:"min_severity"`
-	AlertTypes  string    `json:"alert_types"`
-	OnOpen      bool      `json:"on_open"`
-	OnResolve   bool      `json:"on_resolve"`
-	ChannelID   int64     `json:"channel_id"`
-	Enabled     bool      `json:"enabled"`
-	CreatedAt   time.Time `json:"created_at"`
-	CreatedBy   *int64    `json:"created_by"`
+	ID                 int64     `json:"id"`
+	Name               string    `json:"name"`
+	OrgID              *int64    `json:"org_id"`
+	MinSeverity        string    `json:"min_severity"`
+	AlertTypes         string    `json:"alert_types"`
+	OnOpen             bool      `json:"on_open"`
+	OnResolve          bool      `json:"on_resolve"`
+	ChannelID          int64     `json:"channel_id"`
+	EscalationPolicyID *int64    `json:"escalation_policy_id"` // NS2: nil = no policy
+	Enabled            bool      `json:"enabled"`
+	CreatedAt          time.Time `json:"created_at"`
+	CreatedBy          *int64    `json:"created_by"`
 }
 
 // MaintenanceWindow suppresses an org's (or, OrgID nil, every org's) deliveries
@@ -77,9 +80,11 @@ type MaintenanceWindow struct {
 	CreatedBy *int64    `json:"created_by"`
 }
 
-// NotificationDelivery is one row of the delivery log: one (alert, rule, event).
-// UpdatedAt is nil until the dispatcher first claims the row; it then doubles as
-// the retry lease (ClaimPendingDeliveries).
+// NotificationDelivery is one row of the delivery log, keyed by
+// (alert, rule, channel, event, step). Step is 0 for a non-escalation NS1
+// delivery and the escalation step number (>=1) for a policy step. UpdatedAt is
+// nil until the dispatcher first claims the row; it then doubles as the retry
+// lease (ClaimPendingDeliveries).
 type NotificationDelivery struct {
 	ID         int64      `json:"id"`
 	AlertID    *int64     `json:"alert_id"`
@@ -87,6 +92,7 @@ type NotificationDelivery struct {
 	ChannelID  *int64     `json:"channel_id"`
 	OrgID      *int64     `json:"org_id"`
 	Event      string     `json:"event"`
+	Step       int        `json:"step"`
 	Status     string     `json:"status"`
 	Attempts   int        `json:"attempts"`
 	LastError  string     `json:"last_error"`
@@ -241,17 +247,19 @@ func (s *Store) queryChannels(ctx context.Context, q string, args ...any) ([]Not
 
 // --- Rules ------------------------------------------------------------------
 
-// CreateRuleParams is a validated rule to insert.
+// CreateRuleParams is a validated rule to insert. EscalationPolicyID is optional
+// (NS2); nil leaves the rule without a policy.
 type CreateRuleParams struct {
-	Name        string
-	OrgID       *int64
-	MinSeverity string
-	AlertTypes  string
-	OnOpen      bool
-	OnResolve   bool
-	ChannelID   int64
-	Enabled     bool
-	CreatedBy   *int64
+	Name               string
+	OrgID              *int64
+	MinSeverity        string
+	AlertTypes         string
+	OnOpen             bool
+	OnResolve          bool
+	ChannelID          int64
+	EscalationPolicyID *int64
+	Enabled            bool
+	CreatedBy          *int64
 }
 
 // CreateRule inserts a rule. ErrNotFound when ChannelID does not exist (foreign
@@ -259,10 +267,10 @@ type CreateRuleParams struct {
 func (s *Store) CreateRule(ctx context.Context, p CreateRuleParams) (NotifyRule, error) {
 	now := s.Now()
 	res, err := s.db.ExecContext(ctx,
-		`INSERT INTO notify_rules (name, org_id, min_severity, alert_types, on_open, on_resolve, channel_id, enabled, created_at, created_by)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO notify_rules (name, org_id, min_severity, alert_types, on_open, on_resolve, channel_id, escalation_policy_id, enabled, created_at, created_by)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		p.Name, ptrInt64Arg(p.OrgID), p.MinSeverity, p.AlertTypes, boolInt(p.OnOpen), boolInt(p.OnResolve),
-		p.ChannelID, boolInt(p.Enabled), fmtTime(now), ptrInt64Arg(p.CreatedBy))
+		p.ChannelID, ptrInt64Arg(p.EscalationPolicyID), boolInt(p.Enabled), fmtTime(now), ptrInt64Arg(p.CreatedBy))
 	if err != nil {
 		if isForeignKeyViolation(err) {
 			return NotifyRule{}, ErrNotFound
@@ -281,9 +289,9 @@ func (s *Store) CreateRule(ctx context.Context, p CreateRuleParams) (NotifyRule,
 func (s *Store) UpdateRule(ctx context.Context, id int64, p CreateRuleParams) (NotifyRule, error) {
 	res, err := s.db.ExecContext(ctx,
 		`UPDATE notify_rules SET name = ?, org_id = ?, min_severity = ?, alert_types = ?, on_open = ?,
-		        on_resolve = ?, channel_id = ?, enabled = ? WHERE id = ?`,
+		        on_resolve = ?, channel_id = ?, escalation_policy_id = ?, enabled = ? WHERE id = ?`,
 		p.Name, ptrInt64Arg(p.OrgID), p.MinSeverity, p.AlertTypes, boolInt(p.OnOpen), boolInt(p.OnResolve),
-		p.ChannelID, boolInt(p.Enabled), id)
+		p.ChannelID, ptrInt64Arg(p.EscalationPolicyID), boolInt(p.Enabled), id)
 	if err != nil {
 		if isForeignKeyViolation(err) {
 			return NotifyRule{}, ErrNotFound
@@ -300,29 +308,44 @@ func (s *Store) UpdateRule(ctx context.Context, id int64, p CreateRuleParams) (N
 	return s.GetRule(ctx, id)
 }
 
+// SetRulePolicy attaches (policyID non-nil) or detaches (nil) a rule's escalation
+// policy without touching its other fields. ErrNotFound when the rule does not
+// exist.
+func (s *Store) SetRulePolicy(ctx context.Context, ruleID int64, policyID *int64) error {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE notify_rules SET escalation_policy_id = ? WHERE id = ?`, ptrInt64Arg(policyID), ruleID)
+	if err != nil {
+		return fmt.Errorf("store: set rule policy: %w", err)
+	}
+	return s.oneRow(res, "set rule policy")
+}
+
 // DeleteRule removes a rule. ErrNotFound when the id does not exist.
 func (s *Store) DeleteRule(ctx context.Context, id int64) error {
 	return s.deleteByID(ctx, "notify_rules", id, "delete rule")
 }
 
 const ruleSelect = `
-SELECT id, name, org_id, min_severity, alert_types, on_open, on_resolve, channel_id, enabled, created_at, created_by
+SELECT id, name, org_id, min_severity, alert_types, on_open, on_resolve, channel_id, escalation_policy_id,
+       enabled, created_at, created_by
   FROM notify_rules`
 
 func scanRule(row interface{ Scan(...any) error }) (NotifyRule, error) {
 	var (
 		r                 NotifyRule
 		orgID, createdBy  sql.NullInt64
+		policyID          sql.NullInt64
 		onOpen, onResolve int
 		enabled           int
 		created           string
 	)
 	if err := row.Scan(&r.ID, &r.Name, &orgID, &r.MinSeverity, &r.AlertTypes, &onOpen, &onResolve,
-		&r.ChannelID, &enabled, &created, &createdBy); err != nil {
+		&r.ChannelID, &policyID, &enabled, &created, &createdBy); err != nil {
 		return NotifyRule{}, err
 	}
 	r.OrgID = nullInt64(orgID)
 	r.CreatedBy = nullInt64(createdBy)
+	r.EscalationPolicyID = nullInt64(policyID)
 	r.OnOpen = onOpen != 0
 	r.OnResolve = onResolve != 0
 	r.Enabled = enabled != 0
@@ -573,21 +596,27 @@ func (s *Store) ActiveMaintenance(ctx context.Context, orgID int64, now time.Tim
 
 // EnqueueDeliveryParams is one row to enqueue. Status is DeliveryPending
 // normally or DeliverySuppressed when the alert's org is inside an active
-// maintenance window. For a 'test' event AlertID and RuleID are nil.
+// maintenance window. For a 'test' event AlertID and RuleID are nil. Step is 0
+// for a non-escalation NS1 delivery and the escalation step number (>=1) for a
+// policy step.
 type EnqueueDeliveryParams struct {
 	AlertID   *int64
 	RuleID    *int64
 	ChannelID *int64
 	OrgID     *int64
 	Event     string
+	Step      int
 	Status    string
 }
 
-// EnqueueDelivery upserts a delivery keyed by (alert_id, rule_id, event) so the
-// evaluator running twice never double-sends. created reports whether a new row
-// was inserted (false when an equivalent row already existed and was left
-// untouched). A 'test' event has alert_id NULL, which never conflicts (NULLs are
-// distinct in the unique index), so each test enqueue is a fresh row.
+// EnqueueDelivery upserts a delivery keyed by (alert_id, rule_id, channel_id,
+// event, step) so the evaluator or the escalation tick running twice never
+// double-sends. created reports whether a new row was inserted (false when an
+// equivalent row already existed and was left untouched). An NS1 delivery has
+// Step 0 and one channel per rule, so the key reduces to the NS1
+// (alert, rule, event) guarantee. A 'test' event has alert_id NULL, which never
+// conflicts (NULLs are distinct in the unique index), so each test enqueue is a
+// fresh row.
 func (s *Store) EnqueueDelivery(ctx context.Context, p EnqueueDeliveryParams) (NotificationDelivery, bool, error) {
 	status := p.Status
 	if status == "" {
@@ -595,11 +624,11 @@ func (s *Store) EnqueueDelivery(ctx context.Context, p EnqueueDeliveryParams) (N
 	}
 	now := s.Now()
 	res, err := s.db.ExecContext(ctx,
-		`INSERT INTO notification_deliveries (alert_id, rule_id, channel_id, org_id, event, status, created_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)
-		 ON CONFLICT(alert_id, rule_id, event) DO NOTHING`,
+		`INSERT INTO notification_deliveries (alert_id, rule_id, channel_id, org_id, event, step, status, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(alert_id, rule_id, channel_id, event, step) DO NOTHING`,
 		ptrInt64Arg(p.AlertID), ptrInt64Arg(p.RuleID), ptrInt64Arg(p.ChannelID), ptrInt64Arg(p.OrgID),
-		p.Event, status, fmtTime(now))
+		p.Event, p.Step, status, fmtTime(now))
 	if err != nil {
 		return NotificationDelivery{}, false, fmt.Errorf("store: enqueue delivery: %w", err)
 	}
@@ -615,13 +644,14 @@ func (s *Store) EnqueueDelivery(ctx context.Context, p EnqueueDeliveryParams) (N
 		d, err := s.GetDelivery(ctx, id)
 		return d, true, err
 	}
-	// Conflict: the (alert, rule, event) row already exists; return it unchanged.
-	d, err := s.getDeliveryByKey(ctx, p.AlertID, p.RuleID, p.Event)
+	// Conflict: the (alert, rule, channel, event, step) row already exists; return
+	// it unchanged.
+	d, err := s.getDeliveryByKey(ctx, p.AlertID, p.RuleID, p.ChannelID, p.Event, p.Step)
 	return d, false, err
 }
 
 const deliverySelect = `
-SELECT id, alert_id, rule_id, channel_id, org_id, event, status, attempts, last_error, detail_json,
+SELECT id, alert_id, rule_id, channel_id, org_id, event, step, status, attempts, last_error, detail_json,
        created_at, updated_at FROM notification_deliveries`
 
 func scanDelivery(row interface{ Scan(...any) error }) (NotificationDelivery, error) {
@@ -631,7 +661,7 @@ func scanDelivery(row interface{ Scan(...any) error }) (NotificationDelivery, er
 		created                           string
 		updated                           sql.NullString
 	)
-	if err := row.Scan(&d.ID, &alertID, &ruleID, &channelID, &orgID, &d.Event, &d.Status, &d.Attempts,
+	if err := row.Scan(&d.ID, &alertID, &ruleID, &channelID, &orgID, &d.Event, &d.Step, &d.Status, &d.Attempts,
 		&d.LastError, &d.DetailJSON, &created, &updated); err != nil {
 		return NotificationDelivery{}, err
 	}
@@ -661,12 +691,13 @@ func (s *Store) GetDelivery(ctx context.Context, id int64) (NotificationDelivery
 	return d, nil
 }
 
-func (s *Store) getDeliveryByKey(ctx context.Context, alertID, ruleID *int64, event string) (NotificationDelivery, error) {
-	// alert_id/rule_id are nullable; "col IS ?" matches NULL to NULL and a value
-	// to a value, which is what the (alert, rule, event) key needs.
+func (s *Store) getDeliveryByKey(ctx context.Context, alertID, ruleID, channelID *int64, event string, step int) (NotificationDelivery, error) {
+	// alert_id/rule_id/channel_id are nullable; "col IS ?" matches NULL to NULL and
+	// a value to a value, which is what the (alert, rule, channel, event, step) key
+	// needs.
 	d, err := scanDelivery(s.db.QueryRowContext(ctx,
-		deliverySelect+` WHERE alert_id IS ? AND rule_id IS ? AND event = ?`,
-		ptrInt64Arg(alertID), ptrInt64Arg(ruleID), event))
+		deliverySelect+` WHERE alert_id IS ? AND rule_id IS ? AND channel_id IS ? AND event = ? AND step = ?`,
+		ptrInt64Arg(alertID), ptrInt64Arg(ruleID), ptrInt64Arg(channelID), event, step))
 	if errors.Is(err, sql.ErrNoRows) {
 		return NotificationDelivery{}, ErrNotFound
 	}
@@ -832,6 +863,399 @@ func (s *Store) MarkDeliveryFailed(ctx context.Context, id int64, lastError stri
 		return fmt.Errorf("store: mark delivery failed: %w", err)
 	}
 	return s.oneRow(res, "mark delivery failed")
+}
+
+// --- escalation policies (NS2) ----------------------------------------------
+
+// EscalationPolicy is an ordered list of steps. A rule may point at a policy
+// (notify_rules.escalation_policy_id); when it does, the policy's steps drive
+// timed deliveries while a matching alert stays open and unacknowledged, in
+// addition to the rule's own on_open channel. OrgID nil = a global policy
+// (visible only to all-orgs staff, RS2).
+type EscalationPolicy struct {
+	ID        int64            `json:"id"`
+	OrgID     *int64           `json:"org_id"`
+	Name      string           `json:"name"`
+	CreatedAt time.Time        `json:"created_at"`
+	CreatedBy *int64           `json:"created_by"`
+	Steps     []EscalationStep `json:"steps"`
+}
+
+// EscalationStep fires its ChannelIDs AfterMinutes after an alert opens.
+// StepOrder is 1-based and is the step number recorded on each delivery
+// (NotificationDelivery.Step); the NS1 non-escalation deliveries use step 0.
+type EscalationStep struct {
+	ID           int64   `json:"id"`
+	PolicyID     int64   `json:"policy_id"`
+	StepOrder    int     `json:"step_order"`
+	AfterMinutes int     `json:"after_minutes"`
+	ChannelIDs   []int64 `json:"channel_ids"`
+}
+
+// CreatePolicyParams is a validated policy to insert. Steps are stored in the
+// given order, numbered 1..n.
+type CreatePolicyParams struct {
+	OrgID     *int64
+	Name      string
+	CreatedBy *int64
+	Steps     []CreatePolicyStep
+}
+
+// CreatePolicyStep is one step of a new policy.
+type CreatePolicyStep struct {
+	AfterMinutes int
+	ChannelIDs   []int64
+}
+
+// CreatePolicy inserts a policy and its steps atomically and returns the loaded
+// policy (with steps).
+func (s *Store) CreatePolicy(ctx context.Context, p CreatePolicyParams) (EscalationPolicy, error) {
+	now := s.Now()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return EscalationPolicy{}, fmt.Errorf("store: create policy: %w", err)
+	}
+	defer tx.Rollback()
+
+	res, err := tx.ExecContext(ctx,
+		`INSERT INTO escalation_policies (org_id, name, created_at, created_by) VALUES (?, ?, ?, ?)`,
+		ptrInt64Arg(p.OrgID), p.Name, fmtTime(now), ptrInt64Arg(p.CreatedBy))
+	if err != nil {
+		return EscalationPolicy{}, fmt.Errorf("store: create policy: %w", err)
+	}
+	policyID, err := res.LastInsertId()
+	if err != nil {
+		return EscalationPolicy{}, fmt.Errorf("store: create policy: %w", err)
+	}
+	for i, step := range p.Steps {
+		ids := step.ChannelIDs
+		if ids == nil {
+			ids = []int64{}
+		}
+		idsJSON, err := json.Marshal(ids)
+		if err != nil {
+			return EscalationPolicy{}, fmt.Errorf("store: create policy: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO escalation_steps (policy_id, step_order, after_minutes, channel_ids_json) VALUES (?, ?, ?, ?)`,
+			policyID, i+1, step.AfterMinutes, string(idsJSON)); err != nil {
+			return EscalationPolicy{}, fmt.Errorf("store: create policy: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return EscalationPolicy{}, fmt.Errorf("store: create policy: %w", err)
+	}
+	return s.GetPolicy(ctx, policyID)
+}
+
+// UpdatePolicyParams replaces a policy's name and its full ordered step list
+// (NS2). OrgID is immutable (like a channel's), so it is not a field here.
+type UpdatePolicyParams struct {
+	Name  string
+	Steps []CreatePolicyStep
+}
+
+// UpdatePolicy replaces a policy's name and steps atomically (the old steps are
+// deleted and the new ones inserted, renumbered 1..n). ErrNotFound when the id
+// does not exist.
+func (s *Store) UpdatePolicy(ctx context.Context, id int64, p UpdatePolicyParams) (EscalationPolicy, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return EscalationPolicy{}, fmt.Errorf("store: update policy: %w", err)
+	}
+	defer tx.Rollback()
+
+	res, err := tx.ExecContext(ctx, `UPDATE escalation_policies SET name = ? WHERE id = ?`, p.Name, id)
+	if err != nil {
+		return EscalationPolicy{}, fmt.Errorf("store: update policy: %w", err)
+	}
+	n, err := rowsAffected(res)
+	if err != nil {
+		return EscalationPolicy{}, fmt.Errorf("store: update policy: %w", err)
+	}
+	if n == 0 {
+		return EscalationPolicy{}, ErrNotFound
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM escalation_steps WHERE policy_id = ?`, id); err != nil {
+		return EscalationPolicy{}, fmt.Errorf("store: update policy: %w", err)
+	}
+	for i, step := range p.Steps {
+		ids := step.ChannelIDs
+		if ids == nil {
+			ids = []int64{}
+		}
+		idsJSON, err := json.Marshal(ids)
+		if err != nil {
+			return EscalationPolicy{}, fmt.Errorf("store: update policy: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO escalation_steps (policy_id, step_order, after_minutes, channel_ids_json) VALUES (?, ?, ?, ?)`,
+			id, i+1, step.AfterMinutes, string(idsJSON)); err != nil {
+			return EscalationPolicy{}, fmt.Errorf("store: update policy: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return EscalationPolicy{}, fmt.Errorf("store: update policy: %w", err)
+	}
+	return s.GetPolicy(ctx, id)
+}
+
+// DeletePolicy removes a policy (its steps cascade) and detaches any rules that
+// point at it (escalation_policy_id -> NULL) so no rule is left referencing a
+// deleted policy. ErrNotFound when the id does not exist.
+func (s *Store) DeletePolicy(ctx context.Context, id int64) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("store: delete policy: %w", err)
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE notify_rules SET escalation_policy_id = NULL WHERE escalation_policy_id = ?`, id); err != nil {
+		return fmt.Errorf("store: delete policy: %w", err)
+	}
+	res, err := tx.ExecContext(ctx, `DELETE FROM escalation_policies WHERE id = ?`, id)
+	if err != nil {
+		return fmt.Errorf("store: delete policy: %w", err)
+	}
+	n, err := rowsAffected(res)
+	if err != nil {
+		return fmt.Errorf("store: delete policy: %w", err)
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return tx.Commit()
+}
+
+const policySelect = `SELECT id, org_id, name, created_at, created_by FROM escalation_policies`
+
+func scanPolicy(row interface{ Scan(...any) error }) (EscalationPolicy, error) {
+	var (
+		p                EscalationPolicy
+		orgID, createdBy sql.NullInt64
+		created          string
+	)
+	if err := row.Scan(&p.ID, &orgID, &p.Name, &created, &createdBy); err != nil {
+		return EscalationPolicy{}, err
+	}
+	p.OrgID = nullInt64(orgID)
+	p.CreatedBy = nullInt64(createdBy)
+	var err error
+	if p.CreatedAt, err = parseTime(created); err != nil {
+		return EscalationPolicy{}, err
+	}
+	return p, nil
+}
+
+// loadSteps returns a policy's steps ordered by step_order.
+func (s *Store) loadSteps(ctx context.Context, policyID int64) ([]EscalationStep, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, policy_id, step_order, after_minutes, channel_ids_json
+		   FROM escalation_steps WHERE policy_id = ? ORDER BY step_order`, policyID)
+	if err != nil {
+		return nil, fmt.Errorf("store: load steps: %w", err)
+	}
+	defer rows.Close()
+	out := []EscalationStep{}
+	for rows.Next() {
+		var (
+			st      EscalationStep
+			idsJSON string
+		)
+		if err := rows.Scan(&st.ID, &st.PolicyID, &st.StepOrder, &st.AfterMinutes, &idsJSON); err != nil {
+			return nil, fmt.Errorf("store: load steps: %w", err)
+		}
+		if err := json.Unmarshal([]byte(idsJSON), &st.ChannelIDs); err != nil {
+			return nil, fmt.Errorf("store: load steps: bad channel_ids_json: %w", err)
+		}
+		if st.ChannelIDs == nil {
+			st.ChannelIDs = []int64{}
+		}
+		out = append(out, st)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: load steps: %w", err)
+	}
+	return out, nil
+}
+
+// GetPolicy returns one policy with its steps. ErrNotFound when the id does not
+// exist.
+func (s *Store) GetPolicy(ctx context.Context, id int64) (EscalationPolicy, error) {
+	p, err := scanPolicy(s.db.QueryRowContext(ctx, policySelect+` WHERE id = ?`, id))
+	if errors.Is(err, sql.ErrNoRows) {
+		return EscalationPolicy{}, ErrNotFound
+	}
+	if err != nil {
+		return EscalationPolicy{}, fmt.Errorf("store: get policy: %w", err)
+	}
+	if p.Steps, err = s.loadSteps(ctx, p.ID); err != nil {
+		return EscalationPolicy{}, err
+	}
+	return p, nil
+}
+
+// ListPolicies returns policies (newest first) with their steps, restricted to a
+// caller's visible org set (RS2): nil = every policy, a non-nil but empty slice =
+// none. A global policy (org_id NULL) is visible only to all-orgs callers.
+func (s *Store) ListPolicies(ctx context.Context, visible []int64) ([]EscalationPolicy, error) {
+	q := policySelect
+	var args []any
+	if clause, clauseArgs := orgInClause(`org_id`, visible); clause != "" {
+		q += ` WHERE ` + clause
+		args = clauseArgs
+	}
+	q += ` ORDER BY id DESC`
+	rows, err := s.db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("store: list policies: %w", err)
+	}
+	defer rows.Close()
+	var ids []int64
+	out := []EscalationPolicy{}
+	for rows.Next() {
+		p, err := scanPolicy(rows)
+		if err != nil {
+			return nil, fmt.Errorf("store: list policies: %w", err)
+		}
+		out = append(out, p)
+		ids = append(ids, p.ID)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: list policies: %w", err)
+	}
+	for i := range out {
+		if out[i].Steps, err = s.loadSteps(ctx, ids[i]); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
+// PoliciesForRule returns the escalation policy a rule points at (with its
+// steps), as a slice of zero or one: empty when the rule has no policy (or the
+// rule does not exist). The open-time enqueue path uses it to know whether a
+// matched rule carries a policy. ErrNotFound is never returned; a missing rule
+// yields an empty slice.
+func (s *Store) PoliciesForRule(ctx context.Context, ruleID int64) ([]EscalationPolicy, error) {
+	var policyID sql.NullInt64
+	err := s.db.QueryRowContext(ctx,
+		`SELECT escalation_policy_id FROM notify_rules WHERE id = ?`, ruleID).Scan(&policyID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return []EscalationPolicy{}, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("store: policies for rule: %w", err)
+	}
+	if !policyID.Valid {
+		return []EscalationPolicy{}, nil
+	}
+	p, err := s.GetPolicy(ctx, policyID.Int64)
+	if errors.Is(err, ErrNotFound) {
+		return []EscalationPolicy{}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return []EscalationPolicy{p}, nil
+}
+
+// DueEscalation is one escalation step that has come due for one open,
+// unacknowledged alert through one matching policy-bearing rule. The dispatcher
+// expands Step.ChannelIDs into one delivery each, keyed by
+// (alert, rule, channel, event=opened, step=Step.StepOrder), so a repeated tick
+// is idempotent.
+type DueEscalation struct {
+	Alert Alert
+	Rule  NotifyRule
+	Step  EscalationStep
+}
+
+// DueEscalations returns, for every open and unacknowledged alert, the escalation
+// steps that have come due at now: a step of the policy attached to an enabled,
+// on_open rule that matches the alert's org, severity and type, whose
+// opened_at + after_minutes <= now. Acknowledged or resolved alerts are excluded
+// in SQL, so escalation stops the moment an alert is acked or resolved. Severity
+// and the comma alert-type list are filtered in Go exactly as MatchRules does.
+func (s *Store) DueEscalations(ctx context.Context, now time.Time) ([]DueEscalation, error) {
+	// Open, unacknowledged alerts.
+	aRows, err := s.db.QueryContext(ctx,
+		alertSelect+` WHERE a.resolved_at IS NULL AND a.acknowledged_at IS NULL ORDER BY a.id`)
+	if err != nil {
+		return nil, fmt.Errorf("store: due escalations: %w", err)
+	}
+	defer aRows.Close()
+	var alerts []Alert
+	for aRows.Next() {
+		a, err := scanAlert(aRows)
+		if err != nil {
+			return nil, fmt.Errorf("store: due escalations: %w", err)
+		}
+		alerts = append(alerts, a)
+	}
+	if err := aRows.Err(); err != nil {
+		return nil, fmt.Errorf("store: due escalations: %w", err)
+	}
+	if len(alerts) == 0 {
+		return []DueEscalation{}, nil
+	}
+
+	// Enabled on_open rules that carry a policy.
+	rRows, err := s.db.QueryContext(ctx,
+		ruleSelect+` WHERE enabled = 1 AND on_open = 1 AND escalation_policy_id IS NOT NULL ORDER BY id`)
+	if err != nil {
+		return nil, fmt.Errorf("store: due escalations: %w", err)
+	}
+	defer rRows.Close()
+	var rules []NotifyRule
+	for rRows.Next() {
+		r, err := scanRule(rRows)
+		if err != nil {
+			return nil, fmt.Errorf("store: due escalations: %w", err)
+		}
+		rules = append(rules, r)
+	}
+	if err := rRows.Err(); err != nil {
+		return nil, fmt.Errorf("store: due escalations: %w", err)
+	}
+	if len(rules) == 0 {
+		return []DueEscalation{}, nil
+	}
+
+	stepsCache := map[int64][]EscalationStep{}
+	out := []DueEscalation{}
+	for _, a := range alerts {
+		for _, r := range rules {
+			if r.EscalationPolicyID == nil {
+				continue
+			}
+			if r.OrgID != nil && *r.OrgID != a.OrgID {
+				continue
+			}
+			if SeverityRank(a.Severity) < SeverityRank(r.MinSeverity) {
+				continue
+			}
+			if !alertTypeMatches(r.AlertTypes, a.Type) {
+				continue
+			}
+			policyID := *r.EscalationPolicyID
+			steps, ok := stepsCache[policyID]
+			if !ok {
+				if steps, err = s.loadSteps(ctx, policyID); err != nil {
+					return nil, err
+				}
+				stepsCache[policyID] = steps
+			}
+			for _, st := range steps {
+				due := a.OpenedAt.Add(time.Duration(st.AfterMinutes) * time.Minute)
+				if !due.After(now) {
+					out = append(out, DueEscalation{Alert: a, Rule: r, Step: st})
+				}
+			}
+		}
+	}
+	return out, nil
 }
 
 // --- small shared helpers ---------------------------------------------------

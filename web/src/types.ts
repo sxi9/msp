@@ -226,8 +226,10 @@ export interface DeviceDetail {
 // password / webhook signing secret) is write-only: it is never returned, only
 // `secret_set` tells whether one is stored.
 
-export type NotifyKind = 'email' | 'webhook';
+export type NotifyKind = 'email' | 'webhook' | 'sms';
 export type WebhookFlavor = 'slack' | 'generic';
+/** SMS provider (NS2): Twilio Messages API, or a generic JSON POST. */
+export type SmsProvider = 'twilio' | 'generic';
 export type DeliveryEvent = 'opened' | 'resolved' | 'test';
 export type DeliveryStatus = 'pending' | 'sent' | 'failed' | 'suppressed';
 
@@ -238,13 +240,19 @@ export const ALERT_TYPES = ['offline', 'disk_full', 'memory_high', 'battery_low'
 export interface EmailConfig { host: string; port: number; from: string; to: string[]; starttls: boolean; username: string }
 /** Non-secret settings of a webhook channel (config of a kind `webhook` channel). */
 export interface WebhookConfig { url: string; flavor: WebhookFlavor }
+/**
+ * Non-secret settings of an SMS channel (NS2; config of a kind `sms` channel).
+ * The provider auth token is the channel secret (write-only). `account_sid` is
+ * used by the twilio provider; `url` by the generic provider.
+ */
+export interface SmsConfig { provider: SmsProvider; from: string; to: string[]; account_sid?: string; url?: string }
 
 export interface NotifyChannel {
   id: number; kind: NotifyKind; name: string;
   /** `null` = a global channel usable by any rule; a number scopes it to one client. */
   org_id: number | null;
-  /** Kind-specific non-secret settings; shape is EmailConfig or WebhookConfig. */
-  config: EmailConfig | WebhookConfig | Record<string, unknown>;
+  /** Kind-specific non-secret settings; shape is EmailConfig, WebhookConfig or SmsConfig. */
+  config: EmailConfig | WebhookConfig | SmsConfig | Record<string, unknown>;
   /** Whether a secret is stored. The secret itself is never returned (write-only). */
   secret_set: boolean;
   enabled: boolean; created_at: string; created_by: number | null;
@@ -255,8 +263,27 @@ export interface NotifyRule {
   /** Alert types the rule matches; `[]` = all types. */
   alert_types: string[];
   on_open: boolean; on_resolve: boolean; channel_id: number;
+  /**
+   * An escalation policy that drives timed deliveries in addition to the rule's
+   * own on_open channel (NS2); `null` = no policy.
+   */
+  escalation_policy_id: number | null;
   enabled: boolean; created_at: string; created_by: number | null;
 }
+
+/** One step of an escalation policy (NS2): fire these channels after a delay. */
+export interface EscalationStep { after_minutes: number; channel_ids: number[] }
+
+/** An escalation policy (NS2): an ordered list of steps. `org_id` null = global. */
+export interface EscalationPolicy {
+  id: number; name: string; org_id: number | null; steps: EscalationStep[];
+  created_at: string; created_by: number | null;
+}
+
+/** POST /notify/policies body. */
+export interface NewPolicy { name: string; org_id: number | null; steps: EscalationStep[] }
+/** PUT /notify/policies/{id} body (org cannot be changed). */
+export interface PolicyUpdate { name: string; steps: EscalationStep[] }
 
 export interface MaintenanceWindow {
   id: number; org_id: number | null; starts_at: string; ends_at: string; reason: string;
@@ -270,27 +297,31 @@ export interface NotificationDelivery {
   org_id: number | null; event: DeliveryEvent; status: DeliveryStatus; attempts: number;
   /** Redacted — never carries a secret or a tokened URL. */
   last_error: string; detail: Record<string, unknown>;
+  /** The 1-based escalation step for an escalation delivery (NS2); `null` otherwise. */
+  step: number | null;
   created_at: string; updated_at: string;
 }
 
 /** POST /notify/channels body. `secret`/`enabled` omitted take the server defaults. */
 export interface NewChannel {
   kind: NotifyKind; name: string; org_id: number | null;
-  config: EmailConfig | WebhookConfig; secret?: string; enabled?: boolean;
+  config: EmailConfig | WebhookConfig | SmsConfig; secret?: string; enabled?: boolean;
 }
 /** PUT /notify/channels/{id} body. Omit `secret` to keep the stored one; `""` is rejected. */
 export interface ChannelUpdate {
-  kind: NotifyKind; name: string; config: EmailConfig | WebhookConfig; secret?: string; enabled?: boolean;
+  kind: NotifyKind; name: string; config: EmailConfig | WebhookConfig | SmsConfig; secret?: string; enabled?: boolean;
 }
-/** POST /notify/rules body. */
+/** POST /notify/rules body. `escalation_policy_id` null = no policy. */
 export interface NewRule {
   name: string; org_id: number | null; min_severity: Severity; alert_types: string[];
-  on_open: boolean; on_resolve: boolean; channel_id: number; enabled?: boolean;
+  on_open: boolean; on_resolve: boolean; channel_id: number;
+  escalation_policy_id?: number | null; enabled?: boolean;
 }
 /** PUT /notify/rules/{id} body (org cannot be changed). */
 export interface RuleUpdate {
   name: string; min_severity: Severity; alert_types: string[];
-  on_open: boolean; on_resolve: boolean; channel_id: number; enabled?: boolean;
+  on_open: boolean; on_resolve: boolean; channel_id: number;
+  escalation_policy_id?: number | null; enabled?: boolean;
 }
 /** POST /notify/windows body. `starts_at`/`ends_at` are RFC3339 timestamps. */
 export interface NewWindow { org_id: number | null; starts_at: string; ends_at: string; reason: string }

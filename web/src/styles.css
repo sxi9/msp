@@ -171,6 +171,13 @@ pre.out { margin: 0; padding: 8px 64px 8px 10px; background: var(--code-bg); bor
 .orgscope-list label { color: var(--text); }
 .access-names { white-space: normal; overflow-wrap: anywhere; }
 .row-actions { display: inline-flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+/* NS2 escalation: the step chip on a delivery row / rule, and the step editor
+   rows in the policy form. */
+.step-chip { background: var(--accent-soft, var(--code-bg)); color: var(--accent, var(--muted)); }
+.step-row { border: 1px solid var(--line); border-radius: 6px; padding: 8px; }
+.step-no { font-weight: 600; color: var(--text); }
+.step-channels { display: inline-flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.step-row input[type="number"] { width: 72px; }
 /* NS1 delivery log: the wide table scrolls inside its own box so it never grows
    the page on desktop; on phones the grid stacks (see the media query). */
 .log-scroll { overflow-x: auto; border-radius: 8px; }

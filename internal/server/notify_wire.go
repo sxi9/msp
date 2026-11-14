@@ -36,9 +36,32 @@ func channelFromStore(c store.NotifyChannel) NotifyChannel {
 func ruleFromStore(r store.NotifyRule) NotifyRule {
 	return NotifyRule{
 		ID: r.ID, Name: r.Name, OrgID: r.OrgID, MinSeverity: r.MinSeverity, AlertTypes: r.AlertTypes,
-		OnOpen: r.OnOpen, OnResolve: r.OnResolve, ChannelID: r.ChannelID, Enabled: r.Enabled,
-		CreatedAt: r.CreatedAt, CreatedBy: r.CreatedBy,
+		OnOpen: r.OnOpen, OnResolve: r.OnResolve, ChannelID: r.ChannelID, EscalationPolicyID: r.EscalationPolicyID,
+		Enabled: r.Enabled, CreatedAt: r.CreatedAt, CreatedBy: r.CreatedBy,
 	}
+}
+
+// policyFromStore converts a store escalation policy (with steps) to the handler
+// row type (NS2).
+func policyFromStore(p store.EscalationPolicy) EscalationPolicy {
+	steps := make([]EscalationStep, 0, len(p.Steps))
+	for _, st := range p.Steps {
+		ids := append([]int64(nil), st.ChannelIDs...)
+		steps = append(steps, EscalationStep{StepOrder: st.StepOrder, AfterMinutes: st.AfterMinutes, ChannelIDs: ids})
+	}
+	return EscalationPolicy{
+		ID: p.ID, Name: p.Name, OrgID: p.OrgID, Steps: steps, CreatedAt: p.CreatedAt, CreatedBy: p.CreatedBy,
+	}
+}
+
+// storePolicySteps converts handler steps to store steps, preserving order (the
+// store assigns the 1-based StepOrder by position).
+func storePolicySteps(steps []EscalationStep) []store.CreatePolicyStep {
+	out := make([]store.CreatePolicyStep, 0, len(steps))
+	for _, st := range steps {
+		out = append(out, store.CreatePolicyStep{AfterMinutes: st.AfterMinutes, ChannelIDs: append([]int64(nil), st.ChannelIDs...)})
+	}
+	return out
 }
 
 func windowFromStore(w store.MaintenanceWindow) MaintenanceWindow {
@@ -53,10 +76,15 @@ func deliveryFromStore(d store.NotificationDelivery) NotificationDelivery {
 	if d.UpdatedAt != nil {
 		updated = *d.UpdatedAt
 	}
+	var step *int
+	if d.Step != 0 { // NS2: 0 = a non-escalation NS1 delivery; >=1 = an escalation step
+		s := d.Step
+		step = &s
+	}
 	return NotificationDelivery{
 		ID: d.ID, AlertID: d.AlertID, RuleID: d.RuleID, ChannelID: d.ChannelID, OrgID: d.OrgID,
 		Event: d.Event, Status: d.Status, Attempts: d.Attempts, LastError: d.LastError,
-		DetailJSON: d.DetailJSON, CreatedAt: d.CreatedAt, UpdatedAt: updated,
+		DetailJSON: d.DetailJSON, Step: step, CreatedAt: d.CreatedAt, UpdatedAt: updated,
 	}
 }
 
@@ -154,7 +182,8 @@ func (n storeNotify) GetNotifyRule(ctx context.Context, id int64) (NotifyRule, e
 func (n storeNotify) CreateNotifyRule(ctx context.Context, p CreateNotifyRuleParams) (NotifyRule, error) {
 	r, err := n.s.st.CreateRule(ctx, store.CreateRuleParams{
 		Name: p.Name, OrgID: p.OrgID, MinSeverity: p.MinSeverity, AlertTypes: p.AlertTypes,
-		OnOpen: p.OnOpen, OnResolve: p.OnResolve, ChannelID: p.ChannelID, Enabled: p.Enabled, CreatedBy: p.CreatedBy,
+		OnOpen: p.OnOpen, OnResolve: p.OnResolve, ChannelID: p.ChannelID, EscalationPolicyID: p.EscalationPolicyID,
+		Enabled: p.Enabled, CreatedBy: p.CreatedBy,
 	})
 	if err != nil {
 		return NotifyRule{}, err
@@ -170,7 +199,8 @@ func (n storeNotify) UpdateNotifyRule(ctx context.Context, p UpdateNotifyRulePar
 	}
 	r, err := n.s.st.UpdateRule(ctx, p.ID, store.CreateRuleParams{
 		Name: p.Name, OrgID: existing.OrgID, MinSeverity: p.MinSeverity, AlertTypes: p.AlertTypes,
-		OnOpen: p.OnOpen, OnResolve: p.OnResolve, ChannelID: p.ChannelID, Enabled: p.Enabled,
+		OnOpen: p.OnOpen, OnResolve: p.OnResolve, ChannelID: p.ChannelID, EscalationPolicyID: p.EscalationPolicyID,
+		Enabled: p.Enabled,
 	})
 	if err != nil {
 		return NotifyRule{}, err
@@ -180,6 +210,52 @@ func (n storeNotify) UpdateNotifyRule(ctx context.Context, p UpdateNotifyRulePar
 
 func (n storeNotify) DeleteNotifyRule(ctx context.Context, id int64) error {
 	return n.s.st.DeleteRule(ctx, id)
+}
+
+// --- escalation policies (NS2) ----------------------------------------------
+
+func (n storeNotify) ListEscalationPolicies(ctx context.Context, visible []int64) ([]EscalationPolicy, error) {
+	rows, err := n.s.st.ListPolicies(ctx, visible)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]EscalationPolicy, 0, len(rows))
+	for _, p := range rows {
+		out = append(out, policyFromStore(p))
+	}
+	return out, nil
+}
+
+func (n storeNotify) GetEscalationPolicy(ctx context.Context, id int64) (EscalationPolicy, error) {
+	p, err := n.s.st.GetPolicy(ctx, id)
+	if err != nil {
+		return EscalationPolicy{}, err
+	}
+	return policyFromStore(p), nil
+}
+
+func (n storeNotify) CreateEscalationPolicy(ctx context.Context, p CreateEscalationPolicyParams) (EscalationPolicy, error) {
+	pol, err := n.s.st.CreatePolicy(ctx, store.CreatePolicyParams{
+		OrgID: p.OrgID, Name: p.Name, CreatedBy: p.CreatedBy, Steps: storePolicySteps(p.Steps),
+	})
+	if err != nil {
+		return EscalationPolicy{}, err
+	}
+	return policyFromStore(pol), nil
+}
+
+func (n storeNotify) UpdateEscalationPolicy(ctx context.Context, p UpdateEscalationPolicyParams) (EscalationPolicy, error) {
+	pol, err := n.s.st.UpdatePolicy(ctx, p.ID, store.UpdatePolicyParams{
+		Name: p.Name, Steps: storePolicySteps(p.Steps),
+	})
+	if err != nil {
+		return EscalationPolicy{}, err
+	}
+	return policyFromStore(pol), nil
+}
+
+func (n storeNotify) DeleteEscalationPolicy(ctx context.Context, id int64) error {
+	return n.s.st.DeletePolicy(ctx, id)
 }
 
 // --- maintenance windows ----------------------------------------------------

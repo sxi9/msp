@@ -53,6 +53,25 @@ type WebhookConfig struct {
 	Flavor string `json:"flavor"` // "slack" or "generic"
 }
 
+// SMSConfig is the non-secret half of an SMS channel's config_json (NS2); the
+// provider auth token is the channel's separate secret. For "twilio" the Messages
+// API is addressed by AccountSID (URL is an optional test/self-hosted override);
+// for "generic" URL is the POST target.
+type SMSConfig struct {
+	Provider   string   `json:"provider"` // "twilio" or "generic"
+	From       string   `json:"from"`
+	To         []string `json:"to"`
+	AccountSID string   `json:"account_sid"`
+	URL        string   `json:"url"`
+}
+
+// SMSMessage is a rendered short message bound for one or more recipients.
+type SMSMessage struct {
+	From string
+	To   []string
+	Text string
+}
+
 // EmailMessage is a rendered plain-text email.
 type EmailMessage struct {
 	From    string
@@ -69,6 +88,10 @@ type EmailMessage struct {
 type Sender interface {
 	SendEmail(ctx context.Context, cfg EmailConfig, password string, msg EmailMessage) error
 	PostWebhook(ctx context.Context, rawURL, contentType string, body []byte, headers map[string]string) error
+	// SendSMS delivers msg through the configured provider (NS2). token is the
+	// channel secret (the provider auth token); it never reaches a log or a
+	// delivery's detail_json.
+	SendSMS(ctx context.Context, cfg SMSConfig, token string, msg SMSMessage) error
 }
 
 // NotifyDispatcher drains pending deliveries: it claims pending rows, loads the
@@ -124,9 +147,12 @@ func (d *NotifyDispatcher) Run(ctx context.Context) {
 	}
 }
 
-// DispatchOnce runs one claim/send/mark pass. It is exported for the in-process
-// e2e test and for the retry loop in Run.
+// DispatchOnce runs one escalation + claim/send/mark pass. It first enqueues any
+// escalation steps that have come due (NS2), then claims and sends pending
+// deliveries, so a due step is enqueued and sent within the same tick. It is
+// exported for the in-process e2e test and for the retry loop in Run.
 func (d *NotifyDispatcher) DispatchOnce(ctx context.Context) {
+	d.EscalateOnce(ctx)
 	retryBefore := d.now().Add(-d.backoff)
 	claimed, err := d.st.ClaimPendingDeliveries(ctx, notifyClaimBatch, retryBefore)
 	if err != nil {
@@ -135,6 +161,53 @@ func (d *NotifyDispatcher) DispatchOnce(ctx context.Context) {
 	}
 	for _, del := range claimed {
 		d.deliver(ctx, del)
+	}
+}
+
+// EscalateOnce enqueues the escalation steps (NS2) that have come due for every
+// open, unacknowledged alert whose matched rule carries a policy. Each due step
+// enqueues one pending delivery per channel, keyed by
+// (alert, rule, channel, event opened, step), so a repeated tick is idempotent
+// and never double-sends; a step is enqueued suppressed when the alert's org is
+// in an active maintenance window, exactly like the NS1 open/resolve path.
+// Escalation stops the moment an alert is acknowledged or resolved because
+// DueEscalations excludes those alerts. DispatchOnce runs this before its claim
+// pass; the integrator may also call it from the evaluator tick.
+func (d *NotifyDispatcher) EscalateOnce(ctx context.Context) {
+	now := d.now()
+	due, err := d.st.DueEscalations(ctx, now)
+	if err != nil {
+		d.log.Error("notify escalate: due", "err", err)
+		return
+	}
+	for _, de := range due {
+		suppressed, err := d.st.ActiveMaintenance(ctx, de.Alert.OrgID, now)
+		if err != nil {
+			d.log.Error("notify escalate: maintenance", "org", de.Alert.OrgID, "err", err)
+			continue
+		}
+		status := store.DeliveryPending
+		if suppressed {
+			status = store.DeliverySuppressed
+		}
+		for _, chID := range de.Step.ChannelIDs {
+			alertID := de.Alert.ID
+			ruleID := de.Rule.ID
+			channelID := chID
+			orgID := de.Alert.OrgID
+			if _, _, err := d.st.EnqueueDelivery(ctx, store.EnqueueDeliveryParams{
+				AlertID:   &alertID,
+				RuleID:    &ruleID,
+				ChannelID: &channelID,
+				OrgID:     &orgID,
+				Event:     store.EventOpened,
+				Step:      de.Step.StepOrder,
+				Status:    status,
+			}); err != nil {
+				d.log.Error("notify escalate: enqueue", "alert", alertID, "rule", ruleID,
+					"step", de.Step.StepOrder, "err", err)
+			}
+		}
 	}
 }
 
@@ -194,9 +267,57 @@ func (d *NotifyDispatcher) send(ctx context.Context, del store.NotificationDeliv
 		return d.sendEmail(sctx, ch, nc)
 	case store.ChannelWebhook:
 		return d.sendWebhook(sctx, ch, nc)
+	case store.ChannelSMS:
+		return d.sendSMS(sctx, ch, nc)
 	default:
 		return "", fmt.Errorf("unknown channel kind %q", ch.Kind)
 	}
+}
+
+// sendSMS renders the short message and hands it to the provider through the
+// Sender. The provider token (ch.Secret) is passed to the sender but never
+// returned in the detail; the detail records only the provider and recipients
+// (with any URL reduced to scheme://host).
+func (d *NotifyDispatcher) sendSMS(ctx context.Context, ch store.NotifyChannel, nc notifyContext) (string, error) {
+	var cfg SMSConfig
+	if err := json.Unmarshal([]byte(ch.ConfigJSON), &cfg); err != nil {
+		return "", fmt.Errorf("bad sms config: %w", err)
+	}
+	if reason := validateSMSConfigForSend(cfg); reason != "" {
+		return "", fmt.Errorf("sms channel %d invalid: %s", ch.ID, reason)
+	}
+	msg := SMSMessage{From: cfg.From, To: cfg.To, Text: renderSMS(nc)}
+	if err := d.sender.SendSMS(ctx, cfg, ch.Secret, msg); err != nil {
+		return "", err
+	}
+	detail := map[string]any{"kind": "sms", "provider": cfg.Provider, "to": cfg.To, "count": len(cfg.To)}
+	if cfg.URL != "" {
+		detail["url"] = redactURL(cfg.URL)
+	}
+	b, _ := json.Marshal(detail)
+	return string(b), nil
+}
+
+// validateSMSConfigForSend is the dispatcher's defence-in-depth check before a
+// send: the dashboard validates on write, but a channel stored out of band must
+// still not produce a malformed send. It returns "" when the config is usable.
+func validateSMSConfigForSend(cfg SMSConfig) string {
+	switch cfg.Provider {
+	case smsProviderTwilio:
+		if cfg.AccountSID == "" && cfg.URL == "" {
+			return "twilio provider needs account_sid or url"
+		}
+	case smsProviderGeneric:
+		if cfg.URL == "" {
+			return "generic provider needs url"
+		}
+	default:
+		return "unknown provider"
+	}
+	if len(cfg.To) == 0 {
+		return "no recipients"
+	}
+	return ""
 }
 
 func (d *NotifyDispatcher) sendEmail(ctx context.Context, ch store.NotifyChannel, nc notifyContext) (string, error) {
@@ -343,6 +464,26 @@ func renderSlack(nc notifyContext) []byte {
 	return b
 }
 
+// renderSMS returns the short SMS body (NS2): the one-line summary, trimmed to
+// ~300 chars, with any URL reduced to scheme://host so a tokened link can never
+// ride out in a text message. The body is built only from alert fields (no
+// secret), so the redaction is belt-and-braces.
+func renderSMS(nc notifyContext) string {
+	return truncate(redactURLsIn(renderSubject(nc)), 300)
+}
+
+// truncate shortens s to at most n bytes, appending an ellipsis marker when it
+// cuts (keeping the whole result within n).
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	if n <= 3 {
+		return s[:n]
+	}
+	return s[:n-3] + "..."
+}
+
 // renderGeneric returns the generic JSON webhook body.
 func renderGeneric(nc notifyContext) []byte {
 	payload := map[string]any{
@@ -448,6 +589,13 @@ func redactError(err error, secret string) string {
 	if secret != "" {
 		msg = strings.ReplaceAll(msg, secret, "[redacted-secret]")
 	}
+	return redactURLsIn(msg)
+}
+
+// redactURLsIn reduces every http(s) URL-looking substring in msg to
+// scheme://host, so an embedded token (a Slack webhook path, a query token) is
+// never carried out. Non-URL text is left untouched.
+func redactURLsIn(msg string) string {
 	var b strings.Builder
 	for i := 0; i < len(msg); {
 		scheme := urlSchemeAt(msg, i)
@@ -605,6 +753,79 @@ func (s *stdSender) PostWebhook(ctx context.Context, rawURL, contentType string,
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("webhook status %d", resp.StatusCode)
+	}
+	return nil
+}
+
+// twilioMessagesURL is the default Twilio Messages API endpoint for an account;
+// a channel may override it (config.url) for a self-hosted gateway or a test.
+func twilioMessagesURL(accountSID string) string {
+	return "https://api.twilio.com/2010-04-01/Accounts/" + url.PathEscape(accountSID) + "/Messages.json"
+}
+
+// SendSMS delivers one short message to each recipient through the configured
+// provider (NS2). twilio POSTs a form (From, To, Body) with HTTP basic auth
+// (account_sid : token) to the Messages API; generic POSTs a JSON {to, text} with
+// the token as a bearer header. One request per recipient keeps the two shapes
+// uniform and matches Twilio's per-recipient model. The token is sent only in the
+// Authorization header, never in a URL or a returned error.
+func (s *stdSender) SendSMS(ctx context.Context, cfg SMSConfig, token string, msg SMSMessage) error {
+	switch cfg.Provider {
+	case smsProviderTwilio:
+		endpoint := cfg.URL
+		if endpoint == "" {
+			endpoint = twilioMessagesURL(cfg.AccountSID)
+		}
+		for _, to := range msg.To {
+			form := url.Values{}
+			form.Set("From", msg.From)
+			form.Set("To", to)
+			form.Set("Body", msg.Text)
+			req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(form.Encode()))
+			if err != nil {
+				return fmt.Errorf("sms request: %w", err)
+			}
+			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			req.Header.Set("User-Agent", "msp-server")
+			req.SetBasicAuth(cfg.AccountSID, token)
+			if err := s.doSMS(req); err != nil {
+				return err
+			}
+		}
+		return nil
+	case smsProviderGeneric:
+		for _, to := range msg.To {
+			body, _ := json.Marshal(map[string]string{"to": to, "text": msg.Text})
+			req, err := http.NewRequestWithContext(ctx, http.MethodPost, cfg.URL, strings.NewReader(string(body)))
+			if err != nil {
+				return fmt.Errorf("sms request: %w", err)
+			}
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("User-Agent", "msp-server")
+			if token != "" {
+				req.Header.Set("Authorization", "Bearer "+token)
+			}
+			if err := s.doSMS(req); err != nil {
+				return err
+			}
+		}
+		return nil
+	default:
+		return fmt.Errorf("unknown sms provider %q", cfg.Provider)
+	}
+}
+
+// doSMS performs one SMS HTTP request and treats any non-2xx as a failure. The
+// response body is discarded so a provider error page cannot echo a credential
+// back into a log.
+func (s *stdSender) doSMS(req *http.Request) error {
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("sms post: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("sms status %d", resp.StatusCode)
 	}
 	return nil
 }

@@ -72,8 +72,8 @@ func fixture(t *testing.T, s *Store) (Org, User, Device, string) {
 // 0002_heartbeats_at, 0003_shell_sessions, 0004_user_orgs, 0005_notifications,
 // 0006_device_patches, 0007_patch_commands, 0008_files_and_deploy,
 // 0009_two_factor, 0010_totp_last_step, 0011_device_software,
-// 0012_update_command).
-const migrationCount = 12
+// 0012_update_command, 0013_ns2).
+const migrationCount = 13
 
 func TestOpenMigratesAndReopens(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "msp.db")

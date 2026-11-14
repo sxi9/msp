@@ -2,8 +2,9 @@
 // (add &role=viewer|operator to try a weaker role). Lets the dashboard be
 // developed and demoed without a backend. Nothing here ships to the server.
 import type {
-  AgentManifest, Alert, AuditEntry, Command, Device, EnrollmentToken, LibraryFile, MaintenanceWindow, NewCommand,
-  NewDeploy, NewPatch, NewShell, NotificationDelivery, NotifyChannel, NotifyRule, Org, Preset, User,
+  AgentManifest, Alert, AuditEntry, Command, Device, EnrollmentToken, EscalationPolicy, LibraryFile,
+  MaintenanceWindow, NewCommand, NewDeploy, NewPatch, NewShell, NotificationDelivery, NotifyChannel,
+  NotifyRule, Org, Preset, User,
 } from './types.ts';
 import type { ShellSocket } from './lib/shell.ts';
 import type { SoftwareHit, SoftwareItem } from './lib/software.ts';
@@ -180,18 +181,36 @@ const notifyChannels: NotifyChannel[] = [
     config: { url: 'https://hooks.slack.com/services/T0000/B0000/xxxxxxxxxxxxxxxx', flavor: 'slack' },
     secret_set: false, enabled: true, created_at: iso(86400e3 * 2), created_by: 1,
   },
+  {
+    id: 22, kind: 'sms', name: 'On-call SMS', org_id: 1,
+    config: { provider: 'twilio', from: '+15550001111', to: ['+15557654321'], account_sid: 'example-account-sid', url: '' },
+    secret_set: true, enabled: true, created_at: iso(86400e3 * 2), created_by: 1,
+  },
+];
+// A 2-step escalation policy (NS2): page Slack at open, then text on-call after 15 min.
+const escalationPolicies: EscalationPolicy[] = [
+  {
+    id: 60, name: 'Acme critical escalation', org_id: 1,
+    steps: [
+      { after_minutes: 0, channel_ids: [21] },
+      { after_minutes: 15, channel_ids: [22] },
+    ],
+    created_at: iso(86400e3 * 2), created_by: 1,
+  },
 ];
 const notifyRules: NotifyRule[] = [
-  { id: 30, name: 'Acme high alerts to Slack', org_id: 1, min_severity: 'high', alert_types: [], on_open: true, on_resolve: false, channel_id: 21, enabled: true, created_at: iso(86400e3 * 2), created_by: 1 },
+  { id: 30, name: 'Acme high alerts to Slack', org_id: 1, min_severity: 'high', alert_types: [], on_open: true, on_resolve: false, channel_id: 21, escalation_policy_id: 60, enabled: true, created_at: iso(86400e3 * 2), created_by: 1 },
 ];
 const maintenanceWindows: MaintenanceWindow[] = [
   // Started 1h ago, ends 1h from now -> active now (active_now computed on read).
   { id: 40, org_id: 1, starts_at: iso(3600e3), ends_at: iso(-3600e3), reason: 'Server room UPS replacement', active_now: true, created_at: iso(86400e3), created_by: 1 },
 ];
 const deliveries: NotificationDelivery[] = [
-  { id: 50, alert_id: 1, rule_id: 30, channel_id: 21, org_id: 1, event: 'opened', status: 'sent', attempts: 1, last_error: '', detail: { kind: 'webhook', flavor: 'slack', url: 'https://hooks.slack.com', signed: false }, created_at: iso(3600e3 * 4), updated_at: iso(3600e3 * 4) },
-  { id: 51, alert_id: 2, rule_id: 30, channel_id: 21, org_id: 1, event: 'opened', status: 'suppressed', attempts: 0, last_error: '', detail: {}, created_at: iso(1800e3), updated_at: iso(1800e3) },
-  { id: 52, alert_id: null, rule_id: null, channel_id: 20, org_id: null, event: 'test', status: 'failed', attempts: 5, last_error: 'dial tcp smtp.example.com:587: connect: connection refused', detail: { kind: 'email', to: ['oncall@example.com'], subject: '[MSP] test from On-call email' }, created_at: iso(900e3), updated_at: iso(700e3) },
+  { id: 50, alert_id: 1, rule_id: 30, channel_id: 21, org_id: 1, event: 'opened', status: 'sent', attempts: 1, last_error: '', detail: { kind: 'webhook', flavor: 'slack', url: 'https://hooks.slack.com', signed: false }, step: 1, created_at: iso(3600e3 * 4), updated_at: iso(3600e3 * 4) },
+  // Escalation step 2 fired 15 min after the alert opened and was still unacked.
+  { id: 53, alert_id: 1, rule_id: 30, channel_id: 22, org_id: 1, event: 'opened', status: 'sent', attempts: 1, last_error: '', detail: { kind: 'sms', provider: 'twilio', to: ['+15557654321'] }, step: 2, created_at: iso(3600e3 * 4 - 900e3), updated_at: iso(3600e3 * 4 - 900e3) },
+  { id: 51, alert_id: 2, rule_id: 30, channel_id: 21, org_id: 1, event: 'opened', status: 'suppressed', attempts: 0, last_error: '', detail: {}, step: null, created_at: iso(1800e3), updated_at: iso(1800e3) },
+  { id: 52, alert_id: null, rule_id: null, channel_id: 20, org_id: null, event: 'test', status: 'failed', attempts: 5, last_error: 'dial tcp smtp.example.com:587: connect: connection refused', detail: { kind: 'email', to: ['oncall@example.com'], subject: '[MSP] test from On-call email' }, step: null, created_at: iso(900e3), updated_at: iso(700e3) },
 ];
 const windowActiveNow = (w: MaintenanceWindow): boolean => {
   const s = Date.parse(w.starts_at), e = Date.parse(w.ends_at), now = Date.now();
@@ -668,13 +687,14 @@ function route(method: string, path: string, body: unknown): Reply {
 
   // --- NS1 alert notifications ---
   const toOrgId = (v: unknown): number | null => (v === null || v === undefined ? null : Number(v));
+  const toPolicyId = (v: unknown): number | null => (v === null || v === undefined ? null : Number(v));
   if (p === '/api/v1/notify/channels' && method === 'GET') return ok({ channels: notifyChannels });
   if (p === '/api/v1/notify/channels' && method === 'POST') {
     const rr = needRole('operator'); if (rr) return rr;
     const name = String(b.name ?? '').trim();
     const kind = String(b.kind ?? '');
     if (!name) return err(400, 'invalid_request', 'name is required');
-    if (kind !== 'email' && kind !== 'webhook') return err(400, 'invalid_request', 'kind must be email or webhook');
+    if (kind !== 'email' && kind !== 'webhook' && kind !== 'sms') return err(400, 'invalid_request', 'kind must be email, webhook or sms');
     const org_id = toOrgId(b.org_id);
     const ch: NotifyChannel = {
       id: nextId++, kind: kind as NotifyChannel['kind'], name, org_id,
@@ -696,7 +716,7 @@ function route(method: string, path: string, body: unknown): Reply {
     const name = String(b.name ?? '').trim();
     const kind = String(b.kind ?? '');
     if (!name) return err(400, 'invalid_request', 'name is required');
-    if (kind !== 'email' && kind !== 'webhook') return err(400, 'invalid_request', 'kind must be email or webhook');
+    if (kind !== 'email' && kind !== 'webhook' && kind !== 'sms') return err(400, 'invalid_request', 'kind must be email, webhook or sms');
     // Kind is immutable on the real server (no kind column); reject a change here
     // too so the mock behaves the same (NS1 fix).
     if (kind !== ch.kind) return err(400, 'invalid_request', 'channel kind cannot be changed');
@@ -715,7 +735,7 @@ function route(method: string, path: string, body: unknown): Reply {
       id: nextId++, alert_id: null, rule_id: null, channel_id: ch.id, org_id: ch.org_id,
       event: 'test', status: ch.enabled ? 'sent' : 'failed', attempts: 1,
       last_error: ch.enabled ? '' : 'channel is disabled', detail: { kind: ch.kind, subject: `[MSP] test from ${ch.name}` },
-      created_at: iso(0), updated_at: iso(0),
+      step: null, created_at: iso(0), updated_at: iso(0),
     };
     deliveries.unshift(del); log('notify.channel_tested', 'notify_channel', ch.id, ch.org_id, { delivery_id: del.id });
     return ok({ delivery: del }, 201);
@@ -729,11 +749,13 @@ function route(method: string, path: string, body: unknown): Reply {
     if (!name) return err(400, 'invalid_request', 'name is required');
     if (!['low', 'medium', 'high'].includes(minSeverity)) return err(400, 'invalid_request', 'min_severity must be low, medium or high');
     if (channelId <= 0 || !notifyChannels.some((c) => c.id === channelId)) return err(400, 'invalid_request', 'channel_id not found');
+    const policyId = toPolicyId(b.escalation_policy_id);
+    if (policyId !== null && !escalationPolicies.some((pp) => pp.id === policyId)) return err(400, 'invalid_request', 'escalation_policy_id not found');
     const ru: NotifyRule = {
       id: nextId++, name, org_id: toOrgId(b.org_id), min_severity: minSeverity as NotifyRule['min_severity'],
       alert_types: Array.isArray(b.alert_types) ? b.alert_types.map(String) : [],
       on_open: b.on_open !== false, on_resolve: b.on_resolve === true, channel_id: channelId,
-      enabled: b.enabled !== false, created_at: iso(0), created_by: me.id,
+      escalation_policy_id: policyId, enabled: b.enabled !== false, created_at: iso(0), created_by: me.id,
     };
     notifyRules.push(ru); log('notify.rule_created', 'notify_rule', ru.id, ru.org_id, { name, channel_id: channelId });
     return ok({ rule: ru }, 201);
@@ -751,11 +773,59 @@ function route(method: string, path: string, body: unknown): Reply {
     if (!name) return err(400, 'invalid_request', 'name is required');
     if (!['low', 'medium', 'high'].includes(minSeverity)) return err(400, 'invalid_request', 'min_severity must be low, medium or high');
     if (channelId <= 0 || !notifyChannels.some((c) => c.id === channelId)) return err(400, 'invalid_request', 'channel_id not found');
+    const policyId = toPolicyId(b.escalation_policy_id);
+    if (policyId !== null && !escalationPolicies.some((pp) => pp.id === policyId)) return err(400, 'invalid_request', 'escalation_policy_id not found');
     ru.name = name; ru.min_severity = minSeverity as NotifyRule['min_severity'];
     ru.alert_types = Array.isArray(b.alert_types) ? b.alert_types.map(String) : [];
-    ru.on_open = b.on_open !== false; ru.on_resolve = b.on_resolve === true; ru.channel_id = channelId; ru.enabled = b.enabled !== false;
+    ru.on_open = b.on_open !== false; ru.on_resolve = b.on_resolve === true; ru.channel_id = channelId;
+    ru.escalation_policy_id = policyId; ru.enabled = b.enabled !== false;
     log('notify.rule_updated', 'notify_rule', ru.id, ru.org_id, { name, channel_id: channelId });
     return ok({ rule: ru });
+  }
+  // --- NS2 escalation policies ---
+  const validateSteps = (raw: unknown): { steps: EscalationPolicy['steps'] } | Reply => {
+    if (!Array.isArray(raw) || raw.length === 0) return err(400, 'invalid_request', 'a policy needs at least one step');
+    if (raw.length > 10) return err(400, 'invalid_request', 'a policy may have at most 10 steps');
+    const steps: EscalationPolicy['steps'] = [];
+    let prev = -1;
+    for (let i = 0; i < raw.length; i++) {
+      const s = (raw[i] ?? {}) as Record<string, unknown>;
+      const after = Number(s.after_minutes ?? 0);
+      if (!Number.isInteger(after) || after < 0 || after > 40320) return err(400, 'invalid_request', `step ${i + 1}: after_minutes must be between 0 and 40320`);
+      if (after < prev) return err(400, 'invalid_request', 'steps must be ordered by non-decreasing after_minutes');
+      prev = after;
+      const ids = Array.isArray(s.channel_ids) ? [...new Set(s.channel_ids.map(Number))] : [];
+      if (ids.length === 0) return err(400, 'invalid_request', `step ${i + 1}: at least one channel is required`);
+      if (!ids.every((id) => notifyChannels.some((c) => c.id === id))) return err(400, 'invalid_request', 'channel_id not found');
+      steps.push({ after_minutes: after, channel_ids: ids });
+    }
+    return { steps };
+  };
+  if (p === '/api/v1/notify/policies' && method === 'GET') return ok({ policies: escalationPolicies });
+  if (p === '/api/v1/notify/policies' && method === 'POST') {
+    const rr = needRole('operator'); if (rr) return rr;
+    const name = String(b.name ?? '').trim();
+    if (!name) return err(400, 'invalid_request', 'name is required');
+    const v = validateSteps(b.steps);
+    if ('status' in v) return v;
+    const pol: EscalationPolicy = { id: nextId++, name, org_id: toOrgId(b.org_id), steps: v.steps, created_at: iso(0), created_by: me.id };
+    escalationPolicies.push(pol); log('notify.policy_created', 'escalation_policy', pol.id, pol.org_id, { name, steps: pol.steps.length });
+    return ok({ policy: pol }, 201);
+  }
+  if ((x = m(/^\/api\/v1\/notify\/policies\/(\d+)$/))) {
+    const rr = needRole('operator'); if (rr) return rr;
+    const pol = escalationPolicies.find((pp) => pp.id === Number(x![1])); if (!pol) return err(404, 'not_found');
+    if (method === 'DELETE') {
+      escalationPolicies.splice(escalationPolicies.indexOf(pol), 1); log('notify.policy_deleted', 'escalation_policy', pol.id, pol.org_id);
+      return ok(null, 204);
+    }
+    const name = String(b.name ?? '').trim();
+    if (!name) return err(400, 'invalid_request', 'name is required');
+    const v = validateSteps(b.steps);
+    if ('status' in v) return v;
+    pol.name = name; pol.steps = v.steps;
+    log('notify.policy_updated', 'escalation_policy', pol.id, pol.org_id, { name, steps: pol.steps.length });
+    return ok({ policy: pol });
   }
   if (p === '/api/v1/notify/windows' && method === 'GET') {
     return ok({ windows: maintenanceWindows.map((w) => ({ ...w, active_now: windowActiveNow(w) })) });

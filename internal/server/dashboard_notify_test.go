@@ -22,6 +22,7 @@ type fakeNotifyStore struct {
 	channels   map[int64]NotifyChannel
 	secrets    map[int64]string // the stored secret, never exposed through the API
 	rules      map[int64]NotifyRule
+	policies   map[int64]EscalationPolicy
 	windows    map[int64]MaintenanceWindow
 	deliveries []NotificationDelivery
 }
@@ -32,6 +33,7 @@ func newFakeNotifyStore() *fakeNotifyStore {
 		channels: map[int64]NotifyChannel{},
 		secrets:  map[int64]string{},
 		rules:    map[int64]NotifyRule{},
+		policies: map[int64]EscalationPolicy{},
 		windows:  map[int64]MaintenanceWindow{},
 	}
 }
@@ -197,8 +199,8 @@ func (f *fakeNotifyStore) CreateNotifyRule(_ context.Context, p CreateNotifyRule
 	defer f.mu.Unlock()
 	ru := NotifyRule{
 		ID: f.next, Name: p.Name, OrgID: p.OrgID, MinSeverity: p.MinSeverity, AlertTypes: p.AlertTypes,
-		OnOpen: p.OnOpen, OnResolve: p.OnResolve, ChannelID: p.ChannelID, Enabled: p.Enabled,
-		CreatedAt: time.Now().UTC(), CreatedBy: p.CreatedBy,
+		OnOpen: p.OnOpen, OnResolve: p.OnResolve, ChannelID: p.ChannelID, EscalationPolicyID: p.EscalationPolicyID,
+		Enabled: p.Enabled, CreatedAt: time.Now().UTC(), CreatedBy: p.CreatedBy,
 	}
 	f.next++
 	f.rules[ru.ID] = ru
@@ -218,6 +220,7 @@ func (f *fakeNotifyStore) UpdateNotifyRule(_ context.Context, p UpdateNotifyRule
 	ru.OnOpen = p.OnOpen
 	ru.OnResolve = p.OnResolve
 	ru.ChannelID = p.ChannelID
+	ru.EscalationPolicyID = p.EscalationPolicyID
 	ru.Enabled = p.Enabled
 	f.rules[p.ID] = ru
 	return ru, nil
@@ -230,6 +233,78 @@ func (f *fakeNotifyStore) DeleteNotifyRule(_ context.Context, id int64) error {
 		return store.ErrNotFound
 	}
 	delete(f.rules, id)
+	return nil
+}
+
+// --- escalation policies (NS2) ---------------------------------------------
+
+func (f *fakeNotifyStore) seedPolicy(p EscalationPolicy) EscalationPolicy {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if p.ID == 0 {
+		p.ID = f.next
+		f.next++
+	} else if p.ID >= f.next {
+		f.next = p.ID + 1
+	}
+	f.policies[p.ID] = p
+	return p
+}
+
+func (f *fakeNotifyStore) ListEscalationPolicies(_ context.Context, visible []int64) ([]EscalationPolicy, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := []EscalationPolicy{}
+	for _, p := range f.policies {
+		if orgVisibleToSet(p.OrgID, visible) {
+			out = append(out, p)
+		}
+	}
+	return out, nil
+}
+
+func (f *fakeNotifyStore) GetEscalationPolicy(_ context.Context, id int64) (EscalationPolicy, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	p, ok := f.policies[id]
+	if !ok {
+		return EscalationPolicy{}, store.ErrNotFound
+	}
+	return p, nil
+}
+
+func (f *fakeNotifyStore) CreateEscalationPolicy(_ context.Context, p CreateEscalationPolicyParams) (EscalationPolicy, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	pol := EscalationPolicy{
+		ID: f.next, Name: p.Name, OrgID: p.OrgID, Steps: p.Steps,
+		CreatedAt: time.Now().UTC(), CreatedBy: p.CreatedBy,
+	}
+	f.next++
+	f.policies[pol.ID] = pol
+	return pol, nil
+}
+
+func (f *fakeNotifyStore) UpdateEscalationPolicy(_ context.Context, p UpdateEscalationPolicyParams) (EscalationPolicy, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	pol, ok := f.policies[p.ID]
+	if !ok {
+		return EscalationPolicy{}, store.ErrNotFound
+	}
+	pol.Name = p.Name
+	pol.Steps = p.Steps
+	f.policies[p.ID] = pol
+	return pol, nil
+}
+
+func (f *fakeNotifyStore) DeleteEscalationPolicy(_ context.Context, id int64) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, ok := f.policies[id]; !ok {
+		return store.ErrNotFound
+	}
+	delete(f.policies, id)
 	return nil
 }
 
@@ -712,5 +787,275 @@ func TestNotifyChannelKindImmutable(t *testing.T) {
 	okPut := map[string]any{"kind": "email", "name": "Ops 2", "config": emailConfig()}
 	if resp, b := e.do(http.MethodPut, path, okPut, withCookie(admin, csrfHeader)); resp.StatusCode != 200 {
 		t.Fatalf("same-kind update should be 200: %d %s", resp.StatusCode, b)
+	}
+}
+
+// --- NS2: SMS channel + escalation policies ---------------------------------
+
+func smsConfig(provider string, over map[string]any) map[string]any {
+	c := map[string]any{"provider": provider, "from": "+15551230000", "to": []string{"+15551230001"}}
+	if provider == "twilio" {
+		c["account_sid"] = "example-account-sid"
+	} else {
+		c["url"] = "https://sms.example.com/send"
+	}
+	for k, v := range over {
+		c[k] = v
+	}
+	return c
+}
+
+// TestNotifySMSChannel covers the NS2 SMS channel kind: create for both
+// providers, the write-only auth token, and the validation of provider, numbers
+// and the provider-specific required fields.
+func TestNotifySMSChannel(t *testing.T) {
+	e := newTestEnv(t)
+	fake := newFakeNotifyStore()
+	installFakeNotify(t, fake)
+	admin := dashAdmin(e)
+
+	const token = "sms-tok-s3cret-abc-9999"
+	body := map[string]any{"kind": "sms", "name": "Twilio SMS", "org_id": e.org.ID, "config": smsConfig("twilio", nil), "secret": token}
+	resp, raw := e.do(http.MethodPost, "/api/v1/notify/channels", body, withCookie(admin, csrfHeader))
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create sms channel: %d %s", resp.StatusCode, raw)
+	}
+	if strings.Contains(string(raw), token) {
+		t.Fatalf("create response leaked the sms token: %s", raw)
+	}
+	var created struct {
+		Channel notifyChannelView `json:"channel"`
+	}
+	if err := json.Unmarshal(raw, &created); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if created.Channel.Kind != "sms" || !created.Channel.SecretSet {
+		t.Fatalf("sms channel wrong: %s", raw)
+	}
+	if fake.secretOf(created.Channel.ID) != token {
+		t.Fatalf("store did not receive the sms token")
+	}
+	// The account_sid survived in config; twilio drops the url field.
+	var cfg map[string]any
+	if err := json.Unmarshal(created.Channel.Config, &cfg); err != nil {
+		t.Fatalf("config decode: %v", err)
+	}
+	if cfg["account_sid"] == "" || cfg["url"] != "" {
+		t.Fatalf("twilio canonical config wrong: %s", created.Channel.Config)
+	}
+
+	// A generic SMS channel needs a (public) url.
+	ok := map[string]any{"kind": "sms", "name": "Generic SMS", "org_id": e.org.ID, "config": smsConfig("generic", nil)}
+	if resp, b := e.do(http.MethodPost, "/api/v1/notify/channels", ok, withCookie(admin, csrfHeader)); resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create generic sms: %d %s", resp.StatusCode, b)
+	}
+
+	// Validation failures: unknown provider, bad numbers, missing provider fields,
+	// empty recipient list, and an internal (SSRF) generic url.
+	bad := []map[string]any{
+		{"provider": "nope"},
+		{"from": "not-a-number"},
+		{"to": []string{"12"}},
+		{"to": []string{}},
+	}
+	for _, over := range bad {
+		b := map[string]any{"kind": "sms", "name": "x", "org_id": e.org.ID, "config": smsConfig("twilio", over)}
+		if resp, raw := e.do(http.MethodPost, "/api/v1/notify/channels", b, withCookie(admin, csrfHeader)); resp.StatusCode != 400 || errorCode(t, raw) != "invalid_request" {
+			t.Fatalf("sms config %v should be 400: %d %s", over, resp.StatusCode, raw)
+		}
+	}
+	// twilio without account_sid.
+	noSid := map[string]any{"kind": "sms", "name": "x", "org_id": e.org.ID, "config": map[string]any{"provider": "twilio", "from": "+15551230000", "to": []string{"+15551230001"}}}
+	if resp, raw := e.do(http.MethodPost, "/api/v1/notify/channels", noSid, withCookie(admin, csrfHeader)); resp.StatusCode != 400 {
+		t.Fatalf("twilio without account_sid should be 400: %d %s", resp.StatusCode, raw)
+	}
+	// generic without url, and generic pointed at an internal address (SSRF).
+	noURL := map[string]any{"kind": "sms", "name": "x", "org_id": e.org.ID, "config": map[string]any{"provider": "generic", "from": "+15551230000", "to": []string{"+15551230001"}}}
+	if resp, raw := e.do(http.MethodPost, "/api/v1/notify/channels", noURL, withCookie(admin, csrfHeader)); resp.StatusCode != 400 {
+		t.Fatalf("generic without url should be 400: %d %s", resp.StatusCode, raw)
+	}
+	ssrf := map[string]any{"kind": "sms", "name": "x", "org_id": e.org.ID, "config": smsConfig("generic", map[string]any{"url": "http://169.254.169.254/"})}
+	if resp, raw := e.do(http.MethodPost, "/api/v1/notify/channels", ssrf, withCookie(admin, csrfHeader)); resp.StatusCode != 400 {
+		t.Fatalf("generic sms to metadata should be 400: %d %s", resp.StatusCode, raw)
+	}
+}
+
+func policyBody(orgID int64, steps []map[string]any) map[string]any {
+	return map[string]any{"name": "Escalate", "org_id": orgID, "steps": steps}
+}
+
+// TestNotifyPolicyCRUD covers create/list/update/delete of an escalation policy
+// with ordered steps, plus step validation.
+func TestNotifyPolicyCRUD(t *testing.T) {
+	e := newTestEnv(t)
+	fake := newFakeNotifyStore()
+	installFakeNotify(t, fake)
+	admin := dashAdmin(e)
+
+	chA := fake.seedChannel(NotifyChannel{Kind: "email", Name: "A", OrgID: orgPtr(e.org.ID), Enabled: true}, "")
+	chB := fake.seedChannel(NotifyChannel{Kind: "webhook", Name: "B", OrgID: orgPtr(e.org.ID), Enabled: true}, "")
+
+	steps := []map[string]any{
+		{"after_minutes": 0, "channel_ids": []int64{chA.ID}},
+		{"after_minutes": 15, "channel_ids": []int64{chB.ID}},
+	}
+	resp, raw := e.do(http.MethodPost, "/api/v1/notify/policies", policyBody(e.org.ID, steps), withCookie(admin, csrfHeader))
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create policy: %d %s", resp.StatusCode, raw)
+	}
+	var created struct {
+		Policy escalationPolicyView `json:"policy"`
+	}
+	if err := json.Unmarshal(raw, &created); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(created.Policy.Steps) != 2 || created.Policy.Steps[0].AfterMinutes != 0 || created.Policy.Steps[1].AfterMinutes != 15 {
+		t.Fatalf("policy steps wrong: %s", raw)
+	}
+	id := created.Policy.ID
+
+	// Create is audited.
+	if n := len(e.auditActions("notify.policy_created")); n != 1 {
+		t.Fatalf("want 1 notify.policy_created audit, got %d", n)
+	}
+
+	// List includes it.
+	resp, raw = e.do(http.MethodGet, "/api/v1/notify/policies", nil, withCookie(admin, nil))
+	var list struct {
+		Policies []escalationPolicyView `json:"policies"`
+	}
+	if resp.StatusCode != 200 || json.Unmarshal(raw, &list) != nil || len(list.Policies) != 1 {
+		t.Fatalf("list policies: %d %s", resp.StatusCode, raw)
+	}
+
+	// Update to a single step.
+	upd := policyBody(e.org.ID, []map[string]any{{"after_minutes": 5, "channel_ids": []int64{chA.ID}}})
+	resp, raw = e.do(http.MethodPut, "/api/v1/notify/policies/"+itoa(id), upd, withCookie(admin, csrfHeader))
+	if resp.StatusCode != 200 {
+		t.Fatalf("update policy: %d %s", resp.StatusCode, raw)
+	}
+	if got := fake.policies[id]; len(got.Steps) != 1 || got.Steps[0].AfterMinutes != 5 {
+		t.Fatalf("policy not updated: %+v", got.Steps)
+	}
+
+	// Validation: no steps, decreasing order, empty channels, unknown channel.
+	badBodies := []map[string]any{
+		policyBody(e.org.ID, nil),
+		policyBody(e.org.ID, []map[string]any{{"after_minutes": 15, "channel_ids": []int64{chA.ID}}, {"after_minutes": 5, "channel_ids": []int64{chB.ID}}}),
+		policyBody(e.org.ID, []map[string]any{{"after_minutes": 0, "channel_ids": []int64{}}}),
+		policyBody(e.org.ID, []map[string]any{{"after_minutes": 0, "channel_ids": []int64{999999}}}),
+	}
+	for i, bb := range badBodies {
+		if resp, raw := e.do(http.MethodPost, "/api/v1/notify/policies", bb, withCookie(admin, csrfHeader)); resp.StatusCode != 400 || errorCode(t, raw) != "invalid_request" {
+			t.Fatalf("bad policy #%d should be 400 invalid_request: %d %s", i, resp.StatusCode, raw)
+		}
+	}
+
+	// Delete.
+	if resp, b := e.do(http.MethodDelete, "/api/v1/notify/policies/"+itoa(id), nil, withCookie(admin, csrfHeader)); resp.StatusCode != 204 {
+		t.Fatalf("delete policy: %d %s", resp.StatusCode, b)
+	}
+}
+
+// TestNotifyPolicyOrgScoping is the RS2 proof for escalation policies: a scoped
+// operator sees only their org's policies and gets 404 (no side effect) on a
+// policy in another org, and cannot create a global policy.
+func TestNotifyPolicyOrgScoping(t *testing.T) {
+	e := newTestEnv(t)
+	ctx := context.Background()
+	fake := newFakeNotifyStore()
+	installFakeNotify(t, fake)
+	orgA := e.org
+
+	orgB, err := e.st.CreateOrg(ctx, "Beta Corp")
+	if err != nil {
+		t.Fatalf("CreateOrg: %v", err)
+	}
+	chA := fake.seedChannel(NotifyChannel{Kind: "email", Name: "A", OrgID: orgPtr(orgA.ID), Enabled: true}, "")
+	chB := fake.seedChannel(NotifyChannel{Kind: "email", Name: "B", OrgID: orgPtr(orgB.ID), Enabled: true}, "")
+	polA := fake.seedPolicy(EscalationPolicy{Name: "A pol", OrgID: orgPtr(orgA.ID), Steps: []EscalationStep{{StepOrder: 1, AfterMinutes: 0, ChannelIDs: []int64{chA.ID}}}})
+	polB := fake.seedPolicy(EscalationPolicy{Name: "B pol", OrgID: orgPtr(orgB.ID), Steps: []EscalationStep{{StepOrder: 1, AfterMinutes: 0, ChannelIDs: []int64{chB.ID}}}})
+
+	op, _ := dashScopedUser(e, "scoped@example.com", RoleOperator, []int64{orgA.ID})
+
+	// Scoped list shows only org A's policy.
+	resp, raw := e.do(http.MethodGet, "/api/v1/notify/policies", nil, withCookie(op, nil))
+	var list struct {
+		Policies []escalationPolicyView `json:"policies"`
+	}
+	if resp.StatusCode != 200 || json.Unmarshal(raw, &list) != nil || len(list.Policies) != 1 || list.Policies[0].ID != polA.ID {
+		t.Fatalf("scoped policy list should be only A: %d %s", resp.StatusCode, raw)
+	}
+
+	// 404 (no side effect) on org B's policy.
+	for _, m := range []struct {
+		method string
+		body   any
+	}{
+		{http.MethodPut, policyBody(orgB.ID, []map[string]any{{"after_minutes": 0, "channel_ids": []int64{chB.ID}}})},
+		{http.MethodDelete, nil},
+	} {
+		if resp, b := e.do(m.method, "/api/v1/notify/policies/"+itoa(polB.ID), m.body, withCookie(op, csrfHeader)); resp.StatusCode != 404 || errorCode(t, b) != "not_found" {
+			t.Fatalf("scoped %s policy B: %d %s (want 404 not_found)", m.method, resp.StatusCode, b)
+		}
+	}
+	if _, ok := fake.policies[polB.ID]; !ok {
+		t.Fatal("scoped request deleted org B policy")
+	}
+
+	// Creating a policy in an invisible org is 404; a global policy is 403.
+	inB := policyBody(orgB.ID, []map[string]any{{"after_minutes": 0, "channel_ids": []int64{chA.ID}}})
+	if resp, b := e.do(http.MethodPost, "/api/v1/notify/policies", inB, withCookie(op, csrfHeader)); resp.StatusCode != 404 {
+		t.Fatalf("scoped create policy in org B: %d %s", resp.StatusCode, b)
+	}
+	global := map[string]any{"name": "g", "steps": []map[string]any{{"after_minutes": 0, "channel_ids": []int64{chA.ID}}}}
+	if resp, b := e.do(http.MethodPost, "/api/v1/notify/policies", global, withCookie(op, csrfHeader)); resp.StatusCode != 403 || errorCode(t, b) != "forbidden" {
+		t.Fatalf("scoped create global policy: %d %s (want 403 forbidden)", resp.StatusCode, b)
+	}
+}
+
+// TestNotifyRuleWithPolicy checks a rule may attach a visible escalation policy,
+// an unknown/invisible policy is rejected (400), and the id round-trips.
+func TestNotifyRuleWithPolicy(t *testing.T) {
+	e := newTestEnv(t)
+	ctx := context.Background()
+	fake := newFakeNotifyStore()
+	installFakeNotify(t, fake)
+	orgA := e.org
+
+	orgB, err := e.st.CreateOrg(ctx, "Beta Corp")
+	if err != nil {
+		t.Fatalf("CreateOrg: %v", err)
+	}
+	chA := fake.seedChannel(NotifyChannel{Kind: "email", Name: "A", OrgID: orgPtr(orgA.ID), Enabled: true}, "")
+	chB := fake.seedChannel(NotifyChannel{Kind: "email", Name: "B", OrgID: orgPtr(orgB.ID), Enabled: true}, "")
+	polA := fake.seedPolicy(EscalationPolicy{Name: "A pol", OrgID: orgPtr(orgA.ID), Steps: []EscalationStep{{StepOrder: 1, AfterMinutes: 0, ChannelIDs: []int64{chA.ID}}}})
+	polB := fake.seedPolicy(EscalationPolicy{Name: "B pol", OrgID: orgPtr(orgB.ID), Steps: []EscalationStep{{StepOrder: 1, AfterMinutes: 0, ChannelIDs: []int64{chB.ID}}}})
+
+	op, _ := dashScopedUser(e, "scoped@example.com", RoleOperator, []int64{orgA.ID})
+
+	// A rule with a visible policy is created, and the id round-trips.
+	body := map[string]any{"name": "R", "org_id": orgA.ID, "min_severity": "high", "channel_id": chA.ID, "on_open": true, "escalation_policy_id": polA.ID}
+	resp, raw := e.do(http.MethodPost, "/api/v1/notify/rules", body, withCookie(op, csrfHeader))
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create rule with policy: %d %s", resp.StatusCode, raw)
+	}
+	var cr struct {
+		Rule notifyRuleView `json:"rule"`
+	}
+	if json.Unmarshal(raw, &cr) != nil || cr.Rule.EscalationPolicyID == nil || *cr.Rule.EscalationPolicyID != polA.ID {
+		t.Fatalf("rule escalation_policy_id did not round-trip: %s", raw)
+	}
+
+	// An unknown policy id is rejected.
+	bad := map[string]any{"name": "R2", "org_id": orgA.ID, "min_severity": "high", "channel_id": chA.ID, "escalation_policy_id": 999999}
+	if resp, b := e.do(http.MethodPost, "/api/v1/notify/rules", bad, withCookie(op, csrfHeader)); resp.StatusCode != 400 || errorCode(t, b) != "invalid_request" {
+		t.Fatalf("rule with unknown policy should be 400: %d %s", resp.StatusCode, b)
+	}
+
+	// A policy in another org is invisible to the scoped operator: 400, no leak.
+	cross := map[string]any{"name": "R3", "org_id": orgA.ID, "min_severity": "high", "channel_id": chA.ID, "escalation_policy_id": polB.ID}
+	if resp, b := e.do(http.MethodPost, "/api/v1/notify/rules", cross, withCookie(op, csrfHeader)); resp.StatusCode != 400 {
+		t.Fatalf("rule with cross-org policy should be 400: %d %s", resp.StatusCode, b)
 	}
 }

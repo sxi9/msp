@@ -1,11 +1,11 @@
 // fetch() wrapper for /api/v1 plus one typed function per endpoint. With
 // ?mock=1 in the URL every call is answered in-memory by mock.ts instead.
 import type {
-  AgentRelease, Alert, AuditEntry, ChannelUpdate, Command, Device, DeviceDetail, EnrollmentToken, Heartbeat,
-  LibraryFile, LoginResult, MaintenanceWindow, NewChannel, NewCommand, NewDeploy, NewPatch, NewRule,
-  NewShell, NewWindow, NotificationDelivery, NotifyChannel, NotifyRule, Org, OrgAssignment,
-  PresetLibrary, RecoveryCodes, RemoteDesktopOpened, RuleUpdate, RustdeskInfo, ShellOpened,
-  SoftwareSearchResult, Summary, TokenCreated, TotpSetup, User,
+  AgentRelease, Alert, AuditEntry, ChannelUpdate, Command, Device, DeviceDetail, EnrollmentToken,
+  EscalationPolicy, Heartbeat, LibraryFile, LoginResult, MaintenanceWindow, NewChannel, NewCommand,
+  NewDeploy, NewPatch, NewPolicy, NewRule, NewShell, NewWindow, NotificationDelivery, NotifyChannel,
+  NotifyRule, Org, OrgAssignment, PolicyUpdate, PresetLibrary, RecoveryCodes, RemoteDesktopOpened,
+  RuleUpdate, RustdeskInfo, ShellOpened, SoftwareSearchResult, Summary, TokenCreated, TotpSetup, User,
 } from './types.ts';
 import { mockRequest } from './mock.ts';
 
@@ -192,6 +192,11 @@ export const api = {
   createNotifyRule: (r: NewRule) => request<{ rule: NotifyRule }>('POST', '/api/v1/notify/rules', r),
   updateNotifyRule: (id: number, r: RuleUpdate) => request<{ rule: NotifyRule }>('PUT', `/api/v1/notify/rules/${id}`, r),
   deleteNotifyRule: (id: number) => request<void>('DELETE', `/api/v1/notify/rules/${id}`),
+  // Escalation policies (NS2): an ordered list of timed steps a rule can attach.
+  listNotifyPolicies: () => request<{ policies: EscalationPolicy[] }>('GET', '/api/v1/notify/policies'),
+  createNotifyPolicy: (p: NewPolicy) => request<{ policy: EscalationPolicy }>('POST', '/api/v1/notify/policies', p),
+  updateNotifyPolicy: (id: number, p: PolicyUpdate) => request<{ policy: EscalationPolicy }>('PUT', `/api/v1/notify/policies/${id}`, p),
+  deleteNotifyPolicy: (id: number) => request<void>('DELETE', `/api/v1/notify/policies/${id}`),
   // Maintenance windows (one-shot; add/delete only).
   listMaintenanceWindows: () => request<{ windows: MaintenanceWindow[] }>('GET', '/api/v1/notify/windows'),
   createMaintenanceWindow: (w: NewWindow) => request<{ window: MaintenanceWindow }>('POST', '/api/v1/notify/windows', w),

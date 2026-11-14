@@ -61,7 +61,7 @@ export function Deliveries() {
                   <td data-label="Org">{orgLabel(d.org_id, orgs)}</td>
                   <td data-label="Alert / device" class="access-names">{subjectOf(d)}</td>
                   <td data-label="Channel">{chName(d.channel_id)}</td>
-                  <td data-label="Event"><span class="chip">{d.event}</span></td>
+                  <td data-label="Event"><span class="chip">{d.event}</span>{d.step !== null && <span class="chip step-chip" title="escalation step">step {d.step}</span>}</td>
                   <td data-label="Status"><DeliveryStatusChip status={d.status} /></td>
                   <td data-label="Tries">{d.attempts}</td>
                   <td data-label="Last error" class="access-names">{d.last_error ? <code class="detail">{d.last_error}</code> : '—'}</td>

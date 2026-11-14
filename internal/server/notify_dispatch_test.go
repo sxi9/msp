@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -28,6 +30,7 @@ type fakeSender struct {
 	mu       sync.Mutex
 	emails   []fakeEmail
 	webhooks []fakeWebhook
+	sms      []fakeSMS
 	failErr  error // when set, every send fails with this error
 }
 
@@ -42,6 +45,12 @@ type fakeWebhook struct {
 	contentType string
 	body        []byte
 	headers     map[string]string
+}
+
+type fakeSMS struct {
+	cfg   SMSConfig
+	token string
+	msg   SMSMessage
 }
 
 func (f *fakeSender) SendEmail(ctx context.Context, cfg EmailConfig, password string, msg EmailMessage) error {
@@ -61,6 +70,16 @@ func (f *fakeSender) PostWebhook(ctx context.Context, rawURL, contentType string
 		return f.failErr
 	}
 	f.webhooks = append(f.webhooks, fakeWebhook{url: rawURL, contentType: contentType, body: append([]byte(nil), body...), headers: headers})
+	return nil
+}
+
+func (f *fakeSender) SendSMS(ctx context.Context, cfg SMSConfig, token string, msg SMSMessage) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.failErr != nil {
+		return f.failErr
+	}
+	f.sms = append(f.sms, fakeSMS{cfg: cfg, token: token, msg: msg})
 	return nil
 }
 
@@ -299,6 +318,187 @@ func TestDispatchTestDelivery(t *testing.T) {
 	}
 }
 
+// --- SMS channel (NS2) ------------------------------------------------------
+
+func TestDispatchSMS(t *testing.T) {
+	e := newTestEnv(t)
+	ctx := context.Background()
+	dev := seedDevice(e, "ws-sms")
+	smsCh := newChannel(e, store.ChannelSMS, "oncall-sms",
+		`{"provider":"generic","from":"+15550000000","to":["+15551112222"],"url":"https://sms.test/send"}`, "tok-SECRET-123")
+	newRule(e, smsCh, "low")
+
+	alert := seedAlert(e, dev, "offline", "high", "no sync for 6m")
+	e.srv.EnqueueAlertNotifications(ctx, alert, store.EventOpened)
+
+	fs := &fakeSender{}
+	NewNotifyDispatcher(e.srv, fs).DispatchOnce(ctx)
+
+	if len(fs.sms) != 1 {
+		t.Fatalf("sms sends = %d, want 1", len(fs.sms))
+	}
+	got := fs.sms[0]
+	if got.token != "tok-SECRET-123" {
+		t.Fatalf("sender did not receive the token: %q", got.token)
+	}
+	if !strings.HasPrefix(got.msg.Text, "[MSP]") || !strings.Contains(got.msg.Text, "offline") ||
+		!strings.Contains(got.msg.Text, "ws-sms") {
+		t.Fatalf("sms text = %q", got.msg.Text)
+	}
+	if len(got.msg.Text) > 300 {
+		t.Fatalf("sms text not trimmed: %d chars", len(got.msg.Text))
+	}
+
+	// Sent, step 0 (a non-escalation NS1 delivery), token never in the log.
+	sent, _ := e.st.ListDeliveries(ctx, store.DeliveryFilter{Status: store.DeliverySent})
+	if len(sent) != 1 || sent[0].Step != 0 {
+		t.Fatalf("sent = %+v", sent)
+	}
+	if strings.Contains(sent[0].DetailJSON, "tok-SECRET-123") {
+		t.Fatalf("delivery detail leaked the token: %q", sent[0].DetailJSON)
+	}
+	if !strings.Contains(sent[0].DetailJSON, `"provider":"generic"`) {
+		t.Fatalf("delivery detail missing provider: %q", sent[0].DetailJSON)
+	}
+}
+
+// --- escalation policies (NS2) ----------------------------------------------
+
+// seedEscalation builds an SMS step-1 channel, an email step-2 channel, a 2-step
+// policy (step 1 at 0 min -> SMS, step 2 at 15 min -> email) and a matching
+// low-severity on_open rule carrying the policy. Returns the two channels.
+func seedEscalation(e *testEnv) (sms, email store.NotifyChannel) {
+	e.t.Helper()
+	ctx := context.Background()
+	sms = newChannel(e, store.ChannelSMS, "step1-sms",
+		`{"provider":"generic","from":"+15550000000","to":["+15551110000"],"url":"https://sms.test/a"}`, "tokA")
+	email = newChannel(e, store.ChannelEmail, "step2-mail", `{"host":"smtp.local","from":"a","to":["b@ex.com"]}`, "")
+	pol, err := e.st.CreatePolicy(ctx, store.CreatePolicyParams{
+		OrgID: &e.org.ID, Name: "oncall", CreatedBy: &e.admin.ID,
+		Steps: []store.CreatePolicyStep{
+			{AfterMinutes: 0, ChannelIDs: []int64{sms.ID}},
+			{AfterMinutes: 15, ChannelIDs: []int64{email.ID}},
+		},
+	})
+	if err != nil {
+		e.t.Fatalf("CreatePolicy: %v", err)
+	}
+	pid := pol.ID
+	if _, err := e.st.CreateRule(ctx, store.CreateRuleParams{
+		Name: "esc", OrgID: &e.org.ID, MinSeverity: "low", OnOpen: true,
+		ChannelID: email.ID, EscalationPolicyID: &pid, Enabled: true, CreatedBy: &e.admin.ID,
+	}); err != nil {
+		e.t.Fatalf("CreateRule: %v", err)
+	}
+	return sms, email
+}
+
+func TestEscalationDeliversStepsOverTime(t *testing.T) {
+	e := newTestEnv(t)
+	ctx := context.Background()
+	dev := seedDevice(e, "ws-esc")
+	seedEscalation(e)
+
+	// Open the alert; escalation is driven purely by the tick (no on_open enqueue).
+	seedAlert(e, dev, "offline", "high", "down")
+
+	fs := &fakeSender{}
+	d := NewNotifyDispatcher(e.srv, fs)
+
+	// Tick at open time: only step 1 (0 min) is due -> one SMS.
+	d.DispatchOnce(ctx)
+	if len(fs.sms) != 1 || len(fs.emails) != 0 {
+		t.Fatalf("after open: sms=%d emails=%d, want 1/0", len(fs.sms), len(fs.emails))
+	}
+	// A second tick before step 2 is due changes nothing (idempotent).
+	d.DispatchOnce(ctx)
+	if len(fs.sms) != 1 || len(fs.emails) != 0 {
+		t.Fatalf("idempotent re-tick: sms=%d emails=%d, want 1/0", len(fs.sms), len(fs.emails))
+	}
+
+	// Advance past 15 min: step 2 (email) becomes due.
+	e.clock.advance(15*time.Minute + time.Second)
+	d.DispatchOnce(ctx)
+	if len(fs.sms) != 1 || len(fs.emails) != 1 {
+		t.Fatalf("after +15m: sms=%d emails=%d, want 1/1", len(fs.sms), len(fs.emails))
+	}
+	// Running the evaluator twice never double-sends a step.
+	d.DispatchOnce(ctx)
+	if len(fs.sms) != 1 || len(fs.emails) != 1 {
+		t.Fatalf("idempotent after both steps: sms=%d emails=%d", len(fs.sms), len(fs.emails))
+	}
+
+	// Exactly two escalation delivery rows, both sent, with step numbers 1 and 2.
+	all, _ := e.st.ListDeliveries(ctx, store.DeliveryFilter{})
+	if len(all) != 2 {
+		t.Fatalf("delivery rows = %d, want 2", len(all))
+	}
+	steps := map[int]string{}
+	for _, dl := range all {
+		steps[dl.Step] = dl.Status
+	}
+	if steps[1] != store.DeliverySent || steps[2] != store.DeliverySent {
+		t.Fatalf("delivery steps/status = %+v, want step1+step2 sent", steps)
+	}
+}
+
+func TestEscalationStopsOnAck(t *testing.T) {
+	e := newTestEnv(t)
+	ctx := context.Background()
+	dev := seedDevice(e, "ws-ack")
+	seedEscalation(e)
+	alert := seedAlert(e, dev, "offline", "high", "down")
+
+	fs := &fakeSender{}
+	d := NewNotifyDispatcher(e.srv, fs)
+	d.DispatchOnce(ctx) // step 1 (SMS) delivered
+	if len(fs.sms) != 1 {
+		t.Fatalf("step 1 not delivered: sms=%d", len(fs.sms))
+	}
+
+	// Acknowledge before step 2 is due.
+	if err := e.st.AckAlert(ctx, alert.ID, e.admin.ID); err != nil {
+		t.Fatalf("AckAlert: %v", err)
+	}
+	e.clock.advance(time.Hour)
+	d.DispatchOnce(ctx)
+	if len(fs.emails) != 0 {
+		t.Fatalf("step 2 delivered after ack: emails=%d, want 0", len(fs.emails))
+	}
+	// No step-2 delivery row was ever created.
+	all, _ := e.st.ListDeliveries(ctx, store.DeliveryFilter{})
+	for _, dl := range all {
+		if dl.Step == 2 {
+			t.Fatalf("a step-2 delivery exists after ack: %+v", dl)
+		}
+	}
+}
+
+func TestEscalationSuppressedDuringMaintenance(t *testing.T) {
+	e := newTestEnv(t)
+	ctx := context.Background()
+	dev := seedDevice(e, "ws-maint")
+	seedEscalation(e)
+
+	now := e.clock.now()
+	if _, err := e.st.CreateWindow(ctx, store.CreateWindowParams{
+		OrgID: &e.org.ID, StartsAt: now.Add(-time.Hour), EndsAt: now.Add(time.Hour), Reason: "patch",
+	}); err != nil {
+		t.Fatalf("CreateWindow: %v", err)
+	}
+	seedAlert(e, dev, "offline", "high", "down")
+
+	fs := &fakeSender{}
+	NewNotifyDispatcher(e.srv, fs).DispatchOnce(ctx)
+	if len(fs.sms) != 0 {
+		t.Fatalf("escalation step sent during maintenance: sms=%d", len(fs.sms))
+	}
+	sup, _ := e.st.ListDeliveries(ctx, store.DeliveryFilter{Status: store.DeliverySuppressed})
+	if len(sup) != 1 || sup[0].Step != 1 {
+		t.Fatalf("suppressed escalation = %+v, want one step-1 row", sup)
+	}
+}
+
 // --- real sender: fake SMTP + httptest webhook ------------------------------
 
 func TestStdSenderEmailAgainstFakeSMTP(t *testing.T) {
@@ -372,6 +572,72 @@ func TestStdSenderWebhookNon2xxFails(t *testing.T) {
 	s := newStdSender()
 	if err := s.PostWebhook(context.Background(), ts.URL, "application/json", []byte("{}"), nil); err == nil {
 		t.Fatal("PostWebhook to a 500 should fail")
+	}
+}
+
+func TestStdSenderSMSGenericAndTwilio(t *testing.T) {
+	type capture struct{ method, auth, ct, body string }
+
+	// Generic: JSON body + bearer token.
+	var gen capture
+	genSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		gen = capture{r.Method, r.Header.Get("Authorization"), r.Header.Get("Content-Type"), string(b)}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer genSrv.Close()
+
+	s := newStdSender()
+	gcfg := SMSConfig{Provider: smsProviderGeneric, From: "+15550000000", To: []string{"+15551112222"}, URL: genSrv.URL}
+	if err := s.SendSMS(context.Background(), gcfg, "bearer-tok", SMSMessage{From: gcfg.From, To: gcfg.To, Text: "[MSP] high offline on ws (Acme)"}); err != nil {
+		t.Fatalf("SendSMS generic: %v", err)
+	}
+	if gen.method != http.MethodPost || gen.auth != "Bearer bearer-tok" || gen.ct != "application/json" {
+		t.Fatalf("generic req = %+v", gen)
+	}
+	var jb map[string]string
+	if err := json.Unmarshal([]byte(gen.body), &jb); err != nil {
+		t.Fatalf("generic body: %v", err)
+	}
+	if jb["to"] != "+15551112222" || !strings.Contains(jb["text"], "offline") {
+		t.Fatalf("generic body = %s", gen.body)
+	}
+
+	// Twilio: form body + basic auth, addressed by the config url override.
+	var (
+		tw     capture
+		twForm url.Values
+		twHits int
+	)
+	twSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		twForm = r.PostForm
+		tw = capture{r.Method, r.Header.Get("Authorization"), r.Header.Get("Content-Type"), ""}
+		twHits++
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer twSrv.Close()
+
+	tcfg := SMSConfig{Provider: smsProviderTwilio, From: "+15550000000", To: []string{"+15551112222", "+15553334444"}, AccountSID: "AC123", URL: twSrv.URL}
+	if err := s.SendSMS(context.Background(), tcfg, "twilio-tok", SMSMessage{From: tcfg.From, To: tcfg.To, Text: "hi"}); err != nil {
+		t.Fatalf("SendSMS twilio: %v", err)
+	}
+	if twHits != 2 {
+		t.Fatalf("twilio requests = %d, want one per recipient (2)", twHits)
+	}
+	want := "Basic " + base64.StdEncoding.EncodeToString([]byte("AC123:twilio-tok"))
+	if tw.method != http.MethodPost || tw.auth != want || tw.ct != "application/x-www-form-urlencoded" {
+		t.Fatalf("twilio req = %+v (auth want %q)", tw, want)
+	}
+	if twForm.Get("From") != "+15550000000" || twForm.Get("Body") != "hi" || twForm.Get("To") == "" {
+		t.Fatalf("twilio form = %v", twForm)
+	}
+
+	// A non-2xx is a failure.
+	bad := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusInternalServerError) }))
+	defer bad.Close()
+	if err := s.SendSMS(context.Background(), SMSConfig{Provider: smsProviderGeneric, To: []string{"+15551112222"}, URL: bad.URL}, "", SMSMessage{To: []string{"+15551112222"}, Text: "x"}); err == nil {
+		t.Fatal("SMS to a 500 should fail")
 	}
 }
 
