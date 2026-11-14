@@ -329,7 +329,7 @@ func (s *Server) handleEnableAutomation(w http.ResponseWriter, r *http.Request) 
 	}
 	s.audit(ctx, "user", actor, existing.OrgID, action, "automation", &id, clientIP(r),
 		map[string]any{"name": existing.Name})
-	writeJSON(w, http.StatusOK, map[string]any{"automation": a})
+	s.writeAutomation(w, http.StatusOK, a)
 }
 
 func (s *Server) handleDeleteAutomation(w http.ResponseWriter, r *http.Request) {

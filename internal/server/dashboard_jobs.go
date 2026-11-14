@@ -46,7 +46,9 @@ type jobRequest struct {
 	Target   store.TargetSpec `json:"target"`
 }
 
-// jobView bundles a job with its derived progress for the list/detail responses.
+// jobView bundles a job with its derived progress for the list response (each row
+// carries its own progress). The detail response (handleGetJob) returns job,
+// progress and devices as separate top-level fields instead.
 type jobView struct {
 	store.Job
 	Progress store.JobProgress `json:"progress"`

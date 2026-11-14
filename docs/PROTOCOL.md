@@ -957,17 +957,27 @@ them); a scoped user then does not see it.
   `job.created` (origin, name, total, skipped, script_id/kind). `JC` is a per-device fan-out row:
   `{"device_id":42,"hostname":"ws-01","org_id":1,"command_id":9,"skipped":false,"note":""}`
   (`command_id` omitted on a skip; `note` carries the reason).
-- `GET /api/v1/jobs?org_id=` (viewer) -> `{"jobs":[JOB...]}` newest first, org-scoped (RS2).
-- `GET /api/v1/jobs/{id}` (viewer) -> `{"job":JOB}` (with `progress`); `404 not_found` across orgs.
+- `GET /api/v1/jobs?org_id=` (viewer) -> `{"jobs":[JOB...]}` newest first, org-scoped (RS2); each
+  row also carries a derived `progress`.
+- `GET /api/v1/jobs/{id}` (viewer) -> `{"job":JOB, "progress":{job_id,total,queued,sent,done,failed},
+  "devices":[DR...]}`; `404 not_found` across orgs. `progress` and `devices` are **top-level**, not
+  nested in `job`. `DR` is a per-device row for each command the job queued:
+  `{"device_id":42,"hostname":"ws-01","org_id":1,"org_name":"Acme","command_id":9,"status":"done",
+  "skipped":false,"note":""}` (platform/android skips queue no command and so appear only in the
+  `POST /jobs` fan-out breakdown, not here).
 
 An **automation** is a saved rule that produces jobs: `trigger:"schedule"` (run by the server
 scheduler) or `trigger:"alert"` (run from the alert-open hook on the alerting device).
 
 ```
 AUTOMATION = {"id":3,"org_id":1,"name":"nightly-reboot-check","enabled":true,"trigger":"schedule",
-              "script_id":5,"target_json":"{...}","schedule_json":"{\"every_minutes\":1440}",
-              "alert_json":"","last_run_at":null,"next_run_at":"...","created_at":"...","created_by":1}
+              "script_id":5,"target":{"platform":"linux"},"schedule":{"every_minutes":1440},
+              "alert":null,"last_run_at":null,"next_run_at":"...","created_at":"...","created_by":1}
 ```
+
+`target`/`schedule`/`alert` are emitted as **parsed objects** (the server stores them as JSON strings
+internally but every HTTP response parses them for the dashboard). `schedule` is set for
+`trigger:"schedule"` and `alert` is set for `trigger:"alert"`; the other is `null`.
 
 - `GET /api/v1/automations` (viewer) -> `{"automations":[AUTOMATION...]}` org-scoped (RS2).
 - `POST /api/v1/automations` (admin|operator; CSRF) body `{name,trigger,script_id,org_id?,

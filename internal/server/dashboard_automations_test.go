@@ -4,10 +4,133 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/sxi9/msp/internal/store"
 )
+
+// autoShape mirrors the fields the dashboard reads off an automation (TS
+// Automation): target/schedule/alert as parsed objects, never the stored *_json
+// strings.
+type autoShape struct {
+	ID       int64                   `json:"id"`
+	Trigger  string                  `json:"trigger"`
+	Target   store.TargetSpec        `json:"target"`
+	Schedule *store.ScheduleSpec     `json:"schedule"`
+	Alert    *store.AlertTriggerSpec `json:"alert"`
+}
+
+// TestDashboardAutomationShape is the regression for the dashboard reading an
+// automation (Automations.tsx): every response must carry target/schedule/alert as
+// PARSED objects, not the stored target_json/schedule_json/alert_json strings.
+// Before the fix a.target was undefined against the real server and the Automations
+// page crashed in targetSummary (reading device_ids of undefined).
+func TestDashboardAutomationShape(t *testing.T) {
+	e := newTestEnv(t)
+	ctx := context.Background()
+	admin := dashAdmin(e)
+	sc, err := e.st.CreateScript(ctx, store.CreateScriptParams{OrgID: &e.org.ID, Name: "a", Platform: "linux", Kind: "exec", Argv: []string{"id"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// No response may carry a *_json string key (the pre-fix, crashing shape).
+	assertParsed := func(b []byte) {
+		t.Helper()
+		for _, bad := range []string{"target_json", "schedule_json", "alert_json"} {
+			if strings.Contains(string(b), bad) {
+				t.Fatalf("response still carries %s (want parsed objects): %s", bad, b)
+			}
+		}
+	}
+
+	// Create a schedule automation: target{platform:linux}, schedule{every_minutes:5}.
+	resp, b := e.do(http.MethodPost, "/api/v1/automations", map[string]any{
+		"name": "nightly", "org_id": e.org.ID, "trigger": "schedule", "script_id": sc.ID,
+		"schedule": map[string]any{"every_minutes": 5}, "target": map[string]any{"platform": "linux"},
+	}, withCookie(admin, csrfHeader))
+	if resp.StatusCode != 201 {
+		t.Fatalf("create schedule automation: %d %s", resp.StatusCode, b)
+	}
+	assertParsed(b)
+	var created struct {
+		Automation autoShape `json:"automation"`
+	}
+	if err := json.Unmarshal(b, &created); err != nil {
+		t.Fatal(err)
+	}
+	a := created.Automation
+	if a.Target.Platform != "linux" {
+		t.Fatalf("created.target.platform = %q, want linux: %s", a.Target.Platform, b)
+	}
+	if a.Schedule == nil || a.Schedule.EveryMinutes != 5 {
+		t.Fatalf("created.schedule = %+v, want every_minutes 5: %s", a.Schedule, b)
+	}
+	if a.Alert != nil {
+		t.Fatalf("created.alert = %+v, want null for a schedule trigger: %s", a.Alert, b)
+	}
+
+	// GET /automations/{id} carries the same parsed shape.
+	resp, b = e.do(http.MethodGet, "/api/v1/automations/"+itoa(a.ID), nil, withCookie(admin, nil))
+	if resp.StatusCode != 200 {
+		t.Fatalf("get automation: %d %s", resp.StatusCode, b)
+	}
+	assertParsed(b)
+	var got struct {
+		Automation autoShape `json:"automation"`
+	}
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Automation.Target.Platform != "linux" || got.Automation.Schedule == nil || got.Automation.Schedule.EveryMinutes != 5 {
+		t.Fatalf("GET automation shape = %+v: %s", got.Automation, b)
+	}
+
+	// GET /automations (list) carries the parsed shape for the row.
+	resp, b = e.do(http.MethodGet, "/api/v1/automations", nil, withCookie(admin, nil))
+	if resp.StatusCode != 200 {
+		t.Fatalf("list automations: %d %s", resp.StatusCode, b)
+	}
+	assertParsed(b)
+	var list struct {
+		Automations []autoShape `json:"automations"`
+	}
+	if err := json.Unmarshal(b, &list); err != nil {
+		t.Fatal(err)
+	}
+	var found *autoShape
+	for i := range list.Automations {
+		if list.Automations[i].ID == a.ID {
+			found = &list.Automations[i]
+		}
+	}
+	if found == nil || found.Target.Platform != "linux" || found.Schedule == nil || found.Schedule.EveryMinutes != 5 {
+		t.Fatalf("list row shape = %+v: %s", found, b)
+	}
+
+	// An alert automation carries a parsed alert matcher and a null schedule.
+	resp, b = e.do(http.MethodPost, "/api/v1/automations", map[string]any{
+		"name": "on-offline", "org_id": e.org.ID, "trigger": "alert", "script_id": sc.ID,
+		"alert": map[string]any{"alert_type": "offline", "min_severity": "high"}, "target": map[string]any{},
+	}, withCookie(admin, csrfHeader))
+	if resp.StatusCode != 201 {
+		t.Fatalf("create alert automation: %d %s", resp.StatusCode, b)
+	}
+	assertParsed(b)
+	var al struct {
+		Automation autoShape `json:"automation"`
+	}
+	if err := json.Unmarshal(b, &al); err != nil {
+		t.Fatal(err)
+	}
+	if al.Automation.Alert == nil || al.Automation.Alert.AlertType != "offline" || al.Automation.Alert.MinSeverity != "high" {
+		t.Fatalf("alert automation .alert = %+v: %s", al.Automation.Alert, b)
+	}
+	if al.Automation.Schedule != nil {
+		t.Fatalf("alert automation .schedule = %+v, want null: %s", al.Automation.Schedule, b)
+	}
+}
 
 // TestDashboardAutomations covers automation CRUD, validation, the enable toggle
 // and RS2 org scoping.

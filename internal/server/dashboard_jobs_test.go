@@ -17,6 +17,14 @@ type jobCreateResponse struct {
 	Devices []store.JobCommand `json:"devices"`
 }
 
+// jobDetailResponse mirrors the GET /api/v1/jobs/{id} body (TS JobDetail): the job
+// plus top-level progress and the per-device rows.
+type jobDetailResponse struct {
+	Job      store.Job            `json:"job"`
+	Progress store.JobProgress    `json:"progress"`
+	Devices  []store.JobDeviceRow `json:"devices"`
+}
+
 // TestDashboardJobsBulkRun covers a manual bulk run: the fan-out across a 2-linux
 // + 1-android target queues 2 commands and skips android with a per-device note,
 // progress reflects a completion, and job.created is audited.
@@ -77,14 +85,20 @@ func TestDashboardJobsBulkRun(t *testing.T) {
 	if resp.StatusCode != 200 {
 		t.Fatalf("get job: %d %s", resp.StatusCode, b)
 	}
-	var jv struct {
-		Job jobView `json:"job"`
-	}
+	var jv jobDetailResponse
 	if err := json.Unmarshal(b, &jv); err != nil {
 		t.Fatal(err)
 	}
-	if jv.Job.Progress.Total != 2 || jv.Job.Progress.Queued != 2 {
-		t.Fatalf("initial progress %+v", jv.Job.Progress)
+	if jv.Progress.Total != 2 || jv.Progress.Queued != 2 {
+		t.Fatalf("initial progress %+v", jv.Progress)
+	}
+	if len(jv.Devices) != 2 {
+		t.Fatalf("detail device rows = %d, want 2 (android skip is not persisted): %s", len(jv.Devices), b)
+	}
+	for _, d := range jv.Devices {
+		if d.OrgName == "" || d.CommandID == nil {
+			t.Fatalf("detail device row missing org_name/command_id: %+v", d)
+		}
 	}
 
 	// Drive linux1's command to done through the agent path; progress updates.
@@ -96,8 +110,8 @@ func TestDashboardJobsBulkRun(t *testing.T) {
 	if err := json.Unmarshal(b, &jv); err != nil {
 		t.Fatal(err)
 	}
-	if jv.Job.Progress.Done != 1 || jv.Job.Progress.Queued != 1 || jv.Job.Progress.Total != 2 {
-		t.Fatalf("progress after one done %+v: %s", jv.Job.Progress, b)
+	if jv.Progress.Done != 1 || jv.Progress.Queued != 1 || jv.Progress.Total != 2 {
+		t.Fatalf("progress after one done %+v: %s", jv.Progress, b)
 	}
 
 	// List shows the job for the admin.
@@ -150,6 +164,68 @@ func TestDashboardJobsTargeting(t *testing.T) {
 	// Neither script_id nor command.
 	if resp, _ := e.do(http.MethodPost, "/api/v1/jobs", map[string]any{"target": map[string]any{}}, withCookie(admin, csrfHeader)); resp.StatusCode != 400 {
 		t.Fatalf("job without script: %d", resp.StatusCode)
+	}
+}
+
+// TestDashboardJobDetailShape is the regression for the dashboard reading the job
+// detail (Jobs.tsx JobView): GET /jobs/{id} must return progress and the per-device
+// rows at the TOP level (TS JobDetail {job, progress, devices}), not progress nested
+// inside the job and no devices. Before the fix the detail page crashed in
+// jobComplete(undefined) and had no device table against the real server.
+func TestDashboardJobDetailShape(t *testing.T) {
+	e := newTestEnv(t)
+	ctx := context.Background()
+	admin := dashAdmin(e)
+	dev, _ := e.enroll("uid-l1", protocol.PlatformLinux)
+
+	sc, err := e.st.CreateScript(ctx, store.CreateScriptParams{
+		OrgID: &e.org.ID, Name: "uptime", Platform: "linux", Kind: "exec", Argv: []string{"uptime"}, TimeoutS: 30,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, b := e.do(http.MethodPost, "/api/v1/jobs",
+		map[string]any{"script_id": sc.ID, "target": map[string]any{"device_ids": []int64{dev}}}, withCookie(admin, csrfHeader))
+	if resp.StatusCode != 201 {
+		t.Fatalf("create job: %d %s", resp.StatusCode, b)
+	}
+	var jr jobCreateResponse
+	if err := json.Unmarshal(b, &jr); err != nil {
+		t.Fatal(err)
+	}
+
+	resp, b = e.do(http.MethodGet, "/api/v1/jobs/"+itoa(jr.JobID), nil, withCookie(admin, nil))
+	if resp.StatusCode != 200 {
+		t.Fatalf("get job: %d %s", resp.StatusCode, b)
+	}
+	// progress and devices must be top-level, and progress must NOT be nested in job.
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(b, &raw); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := raw["progress"]; !ok {
+		t.Fatalf("GET /jobs/{id} has no top-level progress: %s", b)
+	}
+	if _, ok := raw["devices"]; !ok {
+		t.Fatalf("GET /jobs/{id} has no top-level devices: %s", b)
+	}
+	var jobObj map[string]json.RawMessage
+	if err := json.Unmarshal(raw["job"], &jobObj); err != nil {
+		t.Fatal(err)
+	}
+	if _, nested := jobObj["progress"]; nested {
+		t.Fatalf("progress is still nested inside job (crashing shape): %s", b)
+	}
+	var detail jobDetailResponse
+	if err := json.Unmarshal(b, &detail); err != nil {
+		t.Fatal(err)
+	}
+	if detail.Progress.Total != 1 {
+		t.Fatalf("progress total = %d, want 1: %s", detail.Progress.Total, b)
+	}
+	if len(detail.Devices) != 1 || detail.Devices[0].DeviceID != dev ||
+		detail.Devices[0].OrgName == "" || detail.Devices[0].CommandID == nil {
+		t.Fatalf("device rows = %+v, want one row for device %d with org_name and command_id", detail.Devices, dev)
 	}
 }
 

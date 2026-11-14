@@ -28,6 +28,18 @@ type jobCommandJSON struct {
 	Note      string `json:"note"`
 }
 
+// jobDeviceJSON mirrors a store.JobDeviceRow in the GET /jobs/{id} detail body.
+type jobDeviceJSON struct {
+	DeviceID  int64  `json:"device_id"`
+	Hostname  string `json:"hostname"`
+	OrgID     int64  `json:"org_id"`
+	OrgName   string `json:"org_name"`
+	CommandID int64  `json:"command_id"`
+	Status    string `json:"status"`
+	Skipped   bool   `json:"skipped"`
+	Note      string `json:"note"`
+}
+
 type jobProgressJSON struct {
 	JobID  int64 `json:"job_id"`
 	Total  int   `json:"total"`
@@ -293,19 +305,30 @@ func TestAutomations(t *testing.T) {
 	if done.Stdout != "aut1-ok\n" || exitCode(done) != 0 {
 		t.Errorf("bulk command result: stdout %q exit %d", done.Stdout, exitCode(done))
 	}
-	// Progress reflects it: done >= 1, device B still queued, total 2.
+	// Progress reflects it: done >= 1, device B still queued, total 2. The detail
+	// body carries progress and the per-device rows at the top level (TS JobDetail),
+	// each row with its org label.
 	var jobDetail struct {
 		Job struct {
-			ID       int64           `json:"id"`
-			Total    int             `json:"total"`
-			Progress jobProgressJSON `json:"progress"`
+			ID    int64 `json:"id"`
+			Total int   `json:"total"`
 		} `json:"job"`
+		Progress jobProgressJSON `json:"progress"`
+		Devices  []jobDeviceJSON `json:"devices"`
 	}
 	if code := adminD.do(http.MethodGet, fmt.Sprintf("/api/v1/jobs/%d", bulk.JobID), nil, &jobDetail); code != 200 {
 		t.Fatalf("get job: status %d", code)
 	}
-	if jobDetail.Job.Progress.Total != 2 || jobDetail.Job.Progress.Done < 1 || jobDetail.Job.Progress.Queued < 1 {
-		t.Errorf("job progress = %+v, want total 2 / done >= 1 / queued >= 1", jobDetail.Job.Progress)
+	if jobDetail.Progress.Total != 2 || jobDetail.Progress.Done < 1 || jobDetail.Progress.Queued < 1 {
+		t.Errorf("job progress = %+v, want total 2 / done >= 1 / queued >= 1", jobDetail.Progress)
+	}
+	if len(jobDetail.Devices) != 2 {
+		t.Errorf("job detail device rows = %d, want 2 (android skip not persisted)", len(jobDetail.Devices))
+	}
+	for _, d := range jobDetail.Devices {
+		if d.OrgName == "" || d.CommandID == 0 {
+			t.Errorf("job detail device row missing org_name/command_id: %+v", d)
+		}
 	}
 	if n := auditCount("job.created"); n != 1 {
 		t.Errorf("job.created audit = %d, want 1", n)
