@@ -241,7 +241,7 @@ desktop package management), and a sync between scans omits it (the field is `om
 
 ```json
 "patches":{"checked_at":"2026-11-14T10:00:00Z","manager":"apt","reboot_required":true,
-  "count":2,"security_count":1,"error":"",
+  "count":1,"security_count":1,"error":"",
   "updates":[{"name":"openssl","current":"3.0.1","new":"3.0.2","security":true,"source":"Ubuntu:24.04/noble-security"}]}
 ```
 
@@ -833,7 +833,7 @@ Config file JSON `{"server_url","device_token","device_id","interval_s","ca_file
 | `sync_response_rustdesk.json` | SyncResponse      | poll 30, no commands, `rustdesk` host + key (RD1)          |
 | `sync_android_apps.json`      | SyncRequest       | like `sync_android.json` with facts and `facts.apps` (5 entries: 3 user apps incl. a label fallback and an empty version, then 2 system apps) |
 | `command_result.json`         | CommandResult     | exit 0, RFC3339 UTC times                                  |
-| `sync_patches.json`           | SyncRequest       | like `sync_linux.json` with a `patches` report (PM1): apt, reboot required, two updates incl. a security one |
+| `sync_patches.json`           | SyncRequest       | like `sync_linux.json` with a `patches` report (PM1): apt, reboot required, three updates incl. a security one |
 | `error.json`                  | ErrorResponse     | `invalid_device_token`, no detail                          |
 
 A change to any wire shape must update `types.go`, the fixture, `types_test.go` and this

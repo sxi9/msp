@@ -291,9 +291,9 @@ func TestNotificationsDelivery(t *testing.T) {
 	}
 
 	// Fake transports.
-	smtp1 := startSMTPSink(t)     // scenario 1 (fan-out) email
-	smtpSup := startSMTPSink(t)   // scenario 3a (suppressed) email: must receive nothing
-	smtpSend := startSMTPSink(t)  // scenario 3b (outside window) email
+	smtp1 := startSMTPSink(t)    // scenario 1 (fan-out) email
+	smtpSup := startSMTPSink(t)  // scenario 3a (suppressed) email: must receive nothing
+	smtpSend := startSMTPSink(t) // scenario 3b (outside window) email
 	slackHook := &webhookSink{}
 	slackSrv := httptest.NewServer(http.HandlerFunc(slackHook.handler))
 	defer slackSrv.Close()

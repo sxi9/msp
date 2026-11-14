@@ -254,17 +254,27 @@ that the active window recorded as `suppressed`. Captured with Playwright (chrom
 - [x] Agent integration: the Run loop attaches `PatchCollector.Report` to each sync and dispatches `KindPatch` to `RunPatch`, behind a `newPatchReporter` seam so unit tests use a no-op reporter and never run apt (`internal/agent` Run tests; `agent.go`)
 - [x] Store: migration `0006_device_patches` (device columns) + `0007_patch_commands` (the `patch` kind in the CHECK + `action`/`mode`/`reboot`/`patch_ids_json`, rebuilt copying `shell_sessions` out and back so its rows + FK survive the FK-ON transaction); `RecordPatches` (full report + denormalised counts that never understate the agent's totals); `CreateCommand`/`ClaimQueuedCommands` persist and emit the patch fields with the patch timeout scale; `store.Command` exposes them `omitempty` (`internal/store` `TestRecordPatches`, `TestRecordPatchesCountFallback`, `TestCreatePatchCommandRoundTrip`, `TestMigration0007PreservesShellSessions`; migrationCount 7)
 - [x] Server: the sync/enroll handlers `Validate` and `RecordPatches` when the request carries `patches`; `handleGetDevice` emits the full report as a sibling `patches` object (device-detail keys `alerts,commands,device,facts,metrics,patches`); the denormalised counts on every DEVICE row; `POST /api/v1/devices/{id}/patch` with the validate → org-visible (RS2 404) → revoked → platform → shape → ids-subset → online order, audit `patch.scan_requested`/`patch.install_requested`, then `Notify`; the route self-registers via `dashboardRoutes` (`internal/server` `TestPatchEndpointRejections`, `TestUnknownPatchIDs`, device-detail/COMMAND shape tests)
-- [x] Dashboard: the device **Updates** panel (last checked, reboot badge, pending/security counts, the update list with a security chip, Install security / Install all / Rescan for operator+admin) and the fleet **Updates** column + "has pending security updates" filter, from `web/src/lib/patches.ts` pure helpers with `web/src/lib/patches.test.ts`; `?mock=1` seeds a device with updates incl. a security one and a reboot-required device (`make web`)
+- [x] Dashboard: the device **Updates** panel (last checked, reboot badge, pending/security counts, the update list with a security chip, Install security / Install all / Rescan for operator+admin) and the fleet **Updates** column + "has pending security updates" filter, from `web/src/lib/patches.ts` pure helpers with `web/src/lib/patches.test.ts`; `?mock=1` seeds a device with updates incl. a security one and a reboot-required device (`make web`); live-browser proof with the real Linux agent against a fake `apt-get` and a `/var/run/reboot-required` flag — the device page Updates panel (Last checked, the **Reboot required** badge, "3 pending, 2 security", the libssl3/openssl SECURITY + curl list, Install security / Install all / Rescan) in `docs/screenshots/26-device-updates-{desktop,phone}.png` and the Fleet with the amber **Updates** badge "3" and the "Pending security updates" filter in `27-fleet-updates-column-{desktop,phone}.png`; phone `scrollWidth` 400 on both
 - [x] End-to-end: `internal/e2e/patch_test.go` and `scripts/e2e.sh` run the real Linux agent against a fake `apt-get` on PATH (never real apt): the agent reports pending updates incl. a security one, visible on `GET /devices/{id}` with pending 3 / security 2 and the full report; `POST …/patch {install,security}` queues a command the agent installs via the fake apt, completing `done` with the log, and `patch.install_requested` is audited; `{install,ids}` with an unknown id is `400` naming it with no command created; an operator scoped to another org gets `404` with no command; an android device is `400 unsupported_on_platform`
 - [ ] Windows Update scan/install on a real Windows host — not verified: no Windows host in the build container; the COM/PowerShell path is cross-built (`GOOS=windows go build ./...`) and the JSON parser is unit-tested against a captured fixture
 - [x] Docs: PROTOCOL (the `patches` report §3.6, the `patch` kind §5, the endpoint + DEVICE fields + device-detail sibling §6, `patch.*` audit actions §7, the fixture), GUIDE (§10 Patching), OPS (§12 Patching: apt root, Windows Update prereqs, reboots, auto-patching is automations), SECURITY (§13: role-gated, tenant-scoped, audited, ids a subset of pending, no arbitrary OS input), ARCHITECTURE (PM1 section + command-kinds table), FEATURES, STATUS (PM1 table), ROADMAP (patch ticked, Windows NOT VERIFIED), CHECKLIST
 
 ### Final verification pass (2026-11-14, PM1)
 
-Re-run in the cloud build container (Go 1.24, Node 22, no display): `CGO_ENABLED=0 go build ./...` ok,
-`go vet ./...` ok, `CGO_ENABLED=0 go test ./... -count=1` ok (agent 3.18 s, e2e 13.35 s incl.
-`TestPatchEndToEnd`, protocol 0.02 s, server 51.27 s, store 0.57 s), `GOOS=windows GOARCH=amd64 go
-build ./...` ok, `make web` (npm ci, 56 web unit tests incl. `web/src/lib/patches.test.ts`,
+Re-run in the cloud build container (Go 1.24.7, Node 22, no display): `CGO_ENABLED=0 go build ./...` ok,
+`go vet ./...` ok, `CGO_ENABLED=0 go test ./... -count=1` ok (agent 3.14 s, e2e 13.02 s incl.
+`TestPatchEndToEnd`, protocol 0.005 s, server 49.49 s, store 0.60 s), `GOOS=windows GOARCH=amd64 go
+build ./...` ok, `make web` (56 web unit tests incl. `web/src/lib/patches.test.ts`,
 `tsc --noEmit`, esbuild `app.js` 451.5 kB + `app.css` 14.6 kB, server rebuilt), `scripts/e2e.sh` ends
-with "E2E OK" (all steps PASS incl. the six new patch steps against the fake `apt-get`). The Windows
+with "E2E OK" (all steps PASS incl. the patch steps against the fake `apt-get`). The Windows
 Update path is the one `NOT VERIFIED` item (no Windows host here).
+
+Live run on a free port with a fresh SQLite file (deleted afterwards): admin + org "Acme Dental" +
+the real Linux agent `vm` (2 s interval) enrolled, run with a fake `apt-get` on PATH and a
+`/var/run/reboot-required` flag (both removed afterwards; no real apt ever ran). The agent's periodic
+patch report reached the server on its first sync — `GET /api/v1/devices/{id}` showed `pending_patches`
+3, `security_patches` 2, `reboot_required` true, `patches.manager` apt, and the three updates
+(libssl3 + openssl from `noble-security` with `security:true`, curl from `noble-updates`). Playwright
+(chromium, deviceScaleFactor 2, light theme) captured the device Updates panel and the Fleet Updates
+column at 1280 and 400 px (`docs/screenshots/26-device-updates-*`, `27-fleet-updates-column-*`); phone
+`scrollWidth` was 400 on both.
