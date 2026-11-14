@@ -216,6 +216,7 @@ held no Riverside device, confirming the isolation. The server and agent were st
 - [x] RS2 scoping on every notify resource: a scoped operator lists only their orgs' rows (no global), gets `404 not_found` with no side effect on a channel/rule/window in another org, sees only their deliveries, and cannot create a global (`org_id` null) row (`403`); admin unaffected; a grant lets them manage the new org (`internal/server` `TestNotifyOrgScoping`, `internal/e2e` `TestNotificationsOrgScoping`)
 - [x] Dashboard: Notifications section (Channels, Rules, Maintenance windows with "active now", Send test), Delivery log (status chips, status/org filters), write-only secret fields, `web/src/lib/notify.ts` helpers + `web/src/lib/notify.test.ts`, `?mock=1` seeded (`make web` typecheck + build)
 - [x] End-to-end: `internal/e2e/notify_test.go` — real evaluator + production dispatcher (net/smtp + net/http) against a local fake SMTP server and httptest webhooks on a fake clock: an opened alert in org A with an email rule and a Slack rule yields two `sent` deliveries (SMTP names the device + "no sync for", webhook gets `{"text":…}` naming the device); a `min_severity=high` rule does not fire on a low alert; an active maintenance window suppresses (nothing sent) while another org outside a window sends; a failing webhook reaches `failed` after `maxAttempts` and enqueue is idempotent across two ticks; and the RS2 404-not-403 isolation + global-row rule through the real HTTP API
+- [x] Live dashboard run: the real Linux agent under **Acme Dental**, an **Ops email** channel on a local fake SMTP server and an **Ops Slack** webhook channel on a local HTTP listener (reached via an `/etc/hosts` name that passes the deterministic webhook SSRF guard), a routing rule "low and up · on open · all types" and an active maintenance window. **Send test** on both channels landed `sent` (the fake SMTP received the message, the listener received the Slack `{"text":…}` post); stopping the agent opened an `offline` alert that the active window **suppressed**. Shown on the Notifications settings page (two channels, the rule, the active-now window; screenshot 24) and the Delivery log (two sent rows + one suppressed row; screenshot 25); phone `scrollWidth` 400 on all four pages; the `/etc/hosts` entry and the live database were removed afterwards
 - [ ] A real external send (an email to an inbox, a post to a real Slack workspace) — not verified: no outbound mail or internet in the build container; the senders are proven only against a local fake SMTP listener and httptest
 - [x] Docs: PROTOCOL (the `/notify/*` endpoints + shapes + the write-only secret rule + `notify.*` audit actions), SECURITY (channel-secret storage, HMAC signing, maintenance-window suppression is not a security control — section 12), OPS (section 11: configuring SMTP/Slack, the dispatcher, retry/backoff, outbound egress), GUIDE (Notifications under Alerts), ARCHITECTURE (NS1 section), FEATURES, STATUS (NS1 table), ROADMAP (NS1 ticked, SMS/escalation left as NS2), CHECKLIST
 
@@ -223,9 +224,25 @@ held no Riverside device, confirming the isolation. The server and agent were st
 
 Re-run in the cloud build container (Go 1.24.7, Node 22.23.4, no display, no outbound mail):
 `CGO_ENABLED=0 go build ./...` ok, `go vet ./...` ok, `CGO_ENABLED=0 go test ./... -count=1` ok
-(agent 3.19 s, e2e 11.60 s incl. `TestNotificationsDelivery` + `TestNotificationsOrgScoping`,
-protocol 0.01 s, server 54.31 s, store 0.42 s), `GOOS=windows GOARCH=amd64 go build ./...` ok,
+(agent 3.21 s, e2e 11.77 s incl. `TestNotificationsDelivery` + `TestNotificationsOrgScoping`,
+protocol 0.01 s, server 57.67 s, store 0.60 s), `GOOS=windows GOARCH=amd64 go build ./...` ok,
 `make web` (npm ci, 49 web unit tests incl. `web/src/lib/notify.test.ts`, `tsc --noEmit`, esbuild
-`app.js` 443.4 kB + `app.css` 14.4 kB, server rebuilt), `scripts/e2e.sh` ends with "E2E OK"
+`app.js` 443.5 kB + `app.css` 14.4 kB, server rebuilt), `scripts/e2e.sh` ends with "E2E OK"
 (36 PASS, 0 FAIL). The notification senders are exercised against a local fake SMTP listener and
 `httptest` webhooks; a real external send is the one `NOT VERIFIED` item (no egress here).
+
+The first full `go test ./...` of this pass flaked once on the RS1 remote-shell timing test
+`TestShellRelayPipesBytesAndCloses` ("shell.closed audit = []", a race between the close audit write
+and the assertion under full-package parallelism); it passed three times in isolation and on a clean
+full re-run. It is unrelated to NS1.
+
+Live NS1 dashboard run (fresh SQLite on a free port, deleted afterwards; admin / org / token from the
+CLI; the real Linux agent at a 2 s interval): an Ops email channel pointed at a local fake SMTP server
+and an Ops Slack webhook channel pointed at a local HTTP listener, a routing rule and an active
+maintenance window, all created through the API. `POST /notify/channels/{id}/test` on each channel
+produced two `sent` deliveries (the fake SMTP received one message `alerts@msp.example ->
+ops@acme.example`; the listener received one Slack post); stopping the agent opened an `offline` alert
+that the active window recorded as `suppressed`. Captured with Playwright (chromium, deviceScaleFactor
+2, light theme) the Notifications settings page (screenshot 24) and the Delivery log (screenshot 25) at
+1280 px and 400 px with the label banners prepended; phone `scrollWidth` was 400 on all four. The
+`/etc/hosts` helper name and the live database were removed afterwards.

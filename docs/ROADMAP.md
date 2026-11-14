@@ -68,7 +68,7 @@ An unticked box with a note is built but needs real hardware, or is not started.
 ## Phase 2 — Operations
 - [x] Interactive remote shell in the browser over a WebSocket relay (PTY / ConPTY), audited and transcribed (RS1, decision D3; Linux verified end to end by `internal/e2e` `TestRemoteShellEndToEnd`; Windows ConPTY cross-builds but needs a Windows host)
 - [x] Per-technician org scoping (RS2): scope an operator/viewer to a chosen set of client orgs, enforced in SQL with the 404-not-403 rule at every endpoint (client-facing self-service logins remain future work)
-- [x] Alert notifications (NS1): email (SMTP) and webhook (Slack-compatible + generic JSON) delivery, per-org/severity/type routing rules, maintenance-window suppression, a retrying background dispatcher with a delivery log and a Send-test action, all org-scoped for staff like RS2; proven by `internal/e2e` `TestNotificationsDelivery`/`TestNotificationsOrgScoping` and the `internal/server` notify tests
+- [x] Alert notifications (NS1): email (SMTP) and webhook (Slack-compatible + generic JSON) delivery, per-org/severity/type routing rules, maintenance-window suppression, a retrying background dispatcher with a delivery log and a Send-test action, all org-scoped for staff like RS2; proven by `internal/e2e` `TestNotificationsDelivery`/`TestNotificationsOrgScoping`, the `internal/server` notify tests, and a live dashboard run with an email channel on a local fake SMTP server and a Slack channel on a local listener (screenshots 24 and 25: a `sent` and a `suppressed` delivery)
 - [ ] Patch status and install: Windows Update, apt
 - [ ] Software deployment and file transfer
 - [ ] Installed-software inventory on desktops
