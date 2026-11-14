@@ -33,12 +33,18 @@ What the system protects, what it does not, and what must be true before it grow
 | enrollment token  | `et_` + 32 random bytes             | sha256 hex + first 10 chars for display | ttl (default 7 d), max uses, revocable |
 | device token      | `dt_` + 32 random bytes             | sha256 hex in `devices.token_hash`      | until revoke or re-enrollment   |
 | channel secret **(NS1)** | SMTP password / webhook signing secret | **plaintext** in `notify_channels.secret` | until changed or the channel is deleted |
+| TOTP secret **(TF1)** | 20 random bytes, base32 | **plaintext** in `users.totp_secret` | until 2FA is disabled/reset (then cleared) |
+| recovery code **(TF1)** | `xxxxx-xxxxx` base32 (10 per user) | sha256 hex in `recovery_codes.code_hash` | single-use; replaced on regenerate, deleted on disable |
+| pending-login token **(TF1)** | `pt_` + 32 random bytes | sha256 hex, in-memory only | 5 min, consumed on the second login step |
 
 The channel secret is the one exception to hashing: it is a credential the server must *use* to
 authenticate an SMTP session or to compute an HMAC, not a value it verifies, so it is stored in
 the clear (like any outbound password a mailer keeps). It is **write-only over the API** — never
 returned (`"secret_set":bool` only), never logged, and never placed in a delivery's `detail_json`;
-see section 12.
+see section 12. The TOTP secret is the same kind of exception: the server must recompute the code
+to verify it, so it is kept (like the channel secret) in the clear, but it is **write-only** —
+handed back exactly once by `setup` so the owner can enrol, then never returned by `me`, the users
+list or any log, and cleared when 2FA is disabled or reset. See section 13.
 
 Every token is generated with `crypto/rand`, shown exactly once, and only its hash is kept, so
 the database alone does not let anyone authenticate. Revocation is immediate: a revoked device
@@ -60,9 +66,12 @@ key); the debug build is lab-only and never published (`docs/OPS.md` section 3).
   cookie off cross-site requests entirely; the two together block CSRF even on older browsers.
 - Rate limits (in-memory per client IP): login and password change 10 attempts/min,
   enrollment 60 requests/min (a client site behind one NAT address imaging a room of
-  machines; the desktop agent retries a 429), all answering `429 rate_limited`. Failed logins
-  and password changes are audited (`user.login_failed`, `user.password_change_failed`). Set
-  `MSP_TRUST_PROXY=1` only behind a proxy you control, or the limits key on a spoofable header.
+  machines; the desktop agent retries a 429), all answering `429 rate_limited`. The 2FA second
+  login step (`/login/totp`) and the TOTP confirm/disable/regenerate endpoints share the same
+  login budget (TF1), so guessing a 6-digit code is throttled to the login rate. Failed logins
+  and password changes are audited (`user.login_failed`, `user.password_change_failed`,
+  `user.login_totp_failed`). Set `MSP_TRUST_PROXY=1` only behind a proxy you control, or the
+  limits key on a spoofable header.
 - Headers on every response: `Content-Security-Policy: default-src 'self'; style-src 'self'
   'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'`,
   `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`,
@@ -255,6 +264,9 @@ The phase-1 controls are adequate for a pilot with a handful of trusted technici
 the Nth client, in this order:
 
 1. **MFA (TOTP)** on every staff account; operator rights without MFA are a fleet-wide risk.
+   The mechanism is **done (TF1, section 15)** — each staff user can enrol a TOTP second factor
+   with recovery codes, and an admin can reset a lockout. Making it *mandatory* (a policy that
+   forces enrolment before a session is usable) is the remaining step.
 2. **Command signing**: operator-held keys sign queued commands and agents verify them, so a
    server compromise alone cannot push commands.
 3. **Device token rotation** with overlap, and Keystore wrapping on Android.
@@ -369,7 +381,40 @@ credential. What that changes:
   delete and deploy writes an audit row (`file.uploaded`, `file.deleted`, `deploy.requested`); the
   download/install/run log is stored on the command result (capped 64 KiB) like exec/script.
 
-## 15. Reporting a vulnerability
+## 15. Two-factor authentication (TF1)
+
+- **TOTP, native and standard.** The second factor is RFC 6238 TOTP (HMAC-SHA1, 6 digits, 30 s
+  step), implemented with the Go standard library only — no new dependency and no external service.
+  Verification accepts the current 30 s step and ±1 (clock skew) and compares in **constant time**;
+  a stale code (two or more steps away) is rejected. The primitive is tested against the RFC 6238
+  Appendix B vectors.
+- **The secret is write-only.** It is 20 random bytes base32-encoded (`users.totp_secret`), handed
+  back once by `setup` so the owner can enrol, and after that never returned by `me`, the users list
+  or any log line (section 2). It is cleared when 2FA is disabled or an admin resets it.
+- **Recovery codes are hashed and single-use.** Ten per user, format `xxxxx-xxxxx`, stored only as a
+  sha256 hash (`recovery_codes.code_hash`) and shown once at enrol/regenerate. Consuming one marks
+  its row used atomically, so a code logs in exactly once; `me` reports `recovery_codes_remaining`.
+  Disabling 2FA deletes them all.
+- **The login is two-step and the pending token is not a session.** With 2FA on, `POST
+  /api/v1/login` verifies the password, then returns `{"totp_required":true}` with **only** a
+  short-lived (5 min) pending cookie bound to the user and a nonce — never a full session.
+  `POST /api/v1/login/totp` verifies a TOTP or recovery code and only then mints the session. A wrong
+  password never reaches the second step, so the response never reveals whether 2FA is on. The
+  pending token is kept server-side as a sha256 key in memory (single process, single SQLite DB), is
+  consumed on success, and is not accepted anywhere a session is required.
+- **Both steps are rate-limited and failures audited.** `/login/totp` and the confirm/disable/
+  regenerate endpoints share the per-IP login budget (10/min; section 3), throttling code guessing.
+  A bad second factor is audited `user.login_totp_failed`; a successful two-step login records
+  `user.login` with `detail.second_factor` = `totp` or `recovery_code`.
+- **Admin reset for lockouts.** `POST /api/v1/users/{id}/totp/reset` (admin only) disables a target
+  user's 2FA so a user who lost their authenticator and recovery codes can re-enrol. It is audited
+  `user.totp_reset` with the acting admin as actor and the target as target, and returns `404` for a
+  user that does not exist (the check is kept uniform even though admins are all-orgs).
+- **Residual.** Enrolment is per-user opt-in, not yet enforced as org policy (precondition 1). A code
+  used within its own 30 s window is not re-challenged (standard for TOTP); the ±1-step window plus
+  the shared rate limit bound the exposure.
+
+## 16. Reporting a vulnerability
 
 Report privately to the maintainers of this repository (open a security advisory on the
 repository, or e-mail the address listed in its README once published). Please include the

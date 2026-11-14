@@ -15,13 +15,15 @@ type Org struct {
 	OpenAlerts  int       `json:"open_alerts"`
 }
 
-// User is a staff account. PasswordHash never leaves the server.
+// User is a staff account. PasswordHash and the TOTP secret never leave the
+// server. TOTPEnabled (TF1) is surfaced in the user read; the secret is not.
 type User struct {
 	ID           int64      `json:"id"`
 	Email        string     `json:"email"`
 	Role         string     `json:"role"`
 	CreatedAt    time.Time  `json:"created_at"`
 	DisabledAt   *time.Time `json:"disabled_at"`
+	TOTPEnabled  bool       `json:"totp_enabled"`
 	PasswordHash string     `json:"-"`
 }
 

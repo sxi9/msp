@@ -395,3 +395,34 @@ existing command queue and the agent's existing authenticated channel. No new tr
 - **Proof**: `internal/e2e/deploy_test.go` drives the real Linux agent against a local file server and
   the fake `apt-get` on PATH (never the public internet, never a real package); the Windows installer
   path is cross-built only.
+
+## Two-factor authentication (TF1, phase 2)
+
+A TOTP (RFC 6238) second factor for staff logins, with one-time recovery codes and an admin reset
+for lockouts. No new dependency: the TOTP primitive is pure Go stdlib (`crypto/hmac`, `crypto/sha1`,
+`encoding/base32`).
+
+- **TOTP primitive** (`internal/server/totp.go`): HMAC-SHA1, 6 digits, 30 s step, ±1-step skew,
+  constant-time compare; `newTOTPSecret` (20 random bytes base32), `totpNow`/`totpVerify` and
+  `otpauthURI`. Unit-tested against the RFC 6238 Appendix B vectors (`totp_test.go`).
+- **Model** (`internal/store/totp_store.go`, migration `0009_two_factor`): three columns on `users`
+  (`totp_secret` write-only, `totp_enabled`, `totp_confirmed_at`) and a `recovery_codes` table
+  (sha256-hashed, single-use, cascading FK). `SetTOTPSecret`/`EnableTOTP`/`DisableTOTP`/
+  `ReplaceRecoveryCodes`/`ConsumeRecoveryCode` (atomic)/`TOTPStatus`; the user read exposes
+  `totp_enabled` but never the secret.
+- **Server** (`internal/server/auth.go`, `auth_totp.go`): the two-step login (`POST /api/v1/login`
+  returns `{totp_required:true}` + a short-lived pending cookie when 2FA is on; `POST
+  /api/v1/login/totp` verifies a TOTP or recovery code and mints the session), the self-service
+  enrol/manage endpoints (`/me/totp/setup|confirm|disable|recovery/regenerate`), the `me` fields and
+  the admin reset (`POST /api/v1/users/{id}/totp/reset`). The **pending-login token** is kept in an
+  in-memory sha256-keyed store (`pendingTOTPStore`, 5-min TTL) — sufficient for the single-process,
+  single-SQLite deployment and keeping migration 0009 to the three columns + one table. Routes
+  self-register via `dashboardRoutes` (`registerTOTP`). Both login steps and confirm/disable/
+  regenerate share the per-IP `loginLimit`.
+- **Dashboard** (`web/src/lib/totp.ts` + `web/src/lib/qr.ts`, the Account 2FA section, the Login
+  second step, the Users-page badge/reset): pure helpers with `node --test`; the QR is rendered in
+  the browser from the pinned `qrcode-generator@1.4.4`, with the secret always shown as text too.
+- **Proof**: `internal/server/auth_totp_test.go` and `internal/e2e/twofactor_test.go` prove the full
+  flow (enrol, two-step login, wrong/stale/replayed codes, recovery single-use, disable, admin reset,
+  rate limiting, RFC vectors, non-2FA login unchanged); everything is deterministic (codes computed
+  in-test), no authenticator app or external call.

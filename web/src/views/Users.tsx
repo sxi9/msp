@@ -39,6 +39,9 @@ export function Users({ user }: { user: User }) {
   const disable = async (id: number) => {
     try { await api.disableUser(id); users.reload(); } catch (err) { setError(errorText(err)); }
   };
+  const resetTotp = async (id: number) => {
+    try { await api.resetUserTotp(id); users.reload(); } catch (err) { setError(errorText(err)); }
+  };
 
   return (
     <section>
@@ -64,12 +67,12 @@ export function Users({ user }: { user: User }) {
       {users.error && <p class="error">{users.error}</p>}
       {users.data && (
         <table class="grid">
-          <thead><tr><th>Email</th><th>Role</th><th>Client access</th><th>Created</th><th>State</th><th></th></tr></thead>
+          <thead><tr><th>Email</th><th>Role</th><th>Client access</th><th>2FA</th><th>Created</th><th>State</th><th></th></tr></thead>
           <tbody>
             {users.data.map((u) => (
               <UserRow
                 key={u.id} u={u} self={u.id === user.id} orgs={orgList} knownOrgIds={knownOrgIds}
-                onChanged={users.reload} onDisable={() => disable(u.id)}
+                onChanged={users.reload} onDisable={() => disable(u.id)} onResetTotp={() => resetTotp(u.id)}
               />
             ))}
           </tbody>
@@ -87,9 +90,9 @@ function AccessCell({ u, orgs }: { u: User; orgs: Org[] }) {
   return <span class="access-names">{assignedOrgNames(a.orgIds, orgs).join(', ')}</span>;
 }
 
-function UserRow({ u, self, orgs, knownOrgIds, onChanged, onDisable }: {
+function UserRow({ u, self, orgs, knownOrgIds, onChanged, onDisable, onResetTotp }: {
   u: User; self: boolean; orgs: Org[]; knownOrgIds: number[];
-  onChanged: () => void; onDisable: () => void;
+  onChanged: () => void; onDisable: () => void; onResetTotp: () => void;
 }) {
   const [editing, setEditing] = useState(false);
   const [all, setAll] = useState(true);
@@ -123,18 +126,20 @@ function UserRow({ u, self, orgs, knownOrgIds, onChanged, onDisable }: {
         <td data-label="Email">{u.email}{self && <span class="chip">you</span>}</td>
         <td data-label="Role">{u.role}</td>
         <td data-label="Client access"><AccessCell u={u} orgs={orgs} /></td>
+        <td data-label="2FA">{u.totp_enabled ? <span class="badge st-done">On</span> : <span class="muted">Off</span>}</td>
         <td data-label="Created">{when(u.created_at)}</td>
         <td data-label="State">{u.disabled_at ? `disabled ${when(u.disabled_at)}` : 'active'}</td>
         <td data-label="">
           <span class="row-actions">
             {editable && <button type="button" class="btn btn-sm" onClick={() => (editing ? setEditing(false) : open())}>{editing ? 'Close' : 'Edit access'}</button>}
+            {u.totp_enabled && !u.disabled_at && <ConfirmButton label="Reset 2FA" question={`Reset two-factor for ${u.email}? They will sign in with only a password until they set it up again.`} danger onConfirm={onResetTotp} />}
             {!u.disabled_at && !self && <ConfirmButton label="Disable" question={`Disable ${u.email}?`} danger onConfirm={onDisable} />}
           </span>
         </td>
       </tr>
       {editing && (
         <tr class="expanded">
-          <td colSpan={6}>
+          <td colSpan={7}>
             <strong>Client access for {u.email}</strong>
             <OrgChecklist orgs={orgs} allOrgs={all} selected={sel} disabled={busy} onAllOrgs={setAll} onToggle={toggle} />
             <div class="form-row">

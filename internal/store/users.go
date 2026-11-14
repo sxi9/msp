@@ -8,17 +8,19 @@ import (
 	"strings"
 )
 
-const userColumns = `id, email, password_hash, role, created_at, disabled_at`
+const userColumns = `id, email, password_hash, role, created_at, disabled_at, totp_enabled`
 
 func scanUser(row interface{ Scan(...any) error }) (User, error) {
 	var (
-		u          User
-		created    string
-		disabledAt sql.NullString
+		u           User
+		created     string
+		disabledAt  sql.NullString
+		totpEnabled int
 	)
-	if err := row.Scan(&u.ID, &u.Email, &u.PasswordHash, &u.Role, &created, &disabledAt); err != nil {
+	if err := row.Scan(&u.ID, &u.Email, &u.PasswordHash, &u.Role, &created, &disabledAt, &totpEnabled); err != nil {
 		return User{}, err
 	}
+	u.TOTPEnabled = totpEnabled != 0
 	var err error
 	if u.CreatedAt, err = parseTime(created); err != nil {
 		return User{}, err

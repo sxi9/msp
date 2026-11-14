@@ -474,11 +474,33 @@ viewer. **Admins always see every client** and cannot be scoped; their row reads
 demoting an admin keeps them on all clients until you scope them. Only admins create clients, so
 the "Add client" button is hidden for everyone else.
 
-- **Account** (click your email in the top bar): change your own password; your other
-  sessions are signed out. A forgotten password is reset by an admin on the server with
-  `msp-server user set-password --email ... --password-stdin`.
+- **Account** (click your email in the top bar): change your own password (your other
+  sessions are signed out), and set up **two-factor authentication** (below). A forgotten password
+  is reset by an admin on the server with `msp-server user set-password --email ... --password-stdin`.
 - **Audit** page: every action with time, actor (user email, `device:<id>` or `system`),
   action name, client and device, and the client IP. Append-only, never pruned.
+
+### Two-factor authentication
+
+Add a TOTP second factor (Google Authenticator, Authy, 1Password, or any RFC 6238 app) to your
+staff login. On the **Account** page, under **Two-factor authentication**:
+
+1. **Set up**: click Set up. The page shows a **QR code**, the **secret** in text (if you can't scan
+   the QR, type the secret into your authenticator), and the `otpauth` URI. Scan it, then enter the
+   6-digit code your app shows to confirm.
+2. **Save your recovery codes**: on confirm you are shown **10 one-time recovery codes** exactly
+   once. Copy or download them and keep them somewhere safe (a password manager). Each works once if
+   you ever lose your authenticator; after that you confirm you've saved them.
+3. **Signing in** now takes two steps: enter your email and password as usual, then enter the code
+   from your authenticator. The "Use a recovery code" link accepts a recovery code instead.
+4. **Manage**: with 2FA on, the Account page shows it enabled and how many recovery codes remain.
+   **Regenerate recovery codes** (needs a current code) replaces the set and shows the new codes
+   once. **Turn off** (needs a current code or a recovery code) disables 2FA and clears the secret.
+
+**Locked out?** If you lose your authenticator *and* your recovery codes, ask an **admin** to reset
+your 2FA: on the **Users** page each user row shows a 2FA badge and, when it's on, a **Reset 2FA**
+action. A reset turns your 2FA off so you can sign in with just your password and enrol again. The
+reset is recorded in the audit log.
 
 ## 14. Housekeeping
 

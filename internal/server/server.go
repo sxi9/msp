@@ -67,6 +67,7 @@ type Server struct {
 	loginLimit  *rateLimiter
 	enrollLimit *rateLimiter
 	presets     *presetLibrary
+	pendingTOTP *pendingTOTPStore
 
 	// shutdown is closed when Run starts shutting the listener down so that
 	// every parked sync long-poll answers at once (http.Server.Shutdown does
@@ -120,6 +121,7 @@ func New(st *store.Store, cfg Config, log *slog.Logger) *Server {
 		loginLimit:  newRateLimiter(10),
 		enrollLimit: newRateLimiter(enrollPerMinute),
 		presets:     newPresetLibrary(cfg.PresetsPath, log),
+		pendingTOTP: newPendingTOTPStore(),
 		shutdown:    make(chan struct{}),
 	}
 }

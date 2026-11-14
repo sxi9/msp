@@ -24,7 +24,32 @@ export interface User {
   all_orgs?: boolean;
   /** The user's assigned client org ids; `[]` (or absent) when all_orgs (RS2). */
   org_ids?: number[];
+  /**
+   * Whether this user has a confirmed TOTP second factor (TF1). Present on the
+   * admin users list (for the 2FA badge/reset) and on /me (for the Account
+   * two-factor section). The TOTP secret itself is never returned.
+   */
+  totp_enabled?: boolean;
+  /** Unused recovery codes left (TF1). Present on /me; 0 when 2FA is off. */
+  recovery_codes_remaining?: number;
 }
+
+/**
+ * Result of POST /api/v1/login (TF1). Without 2FA the session cookie is set and
+ * `user` is returned as before; with 2FA the server returns only
+ * `{ totp_required: true }` and a short-lived pending cookie, and the caller must
+ * complete POST /api/v1/login/totp before a real session exists.
+ */
+export interface LoginResult { user?: User; totp_required?: boolean }
+
+/** Body of POST /api/v1/me/totp/setup (TF1): the pending secret and its otpauth URI. */
+export interface TotpSetup { secret: string; otpauth_uri: string }
+
+/**
+ * Body returned once by confirm/regenerate (TF1): the plaintext recovery codes.
+ * They are shown a single time and never returned again.
+ */
+export interface RecoveryCodes { recovery_codes: string[] }
 
 /** The PUT /api/v1/users/{id}/orgs body and the create-user access block (RS2). */
 export interface OrgAssignment { all_orgs: boolean; org_ids: number[] }

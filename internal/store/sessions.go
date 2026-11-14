@@ -29,7 +29,7 @@ func (s *Store) CreateSession(ctx context.Context, userID int64, ip string, ttl 
 // the session is unknown or expired, or the user is disabled.
 func (s *Store) GetSession(ctx context.Context, plain string) (User, error) {
 	row := s.db.QueryRowContext(ctx,
-		`SELECT u.id, u.email, u.password_hash, u.role, u.created_at, u.disabled_at
+		`SELECT u.id, u.email, u.password_hash, u.role, u.created_at, u.disabled_at, u.totp_enabled
 		   FROM sessions s JOIN users u ON u.id = s.user_id
 		  WHERE s.token_hash = ? AND s.expires_at > ?`,
 		HashToken(plain), fmtTime(s.Now()))

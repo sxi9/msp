@@ -453,9 +453,46 @@ insufficient role. Roles: `viewer < operator < admin`.
 
 - `POST /api/v1/login {"email","password"}` -> `200 {"user":{"id":1,"email":"...","role":"admin"}}`
   + `Set-Cookie`; `401 {"error":"invalid_credentials"}`; `429` after 10 attempts/min/IP. Audit
-  `user.login` / `user.login_failed`.
+  `user.login` / `user.login_failed`. **Two-step (TF1):** when the user has 2FA enabled the
+  password is only the first factor — the response is `200 {"totp_required":true}` with **no**
+  session cookie, only a short-lived (5 min) **pending** cookie (`msp_pending_totp`) bound to the
+  user and a nonce. The pending cookie is not a session. A wrong password never reveals whether
+  2FA is on (the same bcrypt time is spent either way).
+- `POST /api/v1/login/totp {"code"}` (TF1; reads the pending cookie) — second step: verifies a
+  6-digit TOTP code **or** a one-time recovery code, consumes the pending token, creates the real
+  session and returns `200 {"user":{...}}` + `Set-Cookie`. `401 {"error":"invalid_code"}` on a wrong
+  code (rate-limited, 10/min/IP, audit `user.login_totp_failed`); `401 {"error":"pending_expired"}`
+  when the pending cookie is missing/expired or 2FA was turned off in the window. On success audit
+  `user.login` with `detail.second_factor` = `totp` or `recovery_code`.
 - `POST /api/v1/logout` -> `204`.
-- `GET /api/v1/me` -> `{"user":{...}}`.
+- `GET /api/v1/me` -> `{"user":{...}}`. The user object carries `totp_enabled` (bool) and
+  `recovery_codes_remaining` (int, unused codes left; 0 when 2FA is off). The TOTP secret is never
+  returned.
+
+#### Two-factor enrolment and management (TF1)
+
+TOTP is RFC 6238 (HMAC-SHA1, 6 digits, 30 s step, ±1 step skew), native to the Go stdlib. The
+secret is 20 random bytes base32-encoded, write-only over the API and never logged. Recovery codes
+(10 per user, `xxxxx-xxxxx`) are stored only as a sha256 hash and are single-use.
+
+- `POST /api/v1/me/totp/setup` (session + CSRF, any role) -> `200 {"secret","otpauth_uri"}` —
+  generates a pending (not-yet-enabled) secret and its `otpauth://totp/MSP:<email>?...` URI. Re-running
+  before confirm replaces the pending secret. `409 {"error":"conflict"}` if 2FA is already enabled
+  (disable first).
+- `POST /api/v1/me/totp/confirm {"code"}` -> `200 {"recovery_codes":[...]}` — verifies the code
+  against the pending secret, enables 2FA and returns the 10 recovery codes **once** (plaintext).
+  `400 {"error":"invalid_code"}` on a wrong code. Audit `user.totp_enabled`.
+- `POST /api/v1/me/totp/disable {"code"}` -> `204` — a valid current TOTP code or a recovery code
+  turns 2FA off, clearing the secret and deleting the recovery codes. `400 invalid_code`. Audit
+  `user.totp_disabled`.
+- `POST /api/v1/me/totp/recovery/regenerate {"code"}` -> `200 {"recovery_codes":[...]}` — with a
+  valid current TOTP code, replaces the recovery codes and returns the new set once. `400
+  invalid_code`. Audit `user.totp_recovery_regenerated`.
+- `POST /api/v1/users/{id}/totp/reset` (admin) -> `204` — disables the target user's 2FA so a
+  locked-out user can re-enrol. `404 not_found` for a missing user. Audit `user.totp_reset` with the
+  acting admin as actor and the target as target.
+- All five of the verifying endpoints above (confirm/disable/regenerate and both login steps) share
+  the per-IP login rate limiter (10/min).
 - `POST /api/v1/me/password {"current_password","new_password"}` (any role, own account;
   `new_password` >= 10 chars and different from the current one) -> `204`; the user's other
   sessions are deleted, the calling session stays valid. `400 invalid_request` with a detail
@@ -743,6 +780,8 @@ name the uploader (`null`/`""` when unknown).
 - `GET /api/v1/users` (admin) -> `{"users":[{"id":1,"email":"...","role":"admin","created_at":"...","disabled_at":null,"all_orgs":true,"org_ids":[]}]}`.
   `all_orgs` **(RS2)** is true when the user sees every org; `org_ids` lists the assigned orgs
   and is empty when `all_orgs`. An admin row is always `all_orgs:true` with an empty `org_ids`.
+  Each row also carries `totp_enabled` (TF1), so the Users page can badge who has 2FA on; the
+  secret is never included.
 - `POST /api/v1/users {"email","password","role"}` (admin; password >= 10 chars; role in
   `admin|operator|viewer`) -> `201 {"user":{...}}`; `409 conflict`. Audit `user.created`.
   For an operator or viewer the body may add `"all_orgs":false,"org_ids":[1,2]` to scope the new

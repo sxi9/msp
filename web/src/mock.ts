@@ -12,15 +12,34 @@ interface Reply { status: number; body: unknown }
 const iso = (msAgo: number) => new Date(Date.now() - msAgo).toISOString();
 const randHex = (n: number) => Array.from({ length: n }, () => Math.floor(Math.random() * 16).toString(16)).join('');
 const role = (new URLSearchParams(location.search).get('role') ?? 'admin') as User['role'];
-const me: User = { id: 1, email: 'admin@example.com', role, created_at: iso(86400e3 * 30), disabled_at: null, all_orgs: true, org_ids: [] };
+// Add &totp=1 to the URL to sign in as a user with 2FA on: the login second step
+// appears and the Account page shows the "on" management view (TF1). Without the
+// flag, 2FA is off so the Account set-up flow is demoable.
+const twofaOn = new URLSearchParams(location.search).get('totp') === '1';
+// Unused recovery codes left for `me` (TF1); the /me response reports it.
+let totpRemaining = twofaOn ? 8 : 0;
+const me: User = { id: 1, email: 'admin@example.com', role, created_at: iso(86400e3 * 30), disabled_at: null, all_orgs: true, org_ids: [], totp_enabled: twofaOn };
 const users: User[] = [
   me,
-  // A scoped operator: sees only Acme Dental (org 1), so the Edit-access editor
-  // opens with "All clients" off and that one org checked (RS2).
-  { id: 2, email: 'tech@example.com', role: 'operator', created_at: iso(86400e3 * 9), disabled_at: null, all_orgs: false, org_ids: [1] },
-  // An all-clients viewer, for contrast in the list.
-  { id: 3, email: 'viewer@example.com', role: 'viewer', created_at: iso(86400e3 * 4), disabled_at: null, all_orgs: true, org_ids: [] },
+  // A scoped operator with 2FA on, so the Users page shows the "On" badge and the
+  // admin "Reset 2FA" action (TF1). Sees only Acme Dental (org 1), so the
+  // Edit-access editor opens with "All clients" off and that one org checked (RS2).
+  { id: 2, email: 'tech@example.com', role: 'operator', created_at: iso(86400e3 * 9), disabled_at: null, all_orgs: false, org_ids: [1], totp_enabled: true },
+  // An all-clients viewer, for contrast in the list (2FA off).
+  { id: 3, email: 'viewer@example.com', role: 'viewer', created_at: iso(86400e3 * 4), disabled_at: null, all_orgs: true, org_ids: [], totp_enabled: false },
 ];
+// A fixed 20-byte base32 secret for the mock set-up flow (TF1).
+const mockSecret = 'JBSWY3DPEHPK3PXPJBSWY3DP';
+const mockOtpauth = `otpauth://totp/MSP:${encodeURIComponent(me.email)}?secret=${mockSecret}&issuer=MSP&digits=6&period=30`;
+const genRecoveryCodes = (): string[] => {
+  const a = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+  const grp = () => Array.from({ length: 5 }, () => a[Math.floor(Math.random() * a.length)]).join('');
+  return Array.from({ length: 10 }, () => `${grp()}-${grp()}`);
+};
+// A typed code (TOTP 6-digit or a recovery code) the mock accepts for the login
+// second step and the Account management actions; the real check is server-side.
+const looksLikeFactor = (code: string): boolean => /^\d{6}$/.test(code) || /^[A-Za-z2-7]{5}-[A-Za-z2-7]{5}$/.test(code);
+const isRecovery = (code: string): boolean => /^[A-Za-z2-7]{5}-[A-Za-z2-7]{5}$/.test(code);
 const orgs: Org[] = [
   { id: 1, name: 'Acme Dental', created_at: iso(86400e3 * 20), device_count: 0, online_count: 0, open_alerts: 0 },
   { id: 2, name: 'Zed Legal', created_at: iso(86400e3 * 12), device_count: 0, online_count: 0, open_alerts: 0 },
@@ -205,16 +224,49 @@ function route(method: string, path: string, body: unknown): Reply {
   let x: RegExpExecArray | null;
   if (p === '/api/v1/login') {
     if (typeof b.password !== 'string' || b.password.length < 4) return err(401, 'invalid_credentials');
+    if (me.totp_enabled) return ok({ totp_required: true }); // step 2 follows (TF1)
+    return ok({ user: me });
+  }
+  if (p === '/api/v1/login/totp') {
+    const code = String(b.code ?? '').trim();
+    if (!looksLikeFactor(code)) return err(401, 'invalid_code');
+    if (isRecovery(code) && totpRemaining > 0) totpRemaining--; // single-use
+    log('user.login', 'user', me.id, null, { second_factor: isRecovery(code) ? 'recovery' : 'totp' });
     return ok({ user: me });
   }
   if (p === '/api/v1/logout') return ok(null, 204);
-  if (p === '/api/v1/me') return ok({ user: me });
+  if (p === '/api/v1/me') return ok({ user: { ...me, recovery_codes_remaining: me.totp_enabled ? totpRemaining : 0 } });
   if (p === '/api/v1/me/password') {
     const cur = String(b.current_password ?? ''), nw = String(b.new_password ?? '');
     if (cur.length < 4) return err(400, 'invalid_request', 'current password is incorrect');
     if (nw.length < 10) return err(400, 'invalid_request', 'password must be at least 10 characters');
     log('user.password_changed', 'user', me.id, null, { email: me.email });
     return ok(null, 204);
+  }
+  // --- TF1 two-factor management (self) ---
+  if (p === '/api/v1/me/totp/setup') {
+    if (me.totp_enabled) return err(409, 'conflict', 'two-factor is already enabled');
+    return ok({ secret: mockSecret, otpauth_uri: mockOtpauth });
+  }
+  if (p === '/api/v1/me/totp/confirm') {
+    if (!/^\d{6}$/.test(String(b.code ?? ''))) return err(400, 'invalid_code', 'that code is not correct');
+    me.totp_enabled = true; totpRemaining = 10;
+    log('user.totp_enabled', 'user', me.id, null, { email: me.email });
+    return ok({ recovery_codes: genRecoveryCodes() });
+  }
+  if (p === '/api/v1/me/totp/disable') {
+    if (!me.totp_enabled) return err(400, 'invalid_request', 'two-factor is not enabled');
+    if (!looksLikeFactor(String(b.code ?? '').trim())) return err(400, 'invalid_code');
+    me.totp_enabled = false; totpRemaining = 0;
+    log('user.totp_disabled', 'user', me.id, null, { email: me.email });
+    return ok(null, 204);
+  }
+  if (p === '/api/v1/me/totp/recovery/regenerate') {
+    if (!me.totp_enabled) return err(400, 'invalid_request', 'two-factor is not enabled');
+    if (!looksLikeFactor(String(b.code ?? '').trim())) return err(400, 'invalid_code');
+    totpRemaining = 10;
+    log('user.totp_recovery_regenerated', 'user', me.id, null, { email: me.email });
+    return ok({ recovery_codes: genRecoveryCodes() });
   }
   if (p === '/api/v1/summary') return ok({
     orgs: orgs.length, devices: devices.length, online: devices.filter((d) => d.status === 'online').length,
@@ -486,6 +538,14 @@ function route(method: string, path: string, body: unknown): Reply {
     const r = needRole('admin'); if (r) return r;
     const u = users.find((u) => u.id === Number(x![1])); if (!u) return err(404, 'not_found');
     u.disabled_at = iso(0); log('user.disabled', 'user', u.id, null);
+    return ok(null, 204);
+  }
+  if ((x = m(/^\/api\/v1\/users\/(\d+)\/totp\/reset$/))) {
+    const r = needRole('admin'); if (r) return r;
+    const u = users.find((u) => u.id === Number(x![1])); if (!u) return err(404, 'not_found');
+    u.totp_enabled = false;
+    if (u.id === me.id) totpRemaining = 0;
+    log('user.totp_reset', 'user', u.id, null, { email: u.email });
     return ok(null, 204);
   }
 

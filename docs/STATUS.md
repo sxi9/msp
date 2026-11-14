@@ -147,7 +147,8 @@ Manual test for the `NOT VERIFIED` rows, in order: (1) on a host with Docker, fi
 | Notifications: SMS and escalation policies | 2 | `PLANNED` (NS2) |
 | Script library, automations, policy groups, bulk actions | 2 | `PLANNED` |
 | Reports and exports | 2 | `PLANNED` |
-| Two-factor auth, device token rotation, Postgres, API keys | 2 | `PLANNED` |
+| Two-factor authentication (TOTP + recovery codes + admin reset) | 2 | `WORKING` (TF1; proven by `internal/server/auth_totp_test.go` and `internal/e2e/twofactor_test.go`) |
+| Device token rotation, Postgres, API keys | 2 | `PLANNED` |
 | Android device-owner mode: wipe, app push, kiosk; QR enrollment; location | 2 | `PLANNED` |
 | Uptime checks, SNMP, network discovery | 2 | `PLANNED` |
 | Remote desktop phase A: official client + our relay (RD1) | 3 | `WORKING` / `NOT VERIFIED` (see the RD1 table above) |

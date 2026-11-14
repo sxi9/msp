@@ -2,9 +2,10 @@
 // ?mock=1 in the URL every call is answered in-memory by mock.ts instead.
 import type {
   Alert, AuditEntry, ChannelUpdate, Command, Device, DeviceDetail, EnrollmentToken, Heartbeat,
-  LibraryFile, MaintenanceWindow, NewChannel, NewCommand, NewDeploy, NewPatch, NewRule, NewShell,
-  NewWindow, NotificationDelivery, NotifyChannel, NotifyRule, Org, OrgAssignment, PresetLibrary,
-  RemoteDesktopOpened, RuleUpdate, RustdeskInfo, ShellOpened, Summary, TokenCreated, User,
+  LibraryFile, LoginResult, MaintenanceWindow, NewChannel, NewCommand, NewDeploy, NewPatch, NewRule,
+  NewShell, NewWindow, NotificationDelivery, NotifyChannel, NotifyRule, Org, OrgAssignment,
+  PresetLibrary, RecoveryCodes, RemoteDesktopOpened, RuleUpdate, RustdeskInfo, ShellOpened, Summary,
+  TokenCreated, TotpSetup, User,
 } from './types.ts';
 import { mockRequest } from './mock.ts';
 
@@ -89,11 +90,30 @@ const qs = (params: Record<string, string | number | undefined>): string => {
 };
 
 export const api = {
-  login: (email: string, password: string) => request<{ user: User }>('POST', '/api/v1/login', { email, password }),
+  // Step 1 of login. Without 2FA this sets the session cookie and returns the
+  // user; when the user has 2FA on it returns `{ totp_required: true }` with only
+  // a short-lived pending cookie, and loginTotp must follow (TF1).
+  login: (email: string, password: string) => request<LoginResult>('POST', '/api/v1/login', { email, password }),
+  // Step 2 of login (TF1): a TOTP code or a recovery code against the pending
+  // cookie; on success the real session is created and the user returned.
+  loginTotp: (code: string) => request<{ user: User }>('POST', '/api/v1/login/totp', { code }),
   logout: () => request<void>('POST', '/api/v1/logout'),
   me: () => request<{ user: User }>('GET', '/api/v1/me'),
   changePassword: (current_password: string, new_password: string) =>
     request<void>('POST', '/api/v1/me/password', { current_password, new_password }),
+  // --- TF1 two-factor (self, session auth + CSRF) ---
+  // Generates a pending secret (not yet enabled) and returns it plus the otpauth
+  // URI to render as a QR. 409 if 2FA is already on (disable first).
+  totpSetup: () => request<TotpSetup>('POST', '/api/v1/me/totp/setup'),
+  // Confirms the pending secret with a current code; on success enables 2FA and
+  // returns the 10 recovery codes once. Wrong code -> 400 invalid_code.
+  totpConfirm: (code: string) => request<RecoveryCodes>('POST', '/api/v1/me/totp/confirm', { code }),
+  // Turns 2FA off with a current code or a recovery code; clears the secret.
+  totpDisable: (code: string) => request<void>('POST', '/api/v1/me/totp/disable', { code }),
+  // Replaces the recovery codes (needs a current code) and returns the new set once.
+  totpRegenerate: (code: string) => request<RecoveryCodes>('POST', '/api/v1/me/totp/recovery/regenerate', { code }),
+  // Admin: clears a locked-out user's 2FA so they can re-enrol (audited; TF1).
+  resetUserTotp: (id: number) => request<void>('POST', `/api/v1/users/${id}/totp/reset`),
   summary: () => request<Summary>('GET', '/api/v1/summary'),
   listOrgs: () => request<{ orgs: Org[] }>('GET', '/api/v1/orgs'),
   createOrg: (name: string) => request<{ org: Org }>('POST', '/api/v1/orgs', { name }),

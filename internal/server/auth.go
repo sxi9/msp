@@ -58,6 +58,14 @@ type userResponse struct {
 	User store.User `json:"user"`
 }
 
+// meUser is the user object returned by GET /api/v1/me: the stored user plus the
+// 2FA fields the account page needs (totp_enabled is promoted from store.User;
+// recovery_codes_remaining is computed per request).
+type meUser struct {
+	store.User
+	RecoveryCodesRemaining int `json:"recovery_codes_remaining"`
+}
+
 // handleLogin is POST /api/v1/login.
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	ip := clientIP(r)
@@ -102,6 +110,18 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Two-step login (TF1): when the user has 2FA enabled, the password is only
+	// the first factor. Issue a short-lived pending token (not a session) and
+	// ask the client for a TOTP/recovery code at /api/v1/login/totp. A bad
+	// password above never reaches here, so the response never reveals whether
+	// 2FA is on for a wrong password.
+	if u.TOTPEnabled {
+		pending := s.pendingTOTP.create(u.ID, s.now())
+		http.SetCookie(w, s.pendingCookie(r, pending, pendingTOTPTTL))
+		writeJSON(w, http.StatusOK, map[string]any{"totp_required": true})
+		return
+	}
+
 	plain, err := s.st.CreateSession(ctx, u.ID, ip, sessionTTL)
 	if err != nil {
 		s.log.Error("create session", "err", err)
@@ -143,14 +163,21 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// handleMe is GET /api/v1/me (inside sessionAuth).
+// handleMe is GET /api/v1/me (inside sessionAuth). It carries the 2FA state
+// (totp_enabled and recovery_codes_remaining) the account page renders (TF1).
 func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 	u := userFrom(r.Context())
 	if u == nil {
 		writeError(w, http.StatusUnauthorized, "unauthorized", "")
 		return
 	}
-	writeJSON(w, http.StatusOK, userResponse{User: *u})
+	_, _, remaining, err := s.st.TOTPStatus(r.Context(), u.ID)
+	if err != nil {
+		s.log.Error("me totp status", "err", err)
+		writeError(w, http.StatusInternalServerError, "internal", "")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"user": meUser{User: *u, RecoveryCodesRemaining: remaining}})
 }
 
 // HashPassword is hashPassword for callers outside the package (the CLI's
