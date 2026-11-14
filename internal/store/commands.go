@@ -28,21 +28,24 @@ const (
 
 const commandSelect = `
 SELECT c.id, c.device_id, c.org_id, c.created_by, COALESCE(u.email, ''), c.kind, c.argv_json, c.shell, c.body,
-       c.text, c.timeout_s, c.status, c.created_at, c.sent_at, c.started_at, c.finished_at,
+       c.text, c.action, c.mode, c.reboot, c.patch_ids_json,
+       c.timeout_s, c.status, c.created_at, c.sent_at, c.started_at, c.finished_at,
        c.exit_code, c.stdout, c.stderr, c.truncated, c.error
   FROM commands c LEFT JOIN users u ON u.id = c.created_by`
 
 func scanCommand(row interface{ Scan(...any) error }) (Command, error) {
 	var (
-		c                           Command
-		argvJSON, shell, body, text sql.NullString
-		created                     string
-		sentAt, startedAt, finished sql.NullString
-		exitCode                    sql.NullInt64
-		truncated                   int
+		c                                  Command
+		argvJSON, shell, body, text        sql.NullString
+		action, mode, reboot, patchIDsJSON sql.NullString
+		created                            string
+		sentAt, startedAt, finished        sql.NullString
+		exitCode                           sql.NullInt64
+		truncated                          int
 	)
 	err := row.Scan(&c.ID, &c.DeviceID, &c.OrgID, &c.CreatedBy, &c.CreatedByEmail, &c.Kind, &argvJSON, &shell, &body,
-		&text, &c.TimeoutS, &c.Status, &created, &sentAt, &startedAt, &finished,
+		&text, &action, &mode, &reboot, &patchIDsJSON,
+		&c.TimeoutS, &c.Status, &created, &sentAt, &startedAt, &finished,
 		&exitCode, &c.Stdout, &c.Stderr, &truncated, &c.Error)
 	if err != nil {
 		return Command{}, err
@@ -54,6 +57,12 @@ func scanCommand(row interface{ Scan(...any) error }) (Command, error) {
 	c.Shell = nullString(shell)
 	c.Body = nullString(body)
 	c.Text = nullString(text)
+	c.Action = nullString(action)
+	c.Mode = nullString(mode)
+	c.Reboot = nullString(reboot)
+	if c.IDs, err = decodePatchIDs(patchIDsJSON); err != nil {
+		return Command{}, err
+	}
 	if c.CreatedAt, err = parseTime(created); err != nil {
 		return Command{}, err
 	}
@@ -86,6 +95,24 @@ func decodeArgv(ns sql.NullString) ([]string, error) {
 	return argv, nil
 }
 
+// decodePatchIDs turns patch_ids_json into a slice, or nil when the column is
+// NULL/empty. Unlike decodeArgv it returns nil (not []), so Command.IDs is
+// omitted (omitempty) for every non-patch command and for a patch command that
+// names no ids.
+func decodePatchIDs(ns sql.NullString) ([]string, error) {
+	if !ns.Valid || ns.String == "" {
+		return nil, nil
+	}
+	var ids []string
+	if err := json.Unmarshal([]byte(ns.String), &ids); err != nil {
+		return nil, fmt.Errorf("store: bad patch_ids_json: %w", err)
+	}
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	return ids, nil
+}
+
 func getCommand(ctx context.Context, q querier, id int64) (Command, error) {
 	c, err := scanCommand(q.QueryRowContext(ctx, commandSelect+` WHERE c.id = ?`, id))
 	if errors.Is(err, sql.ErrNoRows) {
@@ -103,6 +130,7 @@ func getCommand(ctx context.Context, q querier, id int64) (Command, error) {
 // for message, status queued.
 func (s *Store) CreateCommand(ctx context.Context, p CreateCommandParams) (Command, error) {
 	var argvJSON, shell, body, bodySHA, text any
+	var action, mode, reboot, patchIDsJSON any
 	switch p.Kind {
 	case protocol.KindExec:
 		argv := p.Argv
@@ -126,19 +154,37 @@ func (s *Store) CreateCommand(ctx context.Context, p CreateCommandParams) (Comma
 		// frame is authoritative), and timeout_s is the max session duration,
 		// clamped on a longer scale than the one-shot kinds below.
 		shell = p.Shell
+	case protocol.KindPatch:
+		// Patch status/install (PM1): action (scan|install), mode (all|security|
+		// ids), reboot (never|if_required) and, for mode ids, the package list
+		// go into their own columns. ClaimQueuedCommands reads them back into the
+		// agent command JSON. timeout_s is clamped on the patch scale below.
+		action, mode, reboot = p.Action, p.Mode, p.Reboot
+		if len(p.IDs) > 0 {
+			b, err := json.Marshal(p.IDs)
+			if err != nil {
+				return Command{}, fmt.Errorf("store: create command: %w", err)
+			}
+			patchIDsJSON = string(b)
+		}
 	case protocol.KindLock, protocol.KindPing:
 	default:
 		return Command{}, fmt.Errorf("store: create command: unknown kind %q", p.Kind)
 	}
 	timeoutS := protocol.ClampTimeout(p.TimeoutS)
-	if p.Kind == protocol.KindShell {
+	switch p.Kind {
+	case protocol.KindShell:
 		timeoutS = protocol.ClampShellTimeout(p.TimeoutS)
+	case protocol.KindPatch:
+		timeoutS = protocol.ClampPatchTimeout(p.TimeoutS)
 	}
 	res, err := s.db.ExecContext(ctx,
 		`INSERT INTO commands (device_id, org_id, created_by, kind, argv_json, shell, body, body_sha256, text,
+		                       action, mode, reboot, patch_ids_json,
 		                       timeout_s, status, created_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?)`,
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?)`,
 		p.DeviceID, p.OrgID, p.CreatedBy, p.Kind, argvJSON, shell, body, bodySHA, text,
+		action, mode, reboot, patchIDsJSON,
 		timeoutS, fmtTime(s.Now()))
 	if err != nil {
 		return Command{}, fmt.Errorf("store: create command: %w", err)
@@ -165,7 +211,7 @@ func (s *Store) ClaimQueuedCommands(ctx context.Context, deviceID int64, max int
 	defer tx.Rollback()
 
 	rows, err := tx.QueryContext(ctx,
-		`SELECT id, kind, argv_json, shell, body, text, timeout_s FROM commands
+		`SELECT id, kind, argv_json, shell, body, text, action, mode, reboot, patch_ids_json, timeout_s FROM commands
 		  WHERE device_id = ? AND status = 'queued' ORDER BY id LIMIT ?`, deviceID, max)
 	if err != nil {
 		return nil, fmt.Errorf("store: claim commands: %w", err)
@@ -173,10 +219,12 @@ func (s *Store) ClaimQueuedCommands(ctx context.Context, deviceID int64, max int
 	cmds := []protocol.Command{}
 	for rows.Next() {
 		var (
-			c                           protocol.Command
-			argvJSON, shell, body, text sql.NullString
+			c                                  protocol.Command
+			argvJSON, shell, body, text        sql.NullString
+			action, mode, reboot, patchIDsJSON sql.NullString
 		)
-		if err := rows.Scan(&c.ID, &c.Kind, &argvJSON, &shell, &body, &text, &c.TimeoutS); err != nil {
+		if err := rows.Scan(&c.ID, &c.Kind, &argvJSON, &shell, &body, &text,
+			&action, &mode, &reboot, &patchIDsJSON, &c.TimeoutS); err != nil {
 			rows.Close()
 			return nil, fmt.Errorf("store: claim commands: %w", err)
 		}
@@ -189,6 +237,15 @@ func (s *Store) ClaimQueuedCommands(ctx context.Context, deviceID int64, max int
 		c.Shell = nullString(shell)
 		c.Body = nullString(body)
 		c.Text = nullString(text)
+		if c.Kind == protocol.KindPatch {
+			c.Action = nullString(action)
+			c.Mode = nullString(mode)
+			c.Reboot = nullString(reboot)
+			if c.IDs, err = decodePatchIDs(patchIDsJSON); err != nil {
+				rows.Close()
+				return nil, err
+			}
+		}
 		cmds = append(cmds, c)
 	}
 	rows.Close()

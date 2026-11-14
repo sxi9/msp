@@ -118,6 +118,8 @@ dispatches on it, the fixtures are round-tripped through it.
 | lock    | yes   | yes     | yes     | no fields; extra audit device.lock_requested        |
 | ping    | yes   | yes     | yes     | no fields                                           |
 | message | yes   | yes     | yes     | text non-empty <= 4096 bytes                        |
+| shell   | yes   | yes     | no      | optional shell; timeout = max session (RS1)         |
+| patch   | yes   | yes     | no      | action/mode/reboot/ids; android -> 400 (PM1)        |
 
 Lock is only ever possible for a device enrolled under this server (it needs a valid device
 token to receive the command) and visible to the technician (404 otherwise), never by free
@@ -292,3 +294,51 @@ with no new transport and no new dependency (stdlib `net/smtp` and `net/http` on
 - **Package rules unchanged**: store queries + server handlers + a dispatcher goroutine + Preact
   views; no new module (stdlib `net/smtp`/`net/http`), and `internal/agent` is untouched. NS2 (SMS
   as another channel `kind`, multi-step escalation) reuses this shape and adds no table.
+
+## Patch status and install (PM1, phase 2)
+
+Per-device pending-OS-updates status and a technician-initiated install, reusing the facts/sync
+channel for the report and the command queue for the install — no new transport, no new dependency.
+
+```
+ agent sync loop ──► PatchCollector.Report ──► SyncRequest.patches ──► handleSync/handleEnroll
+   (every 6 h, first sync,    (apt / WU behind         (section 3.6)     │
+    after a patch command)     an injectable executor)                   ▼
+                                                            store.RecordPatches (devices columns +
+                                                            patches_json; counts never understate)
+ dashboard ──► POST /devices/{id}/patch ──► CreateCommand(kind patch) ──► ClaimQueuedCommands
+   (Updates panel)              (store, migration 0007)          │           (emits action/mode/ids/reboot)
+                                                                 ▼
+                      agent PatchCollector.RunPatch ──► apt/WU install ──► CommandResult (log) ──► done
+```
+
+- **Protocol** (`internal/protocol/types.go`): `PatchReport` + `PatchUpdate` (fixture
+  `sync_patches.json`), the optional `patches` field on the enroll/sync requests, the `patch`
+  command kind with `Action`/`Mode`/`IDs`/`Reboot`, `KindsFor` (desktop only), the `ValidPatch*`
+  helpers and `ClampPatchTimeout` (patch's own 14400 s ceiling). `Validate` bounds the report and
+  the command shape.
+- **Agent** (`internal/agent/patch*.go`): a `patchManager` interface (`Scan`/`Install`) chosen by
+  platform — `aptManager` (linux), a Windows Update manager (windows, **NOT VERIFIED on a real
+  host**), `noneManager` otherwise — over an injectable `commandExecutor` (default `os/exec`), so
+  tests feed a fake apt / captured output and no test touches real packages. `PatchCollector` caches
+  the last report, scans on the cadence, and runs `kind patch` commands. The Run loop attaches
+  `Report` to each sync and dispatches `KindPatch` to `RunPatch`; the collector is behind a
+  `newPatchReporter` seam so unit tests never run apt. Pure parsers (`parseAptSimulate`,
+  `parseWindowsUpdates`) are unit-tested against captured fixtures.
+- **Store** (`internal/store/patches.go`, `commands.go`, migration `0006_device_patches` +
+  `0007_patch_commands`): `RecordPatches` stores the full report and the denormalised
+  `pending_patches`/`security_patches`/`reboot_required`/`patches_checked_at`; the 0007 rebuild adds
+  `patch` to the commands `kind` CHECK and the `action`/`mode`/`reboot`/`patch_ids_json` columns,
+  preserving the `shell_sessions` child across the table rebuild. `CreateCommand`/`ClaimQueuedCommands`
+  persist and emit the patch fields; `store.Command` exposes them (`omitempty`).
+- **Server** (`internal/server/dashboard_patch.go`, `api_agent.go`, `dashboard_devices.go`): the
+  sync/enroll handlers call `RecordPatches` when the request carries `patches`; `handleGetDevice`
+  emits the full report as a sibling `patches` object; `POST /devices/{id}/patch` queues the command
+  through the existing validate → org-visible (RS2) → revoked → platform → shape → ids-subset →
+  online chain, audits `patch.scan_requested`/`patch.install_requested`, and wakes the device. The
+  route self-registers via `dashboardRoutes` (like `dashboard_shell.go`), with `RegisterPatch` for a
+  hand-assembled mux.
+- **Dashboard** (`web/src/lib/patches.ts`, Device/Fleet views): the Updates panel and the fleet
+  Updates column + "has pending security" filter, from pure helpers with a `node --test`.
+- **Proof**: `internal/e2e/patch_test.go` and `scripts/e2e.sh` drive the real Linux agent against a
+  fake `apt-get` on PATH; the Windows Update path is cross-built and parser-unit-tested only.

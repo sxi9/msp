@@ -26,13 +26,14 @@ Phase 1 features (built and verified on Linux; Windows and Android runtime need 
 | Remote lock | Built-in command; only for devices enrolled under your server; operator or admin; audited twice |
 | Remote desktop | Official RustDesk client on the device, your own relay (hbbs/hbbr) next to the server, Connect button on the device page, every connection audited (section 8) |
 | Remote shell | Interactive browser terminal to a desktop device over a server WebSocket relay; operator or admin; opened, connected and closed are audited and the output is transcribed (section 9) |
+| Patching | Pending OS updates per desktop device (apt / Windows Update) with a fleet column, and install all / security / named packages through the command queue; operator or admin; audited (section 10) |
 | Alerts | `offline`, `disk_full` (≥ 90 %), `memory_high` (≥ 95 %), `battery_low` (≤ 15 %, not charging); acknowledge; auto-resolve |
 | Audit | Every login, token, enrollment, command, lock, alert ack and user change, with actor and IP; never pruned |
 | Ops | Docker compose, Caddy TLS example, systemd unit, Windows service, Android foreground service, health endpoint |
 
 Later phases (planned, not built): the branded
-RustDesk client with the relay compiled in (`docs/RUSTDESK-BRANDING.md`), patching,
-software deployment, notifications by email/SMS/Slack, reports, Android device-owner mode
+RustDesk client with the relay compiled in (`docs/RUSTDESK-BRANDING.md`),
+software deployment, notifications by SMS, reports, Android device-owner mode
 (wipe, kiosk, app push), macOS/iOS agents, ticketing. See `docs/FEATURES.md` and
 `docs/STATUS.md`.
 
@@ -350,7 +351,31 @@ goes offline or the agent cannot open a terminal the session fails with the reas
 proxy in front of the server must allow WebSocket upgrades and long-lived connections
 (`docs/OPS.md`).
 
-## 10. Alerts
+## 10. Patching
+
+Desktop devices report their **pending OS updates**, and a technician can install them from the
+device page. Linux uses `apt`, Windows uses Windows Update.
+
+**See what is pending.** The device page's **Updates** panel shows, for a desktop device, when the
+agent last checked, how many updates are pending and how many of those are security updates, a
+**reboot required** badge when a past upgrade needs a reboot, and the list of updates (package,
+current → new version, a *security* chip). The fleet table has an **Updates** column (the pending
+count, emphasised when there are security updates) and a *has pending security updates* filter. The
+agent checks on start, every 6 hours, and right after any patch command, so the panel stays current.
+
+**Install.** With the operator or admin role, the Updates panel offers **Install security** (the
+security subset only), **Install all** (every pending update) and **Rescan** (re-check now). Each
+asks for confirmation and then queues a patch command; the agent applies it and the install log
+appears in the device's command history like any other command's output. Installs default to *no
+reboot* — the device stays flagged *reboot required* until someone reboots it. (Scheduled,
+unattended patching is a later automations feature; PM1 is status plus manual install.)
+
+**Safe and audited.** Install is a role-gated (never viewer), tenant-scoped command: you can only
+patch a device in a client you can see, exactly like running a command, and every scan or install
+writes an audit row (`patch.scan_requested` / `patch.install_requested`) with the mode and the named
+packages. Installing specific packages is restricted to the ones already pending on that device.
+
+## 11. Alerts
 
 Alerts are evaluated by the server on every sync and by a sweeper every 15 s. No separate
 monitoring process.
@@ -393,7 +418,7 @@ webhook URL is unreachable from the server — the server connects **out** to th
 must be allowed (docs/OPS.md section 11). Everything here is scoped to your clients exactly like
 the rest of the dashboard. SMS and multi-step escalation policies are the NS2 follow-ons.
 
-## 11. Users, roles, audit
+## 12. Users, roles, audit
 
 - **Users** (admin only): add technicians with email, password (10+ characters) and role;
   disable them when they leave. Sessions are cookies; the dashboard sends a CSRF header on
@@ -420,7 +445,7 @@ the "Add client" button is hidden for everyone else.
 - **Audit** page: every action with time, actor (user email, `device:<id>` or `system`),
   action name, client and device, and the client IP. Append-only, never pruned.
 
-## 12. Housekeeping
+## 13. Housekeeping
 
 - **Token hygiene**: one token per rollout, short expiry, revoke after use. The server keeps
   only a hash and the first 10 characters.
@@ -434,7 +459,7 @@ the "Add client" button is hidden for everyone else.
 - **Firewall**: agents need outbound HTTPS to the server only. The server needs 443 inbound
   (80 + 443 with Caddy). Restrict the dashboard to your own addresses at the proxy.
 
-## 13. Troubleshooting
+## 14. Troubleshooting
 
 | Symptom | Check |
 |---|---|
@@ -451,7 +476,7 @@ the "Add client" button is hidden for everyone else.
 | Connect does nothing on your PC | Your own RustDesk client is not installed or not registered for `rustdesk://` links; open it and enter the id by hand (Copy button) |
 | Your client says the id is unknown / cannot connect | Your client and the device must use the same ID server, relay and key; check Settings > Network on both; relay ports open on the server host? |
 
-## 14. Where to look in the repository
+## 15. Where to look in the repository
 
 | Path | What |
 |---|---|

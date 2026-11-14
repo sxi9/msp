@@ -540,6 +540,23 @@ func ClampTimeout(n int) int {
 	return n
 }
 
+// ClampPatchTimeout maps 0 to DefaultPatchTimeoutS and clamps everything else
+// into 1..MaxPatchTimeoutS. A patch install can be slow, so kind patch has its
+// own ceiling (MaxPatchTimeoutS) above the one-shot MaxTimeoutS, like kind
+// shell's ClampShellTimeout.
+func ClampPatchTimeout(n int) int {
+	if n == 0 {
+		return DefaultPatchTimeoutS
+	}
+	if n < 1 {
+		return 1
+	}
+	if n > MaxPatchTimeoutS {
+		return MaxPatchTimeoutS
+	}
+	return n
+}
+
 // ValidKind reports whether k is one of the command kinds (RS1 added shell).
 func ValidKind(k string) bool {
 	switch k {

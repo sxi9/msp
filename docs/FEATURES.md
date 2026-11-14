@@ -11,7 +11,7 @@ P1 = first build. P2 = next. P3 = after that.
 - P1 Remote lock (built-in command, managed devices only)
 - P1 Reconnect with backoff, offline tolerant
 - RS1 (built) Interactive remote shell over WebSocket relay (PTY / ConPTY), audited and transcribed; Windows ConPTY cross-builds but is not runtime-verified
-- P2 Patch status and install (Windows Update, apt)
+- PM1 (built) Patch status and install: periodic pending-updates report (apt on Linux, Windows Update on Windows, behind an injectable command executor), and install all / security / named-ids through the command queue with a reboot policy; Windows Update path NOT VERIFIED on a real host
 - P2 Software deployment, file transfer
 - P2 Service and process watchlists, event log forwarding
 - P2 Agent self-update

@@ -108,27 +108,34 @@ type Heartbeat struct {
 // Command is a queued or finished unit of work for one device. Argv is never
 // nil (an empty array for non-exec kinds); Text is set for kind message only.
 type Command struct {
-	ID             int64      `json:"id"`
-	DeviceID       int64      `json:"device_id"`
-	OrgID          int64      `json:"org_id"`
-	CreatedBy      int64      `json:"created_by"`
-	CreatedByEmail string     `json:"created_by_email"`
-	Kind           string     `json:"kind"`
-	Argv           []string   `json:"argv"`
-	Shell          string     `json:"shell"`
-	Body           string     `json:"body"`
-	Text           string     `json:"text"`
-	TimeoutS       int        `json:"timeout_s"`
-	Status         string     `json:"status"`
-	CreatedAt      time.Time  `json:"created_at"`
-	SentAt         *time.Time `json:"sent_at"`
-	StartedAt      *time.Time `json:"started_at"`
-	FinishedAt     *time.Time `json:"finished_at"`
-	ExitCode       *int       `json:"exit_code"`
-	Stdout         string     `json:"stdout"`
-	Stderr         string     `json:"stderr"`
-	Truncated      bool       `json:"truncated"`
-	Error          string     `json:"error"`
+	ID             int64    `json:"id"`
+	DeviceID       int64    `json:"device_id"`
+	OrgID          int64    `json:"org_id"`
+	CreatedBy      int64    `json:"created_by"`
+	CreatedByEmail string   `json:"created_by_email"`
+	Kind           string   `json:"kind"`
+	Argv           []string `json:"argv"`
+	Shell          string   `json:"shell"`
+	Body           string   `json:"body"`
+	Text           string   `json:"text"`
+	// Action/Mode/IDs/Reboot belong to kind patch (PM1); omitempty so they
+	// appear on a patch COMMAND only and every other kind keeps its existing
+	// JSON shape. The web Command type reads them to describe a patch command.
+	Action     string     `json:"action,omitempty"`
+	Mode       string     `json:"mode,omitempty"`
+	IDs        []string   `json:"ids,omitempty"`
+	Reboot     string     `json:"reboot,omitempty"`
+	TimeoutS   int        `json:"timeout_s"`
+	Status     string     `json:"status"`
+	CreatedAt  time.Time  `json:"created_at"`
+	SentAt     *time.Time `json:"sent_at"`
+	StartedAt  *time.Time `json:"started_at"`
+	FinishedAt *time.Time `json:"finished_at"`
+	ExitCode   *int       `json:"exit_code"`
+	Stdout     string     `json:"stdout"`
+	Stderr     string     `json:"stderr"`
+	Truncated  bool       `json:"truncated"`
+	Error      string     `json:"error"`
 }
 
 // Alert is one open or resolved condition on a device.

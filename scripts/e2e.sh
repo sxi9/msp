@@ -142,6 +142,25 @@ step "healthz ok" sh -c "curl -sf $B/healthz | jq -e '.ok==true' >/dev/null"
 mkdir -p "$T/stub"
 printf '#!/bin/sh\ncase "$1" in --get-id) echo %s ;; *) exit 2 ;; esac\n' "$RD_ID" >"$T/stub/rustdesk"
 chmod 0755 "$T/stub/rustdesk"
+# A stub apt-get on the agent's PATH (PM1): the real agent's patch scan/install
+# runs against this fake, so the e2e never touches the container's packages. A
+# simulated dist-upgrade lists two security updates and one regular; any install
+# prints a success log. dist-upgrade is matched first (it also contains "upgrade").
+cat >"$T/stub/apt-get" <<'APT'
+#!/bin/sh
+case "$*" in
+  *dist-upgrade*)
+    echo "Inst libssl3 [3.0.2-0ubuntu1.18] (3.0.2-0ubuntu1.19 Ubuntu:24.04/noble-security [amd64])"
+    echo "Inst openssl [3.0.2-0ubuntu1.18] (3.0.2-0ubuntu1.19 Ubuntu:24.04/noble-security [amd64])"
+    echo "Inst curl [8.5.0-2ubuntu10.1] (8.5.0-2ubuntu10.6 Ubuntu:24.04/noble-updates [amd64])"
+    exit 0 ;;
+  *install*|*upgrade*)
+    echo "fake apt-get: upgraded the requested packages"
+    exit 0 ;;
+esac
+exit 0
+APT
+chmod 0755 "$T/stub/apt-get"
 # Loopback host => plain http is allowed without --insecure-http.
 step "agent enroll" env PATH="$T/stub:$PATH" "$R/bin/msp-agent" enroll --server "$B" --token "$ET" --config "$T/agent.json" --interval 2
 step "agent config holds the relay from the enroll response" \
@@ -228,6 +247,35 @@ step "exec on android is refused (400)" \
 	test "$(http_code -b "$T/jar" -H "$H" -H "$J" -d '{"kind":"exec","argv":["id"]}' "$B/api/v1/devices/$AID/commands")" = 400
 step "lock on android is accepted (201)" \
 	test "$(http_code -b "$T/jar" -H "$H" -H "$J" -d '{"kind":"lock","timeout_s":30}' "$B/api/v1/devices/$AID/commands")" = 201
+
+# --- patch status + install (PM1, against the fake apt-get) ------------------
+wait_patches() {
+	local i p
+	for ((i = 0; i < 20; i++)); do
+		p=$(api "$B/api/v1/devices/$DEV" | jq -r '.device.pending_patches')
+		[ "$p" = 3 ] && return 0
+		sleep 1
+	done
+	echo "pending_patches never reached 3 (last $p)" >&2
+	return 1
+}
+step "device reports pending updates from the fake apt" wait_patches
+step "patch report: 2 security of 3, full report on the device detail" \
+	sh -c "curl -sf -b $T/jar $B/api/v1/devices/$DEV | jq -e '.device.security_patches==2 and .device.pending_patches==3 and ([.patches.updates[]|select(.security==true)]|length==2)' >/dev/null"
+patch_install() {
+	local id
+	id=$(api_post -d '{"action":"install","mode":"security"}' "$B/api/v1/devices/$DEV/patch" | jq -r '.command.id')
+	[ -n "$id" ] && [ "$id" != null ] || { echo "patch queue failed" >&2; return 1; }
+	poll_cmd "$id" done 30 || return 1
+	api "$B/api/v1/commands/$id" | jq -e '.command.status=="done" and .command.kind=="patch" and (.command.stdout|contains("fake apt-get: upgraded"))' >/dev/null
+}
+step "patch install security via fake apt completes done with the log" patch_install
+step "patch.install_requested audited" \
+	sh -c "curl -sf -b $T/jar '$B/api/v1/audit?limit=200' | jq -e '[.entries[]|select(.action==\"patch.install_requested\" and .actor_type==\"user\")]|length>=1' >/dev/null"
+step "patch install with an id not in the pending list is 400" \
+	test "$(http_code -b "$T/jar" -H "$H" -H "$J" -d '{"action":"install","mode":"ids","ids":["openssl","ghost"]}' "$B/api/v1/devices/$DEV/patch")" = 400
+step "patch on android is 400 unsupported_on_platform" \
+	sh -c "curl -s -b $T/jar -H '$H' -H '$J' -d '{\"action\":\"install\",\"mode\":\"security\"}' $B/api/v1/devices/$AID/patch | jq -e '.error==\"unsupported_on_platform\"' >/dev/null"
 
 # --- csrf + role checks -----------------------------------------------------
 step "missing X-Requested-With is 403" \

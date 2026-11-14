@@ -211,7 +211,7 @@ func TestDashboardDevicesShape(t *testing.T) {
 		t.Fatalf("get device: %d %s", resp.StatusCode, body)
 	}
 	detail := dashDecode(t, body)
-	if got := dashKeys(detail); strings.Join(got, ",") != "alerts,commands,device,facts,metrics" {
+	if got := dashKeys(detail); strings.Join(got, ",") != "alerts,commands,device,facts,metrics,patches" {
 		t.Fatalf("detail keys %v", got)
 	}
 	dev := detail["device"].(map[string]any)

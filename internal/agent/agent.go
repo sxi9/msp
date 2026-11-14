@@ -29,6 +29,25 @@ const (
 	enrollRetryDelay = 10 * time.Second
 )
 
+// PatchReporter is the Run loop's patch surface (PM1): the periodic pending-
+// updates report attached to a sync request, and the handler for a kind patch
+// command. *PatchCollector implements it; NewPatchCollector builds the
+// production one over this platform's package manager.
+type PatchReporter interface {
+	// Report returns the patch report to attach to the next sync, or nil when
+	// none is due (between scans).
+	Report(ctx context.Context, now time.Time) *protocol.PatchReport
+	// RunPatch executes a kind patch command (scan or install) and returns its
+	// result, like Execute for the other kinds.
+	RunPatch(ctx context.Context, cmd protocol.Command) protocol.CommandResult
+}
+
+// newPatchReporter builds the PatchReporter the Run loop uses. It is a variable
+// so the agent's own tests can substitute a reporter that never touches the real
+// package manager; production builds NewPatchCollector. The cross-package e2e
+// test instead drives the real collector against a fake apt-get on PATH.
+var newPatchReporter = func() PatchReporter { return NewPatchCollector() }
+
 // sleepFn pauses for d or until ctx is done; it returns false when ctx ended
 // first. Tests replace it to run the loop without real waiting.
 var sleepFn = func(ctx context.Context, d time.Duration) bool {
@@ -122,6 +141,7 @@ func Run(ctx context.Context, cfg Config, version string, log *slog.Logger) erro
 		return err
 	}
 	col := newCollector()
+	patchCol := newPatchReporter()
 
 	waitS := min(protocol.MaxWaitS, cfg.IntervalS-1)
 	if waitS < 0 {
@@ -149,6 +169,12 @@ func Run(ctx context.Context, cfg Config, version string, log *slog.Logger) erro
 		if syncs%factsEvery == 0 {
 			f := col.Facts()
 			req.Facts = &f
+		}
+		// The patch report rides the sync when one is due (the first sync after
+		// start, every patchInterval, and right after a patch command); the
+		// collector returns nil otherwise so the field is omitted (PM1).
+		if pr := patchCol.Report(ctx, time.Now().UTC()); pr != nil {
+			req.PatchReport = pr
 		}
 
 		t0 := time.Now()
@@ -218,7 +244,15 @@ func Run(ctx context.Context, cfg Config, version string, log *slog.Logger) erro
 				}
 				defer func() { <-sem }()
 				log.Info("command received", "id", cmd.ID, "kind", cmd.Kind)
-				res := Execute(ctx, cmd)
+				// A kind patch command (PM1) scans or installs through the patch
+				// collector (so the fresh report rides the next sync); every other
+				// kind runs through Execute.
+				var res protocol.CommandResult
+				if cmd.Kind == protocol.KindPatch {
+					res = patchCol.RunPatch(ctx, cmd)
+				} else {
+					res = Execute(ctx, cmd)
+				}
 				log.Info("command finished", "id", cmd.ID, "exit_code", res.ExitCode, "error", res.Error)
 				postResult(ctx, client, cmd.ID, res, log)
 			}(cmd)

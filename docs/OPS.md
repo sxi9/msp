@@ -442,6 +442,30 @@ delivery is left `failed`. Enqueue is idempotent — one row per `(alert, rule, 
 evaluator running twice never double-sends. Nothing is tunable by env in NS1; the constants
 live in `internal/server/notify_dispatch.go`.
 
+## 12. Patching (PM1)
+
+Desktop devices report their pending OS updates and install them on request (apt on Linux,
+Windows Update on Windows). There is nothing to configure in the environment: the agent scans on
+start, every 6 h and after a patch command, and the dashboard's **Updates** panel installs through
+the normal command queue (`POST /api/v1/devices/{id}/patch`, docs/PROTOCOL.md).
+
+- **Linux (apt).** Installing packages requires root, which the agent already has (it runs as a
+  systemd unit as root). The scan is a simulation (`apt-get -s dist-upgrade`) and changes nothing;
+  installs run `apt-get -y` under `DEBIAN_FRONTEND=noninteractive`. Security detection reads the
+  update's origin suite (`*-security`). A held dpkg/apt lock makes a scan report its error and keep
+  the last good list; it does not fail the agent.
+- **Windows (Windows Update).** The agent drives the Windows Update COM API through PowerShell
+  (`Microsoft.Update.Session`); the service account must be able to search and install updates
+  (LocalSystem can). **This path is written and cross-built but NOT VERIFIED on a real Windows host
+  — treat Windows patching as untested until a live run confirms it.**
+- **Reboots.** Installs default to *no reboot*: a device needing one stays flagged
+  `reboot_required` (Linux reads `/var/run/reboot-required`) for a later manual reboot. An install
+  requested with `reboot: if_required` reboots the device only when that post-install state calls
+  for it.
+- **Scope.** PM1 is status plus a technician-initiated install. Scheduled, unattended auto-patching
+  is a later automations feature, not part of PM1. Install is role-gated (operator or admin),
+  tenant-scoped and audited (`patch.scan_requested` / `patch.install_requested`).
+
 ### 11b. Channels
 
 - **Email**: `config` = `{"host","port","from","to":[...],"starttls":true,"username":"..."}`,

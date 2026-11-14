@@ -77,7 +77,13 @@ func validateEnroll(req protocol.EnrollRequest) error {
 	case len(req.AgentVersion) > maxEnrollField:
 		return errors.New("agent_version too long")
 	}
-	return req.Facts.Validate()
+	if err := req.Facts.Validate(); err != nil {
+		return err
+	}
+	if req.PatchReport != nil {
+		return req.PatchReport.Validate()
+	}
+	return nil
 }
 
 // handleEnroll is POST /api/agent/v1/enroll (no auth, rate limited).
@@ -159,6 +165,14 @@ func (s *Server) handleEnroll(w http.ResponseWriter, r *http.Request) {
 				"previous_status", prev.Status, "ip", ip)
 		}
 	}
+	// Store the pending-updates report when the enroll request carried one (PM1,
+	// desktop only); a failure here must not fail the enrollment, which already
+	// succeeded, so it is logged and the device still gets its token.
+	if req.PatchReport != nil {
+		if err := s.st.RecordPatches(ctx, dev.ID, *req.PatchReport); err != nil {
+			s.log.Error("record patches at enroll", "device", dev.ID, "err", err)
+		}
+	}
 	s.audit(ctx, "device", &dev.ID, &dev.OrgID, "device.enrolled", "device", &dev.ID, ip, detail)
 	s.log.Info("device enrolled", "device", dev.ID, "org", dev.OrgID, "hostname", dev.Hostname, "platform", dev.Platform, "re_enrolled", reEnrolled)
 	writeJSON(w, http.StatusCreated, protocol.EnrollResponse{
@@ -184,6 +198,12 @@ func (s *Server) handleSync(w http.ResponseWriter, r *http.Request, dev store.De
 			return
 		}
 	}
+	if req.PatchReport != nil {
+		if err := req.PatchReport.Validate(); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+			return
+		}
+	}
 	interval := protocol.ClampInterval(req.IntervalS, dev.Platform)
 	req.IntervalS = interval
 	wait := protocol.ClampWait(req.WaitS)
@@ -196,6 +216,16 @@ func (s *Server) handleSync(w http.ResponseWriter, r *http.Request, dev store.De
 		s.log.Error("record sync", "device", dev.ID, "err", err)
 		writeError(w, http.StatusInternalServerError, "internal", "")
 		return
+	}
+	// Store the pending-updates report when the agent sent one (PM1). A sync
+	// without patches leaves the last stored report untouched; the counts and
+	// the full report drive the fleet column and the device page's Updates panel.
+	if req.PatchReport != nil {
+		if err := s.st.RecordPatches(ctx, dev.ID, *req.PatchReport); err != nil {
+			s.log.Error("record patches", "device", dev.ID, "err", err)
+			writeError(w, http.StatusInternalServerError, "internal", "")
+			return
+		}
 	}
 
 	// Subscribe before the first claim so a command queued between the claim

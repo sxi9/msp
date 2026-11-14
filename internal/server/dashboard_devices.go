@@ -110,6 +110,7 @@ func (s *Server) handleGetDevice(w http.ResponseWriter, r *http.Request) {
 		"device":   dev,
 		"facts":    dashJSONObject(dev.FactsJSON),
 		"metrics":  dashJSONObject(dev.LastMetricsJSON),
+		"patches":  dashJSONObject(dev.PatchesJSON),
 		"alerts":   alerts,
 		"commands": cmds,
 	})

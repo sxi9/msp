@@ -232,6 +232,31 @@ The agent leg of the interactive remote-shell relay: a WebSocket upgrade (`101`)
 after it claims a `kind shell` command. Checks and framing are specified in section 6, "Remote
 shell"; the PTY/ConPTY side is in section 5, "shell".
 
+### 3.6 Patch report (`patches`) **(PM1)**
+
+The desktop agent collects a pending-OS-updates report periodically (on the first sync after
+start, every 6 h, and immediately after a patch command) and sends it as an optional top-level
+field beside `facts` on the enroll (3.2) and sync (3.3) requests. Android never sends it (no
+desktop package management), and a sync between scans omits it (the field is `omitempty`).
+
+```json
+"patches":{"checked_at":"2026-11-14T10:00:00Z","manager":"apt","reboot_required":true,
+  "count":2,"security_count":1,"error":"",
+  "updates":[{"name":"openssl","current":"3.0.1","new":"3.0.2","security":true,"source":"Ubuntu:24.04/noble-security"}]}
+```
+
+- `manager` is `apt` (Linux), `wu` (Windows Update) or `none` (no supported package manager — the
+  report still carries `checked_at` and an empty `updates`). `error` non-empty means the scan
+  failed (e.g. apt lock held); the server keeps the stored report's list and the last good counts.
+- `updates` is capped at 500 entries (`protocol.MaxPatchUpdates`), security first then name; each
+  field is length-bounded (name <= 256, versions <= 128, source <= 256). `count`/`security_count`
+  are the agent's own totals and may exceed the (capped) list.
+- Go form `protocol.PatchReport` + `PatchUpdate`; `PatchReport.Validate()` bounds the list and the
+  field lengths (`400 invalid_request` naming the offending index). On a valid report the server
+  calls `RecordPatches`: it stores the full report and refreshes the device's denormalised
+  `pending_patches`, `security_patches`, `reboot_required` and `patches_checked_at` (the counts are
+  derived from the list but never fall below the agent's own totals). Fixture `sync_patches.json`.
+
 ## 4. Status and timing
 
 - Desktop interval 30 s, Android 60 s, `wait_s` 25 (agent HTTP timeout 40 s).
@@ -246,9 +271,11 @@ shell"; the PTY/ConPTY side is in section 5, "shell".
 
 ## 5. Commands **(A1)**
 
-Command kinds are exactly `exec`, `script`, `lock`, `ping`, `message`, `shell` **(RS1, D3)**.
-The Go form is `protocol.Command{ID, Kind, Argv, Shell, Body, Text, TimeoutS, Cols, Rows,
-ShellSession}` (the last three belong to `shell`); `Command.Validate()` checks the shape,
+Command kinds are exactly `exec`, `script`, `lock`, `ping`, `message`, `shell` **(RS1, D3)**,
+`patch` **(PM1)**.
+The Go form is `protocol.Command{ID, Kind, Argv, Shell, Body, Text, Action, Mode, IDs, Reboot,
+TimeoutS, Cols, Rows, ShellSession}` (`Action`/`Mode`/`IDs`/`Reboot` belong to `patch`, the last
+three to `shell`); `Command.Validate()` checks the shape,
 `KindSupportedOn(kind, platform)` checks the platform, `KindsFor(platform)` and
 `ShellsFor(platform)` drive the UI.
 
@@ -260,6 +287,7 @@ ShellSession}` (the last three belong to `shell`); `Command.Validate()` checks t
 | `ping`    | linux, windows, android | none                           | exit 0, stdout `pong`                              |
 | `message` | linux, windows, android | `text` (non-empty, <= 4096 bytes) | shows the text to the logged-in user            |
 | `shell`   | linux, windows          | `shell` (optional), `cols`/`rows` (optional), `timeout_s` = max duration | opens a PTY/ConPTY and relays it over a WebSocket (section 6, "Remote shell") |
+| `patch`   | linux, windows          | `action`, `mode`, `ids`, `reboot`, `timeout_s` (max 14400) | scans or installs OS updates via apt / Windows Update (section 5, "patch", PM1) |
 
 Common rules:
 
@@ -343,6 +371,24 @@ will not open (`exit_code -1`, the platform reason; on an unsupported OS `"shell
 this platform"`). The relay transport, both WebSocket legs and the agent leg endpoint
 `GET /api/agent/v1/shell/{command_id}` are specified under section 6, "Remote shell".
 
+### patch (desktop only, RS1 excepted — PM1)
+
+Applies or scans OS updates. The agent-facing command JSON is
+`{"id":N,"kind":"patch","action":"scan"|"install","mode":"all"|"security"|"ids","ids":["openssl"],"reboot":"never"|"if_required","timeout_s":3600}`:
+
+- `action:"scan"` ignores `mode`/`ids`/`reboot`: the agent re-collects the report immediately (so
+  it rides the next sync, section 3.6) and the command result is a short counts summary.
+- `action:"install"` applies updates — `mode:"all"` every update, `"security"` the security subset,
+  `"ids"` the named packages (which must be a subset of the pending list; unknown ids fail the
+  command with that detail). `reboot:"if_required"` reboots only when the post-install state needs
+  it (Linux `/var/run/reboot-required`), `"never"` leaves `reboot_required` set for a later reboot.
+  The result holds the install log in `stdout` (capped 64 KiB) exactly like exec/script.
+- Defaults: action `install`, mode `security`, reboot `never`. `timeout_s` is 0 (default 3600) or
+  1..14400 — the patch exception to the 1..3600 rule (an install can be slow), clamped with
+  `ClampPatchTimeout`. Linux drives apt (`apt-get -s dist-upgrade` to scan, `apt-get -y ...` to
+  install); Windows drives Windows Update. Both go through an injectable command executor so tests
+  feed a fake apt / captured output; the agent never logs the full package list at info level.
+
 ### Android (A1)
 
 Android supports exactly `lock`, `ping`, `message` and rejects everything else with
@@ -417,19 +463,28 @@ DEVICE = {"id":42,"org_id":1,"org_name":"Acme Dental","device_uid":"f2c1...","ho
           "interval_s":30,"status":"online","enrolled_at":"...","last_seen_at":"...","last_ip":"10.0.0.12",
           "revoked":false,"cpu_pct":12.5,"mem_used_pct":50.8,"disk_used_pct":42.3,"battery_pct":null,
           "battery_charging":null,"uptime_s":86400,"open_alerts":0,"can_run_commands":true,
-          "rustdesk_id":null}
+          "rustdesk_id":null,"pending_patches":2,"security_patches":1,"reboot_required":false,
+          "patches_checked_at":"2026-11-14T10:00:00Z"}
 ```
 
 `rustdesk_id` **(RD1)** is the id the agent last reported in its facts, `null` until then.
+
+`pending_patches`, `security_patches`, `reboot_required` and `patches_checked_at` **(PM1)** are
+denormalised from the device's last patch report (section 3.6) by `RecordPatches`; they are on every
+DEVICE row (so the list carries the fleet "Updates" column) and `patches_checked_at` is `null` until
+the first report. The full report is **not** in DEVICE — it is a sibling `patches` object on the
+device-detail response (below).
 
 `can_run_commands` is true when the device is a desktop platform (`linux|windows`) and not
 revoked: it gates the free-form exec/script console. **(A1)** The built-in kinds lock, ping and
 message are available for every non-revoked device regardless of `can_run_commands`; the
 dashboard decides from `platform` which controls to show.
 
-- `GET /api/v1/devices/{id}` -> `{"device":DEVICE,"facts":{...facts object...},"metrics":{...last metrics object...},"alerts":[open ALERT...],"commands":[last 20 COMMAND without stdout/stderr]}`.
+- `GET /api/v1/devices/{id}` -> `{"device":DEVICE,"facts":{...facts object...},"metrics":{...last metrics object...},"patches":{...patch report...},"alerts":[open ALERT...],"commands":[last 20 COMMAND without stdout/stderr]}`.
   `facts` is the last facts object the agent sent, verbatim, so for an Android device it
   carries the `apps` array (section 3.2a); the dashboard shows it as the "Installed apps" panel.
+  `patches` **(PM1)** is the full `protocol.PatchReport` the agent last sent (section 3.6), `{}` for
+  a device that never reported; the dashboard's "Updates" panel reads it.
 - `GET /api/v1/devices/{id}/heartbeats?limit=120` -> `{"heartbeats":[{"at":"...","cpu_pct":12.5,"mem_used_pct":50.8,"disk_used_pct":42.3,"battery_pct":null,"uptime_s":86400}]}` oldest first.
 - `POST /api/v1/devices/{id}/commands` (admin|operator) with one of
   `{"kind":"exec","argv":["uname","-a"],"timeout_s":60}`,
@@ -446,6 +501,19 @@ dashboard decides from `platform` which controls to show.
   Audit `command.queued` (plus `device.lock_requested` for lock), then `Notify(device)`.
 - `GET /api/v1/devices/{id}/commands?limit=50` -> `{"commands":[COMMAND...]}` newest first.
 - `GET /api/v1/commands/{id}` -> `{"command":COMMAND}`.
+- `POST /api/v1/devices/{id}/patch` (admin|operator; CSRF) **(PM1)** with
+  `{"action":"install","mode":"security","ids":["openssl"],"reboot":"never","timeout_s":3600}`
+  (every field optional: defaults install / security / never / 3600; a scan ignores mode/ids/reboot)
+  -> `201 {"command":COMMAND}` (a queued `kind patch` command).
+  Validation order (mirrors the shell open): device exists (`404`) -> org visible (`404` across
+  orgs, RS2) -> not revoked (`400 unsupported_on_device`) -> desktop platform
+  (`400 unsupported_on_platform`, i.e. android) -> body shape (`400 invalid_request`, via
+  `Command.Validate`) -> for `mode:ids`, every id a package in the device's stored report where the
+  server has one (`400 invalid_request` naming the unknown ids; without a report the agent checks)
+  -> online (`409 device_offline`). Then the command is queued, audited
+  (`patch.scan_requested` / `patch.install_requested` with mode/ids/reboot) and the device's parked
+  sync woken. `403 forbidden` for viewer. The install log comes back on the command result like
+  exec/script, visible in the command history.
 
 ```
 COMMAND = {"id":7,"device_id":42,"org_id":1,"created_by":1,"created_by_email":"admin@example.com",
@@ -456,6 +524,8 @@ COMMAND = {"id":7,"device_id":42,"org_id":1,"created_by":1,"created_by_email":"a
 
 `status` in `queued|sent|done|failed|timeout|lost|cancelled`; nullable times are `null`;
 `argv` is `[]`/`null`-free (an empty array) for non-exec kinds; `text` is `""` except for message.
+A `kind patch` command **(PM1)** additionally carries `action`, `mode`, `reboot` and `ids`
+(`omitempty`, so they appear only on a patch COMMAND); every other kind omits them.
 
 - `POST /api/v1/devices/{id}/revoke` (admin) -> `204` (`token_hash` NULL; audit `device.revoked`).
 - `DELETE /api/v1/devices/{id}` (admin) -> `204` (cascade; audit `device.deleted`).
@@ -688,7 +758,8 @@ enqueue time. The dispatcher retries with backoff and lands `failed` after `maxA
 (actor the user, or `system` with detail `via: cli`), `user.password_change_failed`, `org.created`,
 `token.created`, `token.revoked`, `device.enrolled`, `device.revoked`, `device.deleted`,
 `device.lock_requested` **(A1)**, `device.remote_desktop_opened` **(RD1)**,
-`shell.opened`, `shell.connected`, `shell.closed` **(RS1)**, `command.queued`,
+`shell.opened`, `shell.connected`, `shell.closed` **(RS1)**,
+`patch.scan_requested`, `patch.install_requested` **(PM1)**, `command.queued`,
 `command.finished`, `command.lost`, `alert.ack`,
 `notify.channel_created`, `notify.channel_updated`, `notify.channel_deleted`,
 `notify.channel_tested`, `notify.rule_created`, `notify.rule_updated`, `notify.rule_deleted`,
@@ -762,6 +833,7 @@ Config file JSON `{"server_url","device_token","device_id","interval_s","ca_file
 | `sync_response_rustdesk.json` | SyncResponse      | poll 30, no commands, `rustdesk` host + key (RD1)          |
 | `sync_android_apps.json`      | SyncRequest       | like `sync_android.json` with facts and `facts.apps` (5 entries: 3 user apps incl. a label fallback and an empty version, then 2 system apps) |
 | `command_result.json`         | CommandResult     | exit 0, RFC3339 UTC times                                  |
+| `sync_patches.json`           | SyncRequest       | like `sync_linux.json` with a `patches` report (PM1): apt, reboot required, two updates incl. a security one |
 | `error.json`                  | ErrorResponse     | `invalid_device_token`, no detail                          |
 
 A change to any wire shape must update `types.go`, the fixture, `types_test.go` and this

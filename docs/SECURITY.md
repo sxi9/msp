@@ -316,7 +316,28 @@ credential. What that changes:
   operator manages only their orgs' rows, a global `org_id null` row is visible only to all-orgs
   staff, and a cross-org resource is indistinguishable from one that does not exist.
 
-## 13. Reporting a vulnerability
+## 13. Patch install (PM1)
+
+- **Role-gated and tenant-scoped.** `POST /api/v1/devices/{id}/patch` requires the operator or
+  admin role (never viewer) and the CSRF header, and a technician can patch only a device in an org
+  they can see: a device outside the visible org set is `404 not_found`, resolved before any side
+  effect, exactly like running a command (section 4). A revoked device is `unsupported_on_device`;
+  android (no desktop package management) is `unsupported_on_platform`.
+- **No arbitrary input to the OS.** The command carries only a bounded, validated shape
+  (`action` scan|install, `mode` all|security|ids, `reboot` never|if_required, an `ids` list of
+  package names). The agent runs only fixed package-manager invocations behind an injectable command
+  executor — `apt-get -s dist-upgrade` to scan (a simulation that changes nothing) and `apt-get -y`
+  to install, or the Windows Update COM API — never a shell or an argv from the request.
+- **Named installs are constrained to what is pending.** `mode: ids` may name only packages already
+  in the device's pending list: the server rejects unknown ids (`400 invalid_request` naming them)
+  when it has a stored report, and the agent re-checks against a fresh scan and fails the command
+  otherwise, so a technician cannot use the install path to pull in an arbitrary package.
+- **Audited.** Every scan or install writes an audit row (`patch.scan_requested` /
+  `patch.install_requested`) with the actor, device, mode and named packages; the install log is
+  stored on the command result (capped 64 KiB) like exec/script. The full package list is never
+  written to the agent or server logs at info level.
+
+## 14. Reporting a vulnerability
 
 Report privately to the maintainers of this repository (open a security advisory on the
 repository, or e-mail the address listed in its README once published). Please include the
