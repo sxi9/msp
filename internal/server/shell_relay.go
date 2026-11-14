@@ -326,12 +326,12 @@ func (ss *shellSession) teardown(reason string) {
 	if exitArrived {
 		code = exitCode
 	}
-	if err := ss.srv.st.CompleteShellCommand(bg, ss.cmdID, ss.deviceID, status, code, errText, connectedAt, now); err != nil {
-		// ErrConflict means the command was never claimed (still queued) or was
-		// already completed; the shell_sessions row and audit are still written.
-		ss.srv.log.Error("shell: complete command", "command", ss.cmdID, "err", err)
-	}
 
+	// Write the session row and the audit BEFORE flipping the command status.
+	// The status is the signal every observer (dashboard poll, transcript
+	// endpoint, tests) waits on to mean "finished", so completing the command
+	// last guarantees that once it reads done/failed the shell_sessions row and
+	// the shell.closed audit are already persisted.
 	if err := ss.srv.st.FinishShellSession(bg, ss.cmdID, store.FinishShellParams{
 		ClosedAt:            now,
 		BytesIn:             bytesIn,
@@ -353,6 +353,13 @@ func (ss *shellSession) teardown(reason string) {
 	} else {
 		ss.srv.audit(bg, "system", nil, &ss.orgID, "shell.closed", "command", &ss.cmdID, "", detail)
 	}
+
+	if err := ss.srv.st.CompleteShellCommand(bg, ss.cmdID, ss.deviceID, status, code, errText, connectedAt, now); err != nil {
+		// ErrConflict means the command was never claimed (still queued) or was
+		// already completed; the shell_sessions row and audit are still written.
+		ss.srv.log.Error("shell: complete command", "command", ss.cmdID, "err", err)
+	}
+
 	ss.srv.log.Info("shell closed", "command", ss.cmdID, "device", ss.deviceID, "reason", reason,
 		"bytes_in", bytesIn, "bytes_out", bytesOut)
 }
