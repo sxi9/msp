@@ -122,6 +122,8 @@ export interface Command {
   status: CommandStatus; created_at: string; sent_at: string | null; started_at: string | null;
   finished_at: string | null; exit_code: number | null; stdout: string; stderr: string;
   truncated: boolean; error: string;
+  /** The job that fanned this command out (AUT1); absent for a one-off command. */
+  job_id?: number;
   /** Present only for kind `shell` once the relay session row exists; null before that (RS1 A). */
   shell_session?: ShellSession | null;
   /** Present only for kind `patch` (PM1): what the command asked the agent to do. */
@@ -325,6 +327,102 @@ export interface RuleUpdate {
 }
 /** POST /notify/windows body. `starts_at`/`ends_at` are RFC3339 timestamps. */
 export interface NewWindow { org_id: number | null; starts_at: string; ends_at: string; reason: string }
+
+// --- AUT1 script library, bulk jobs and automations -------------------------
+// Turn one-off commands into a saved, reusable library (scripts), bulk runs of a
+// script across many devices (jobs), and scheduled/triggered automations. All
+// reuse the command queue and are RS2 org-scoped (org_id null = global, usable by
+// any client; creating a global one needs all-orgs). Commands carry an optional
+// `job_id` (see Command.job_id) linking them to the fan-out that created them.
+
+/** A library script runs on one desktop platform or either (schema CHECK). */
+export type ScriptPlatform = 'linux' | 'windows' | 'any';
+/** A library script is an exec (argv) or a script (shell + body); only desktop kinds (no android). */
+export type ScriptKind = 'exec' | 'script';
+
+/**
+ * A saved library script (DB-backed and editable, distinct from the static
+ * console presets). `org_id` null = a global script usable for any client.
+ * `argv` is set for kind exec; `shell`+`body` for kind script.
+ */
+export interface Script {
+  id: number; org_id: number | null; name: string; description: string;
+  platform: ScriptPlatform; kind: ScriptKind; argv: string[]; shell: string; body: string;
+  timeout_s: number; created_at: string; created_by: number | null;
+}
+/** POST /api/v1/scripts and PUT /api/v1/scripts/{id} body. */
+export interface NewScript {
+  org_id: number | null; name: string; description: string;
+  platform: ScriptPlatform; kind: ScriptKind; argv?: string[]; shell?: string; body?: string; timeout_s: number;
+}
+
+/**
+ * A device filter resolved to devices at run time (an automation's target, or a
+ * bulk run's target). Every field optional: an unset axis does not narrow.
+ * `device_ids`, when set, pins an explicit device set and ignores the other axes.
+ * `org_id` must be inside the caller's / automation's visible org set (RS2).
+ */
+export interface TargetSpec {
+  org_id?: number | null; status?: string; platform?: string; hostname_q?: string; device_ids?: number[];
+}
+/** A schedule automation's timing: a simple interval (preferred) or a cron string. */
+export interface ScheduleSpec { every_minutes?: number; cron?: string }
+/** An alert automation's matcher: an alert type and/or a minimum severity (empty = any). */
+export interface AlertTriggerSpec { alert_type?: string; min_severity?: Severity | '' }
+
+/** How a job was started (schema CHECK). */
+export type JobOrigin = 'manual' | 'schedule' | 'trigger';
+
+/** One fan-out of a script across a device set; progress is derived by counting its commands. */
+export interface Job {
+  id: number; org_id: number | null; name: string; origin: JobOrigin;
+  script_id: number | null; created_by: number | null; automation_id: number | null;
+  created_at: string; total: number;
+}
+/** A job's status breakdown (failed folds in every terminal non-success status); the counts sum to total. */
+export interface JobProgress { job_id: number; total: number; queued: number; sent: number; done: number; failed: number }
+/**
+ * One device's slot in a job: a created command (command_id + its current status)
+ * or a skip (skipped true, note why — e.g. android for exec/script). org_name is
+ * echoed for the RS2 label.
+ */
+export interface JobDeviceRow {
+  device_id: number; hostname: string; org_id: number; org_name: string;
+  command_id: number | null; status: CommandStatus | null; skipped: boolean; note: string;
+}
+/** GET /api/v1/jobs/{id} body: the job plus its live progress and per-device rows. */
+export interface JobDetail { job: Job; progress: JobProgress; devices: JobDeviceRow[] }
+/**
+ * POST /api/v1/jobs body (bulk run). Either `script_id` (run a saved script) or an
+ * inline command (`kind`+argv/shell/body+timeout_s). `target` resolves to the
+ * caller's visible devices; android is skipped for exec/script with a note.
+ */
+export interface NewJob {
+  name?: string; script_id?: number;
+  kind?: ScriptKind; argv?: string[]; shell?: string; body?: string; timeout_s?: number;
+  target: TargetSpec;
+}
+/** POST /api/v1/jobs response: the created job id and how many commands it queued. */
+export interface JobCreated { job_id: number; total: number }
+
+/** What starts an automation (schema CHECK). */
+export type AutomationTrigger = 'schedule' | 'alert';
+
+/**
+ * A saved rule that produces jobs: on a schedule, or when a matching alert opens.
+ * The dashboard carries the parsed `target`/`schedule`/`alert` (the server stores
+ * them as JSON). `schedule` is set for trigger schedule, `alert` for trigger alert.
+ */
+export interface Automation {
+  id: number; org_id: number | null; name: string; enabled: boolean; trigger: AutomationTrigger;
+  script_id: number; target: TargetSpec; schedule: ScheduleSpec | null; alert: AlertTriggerSpec | null;
+  last_run_at: string | null; next_run_at: string | null; created_at: string; created_by: number | null;
+}
+/** POST /api/v1/automations and PUT /api/v1/automations/{id} body. */
+export interface NewAutomation {
+  org_id: number | null; name: string; enabled?: boolean; trigger: AutomationTrigger;
+  script_id: number; target: TargetSpec; schedule?: ScheduleSpec | null; alert?: AlertTriggerSpec | null;
+}
 
 export const ROLE_RANK: Record<Role, number> = { viewer: 0, operator: 1, admin: 2 };
 export const canOperate = (u: User | null): boolean => !!u && ROLE_RANK[u.role] >= ROLE_RANK.operator;

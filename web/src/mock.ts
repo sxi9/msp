@@ -2,12 +2,14 @@
 // (add &role=viewer|operator to try a weaker role). Lets the dashboard be
 // developed and demoed without a backend. Nothing here ships to the server.
 import type {
-  AgentManifest, Alert, AuditEntry, Command, Device, EnrollmentToken, EscalationPolicy, LibraryFile,
-  MaintenanceWindow, NewCommand, NewDeploy, NewPatch, NewShell, NotificationDelivery, NotifyChannel,
-  NotifyRule, Org, Preset, User,
+  AgentManifest, Alert, AuditEntry, Automation, Command, Device, EnrollmentToken, EscalationPolicy,
+  Job, JobDeviceRow, LibraryFile, MaintenanceWindow, NewAutomation, NewCommand, NewDeploy, NewJob,
+  NewPatch, NewScript, NewShell, NotificationDelivery, NotifyChannel, NotifyRule, Org, Preset, Script,
+  TargetSpec, User,
 } from './types.ts';
 import type { ShellSocket } from './lib/shell.ts';
 import type { SoftwareHit, SoftwareItem } from './lib/software.ts';
+import { resolveTarget, scriptSkipNote } from './lib/automations.ts';
 
 interface Reply { status: number; body: unknown }
 
@@ -247,6 +249,53 @@ const androidFacts = (d: Device) => ({
     { package: 'com.android.settings', label: 'Settings', version: '14', system: true },
   ],
 });
+// AUT1 script library, bulk jobs and automations. A couple of library scripts
+// (one global, one Acme-scoped), a finished manual job with mixed statuses (done,
+// failed, and an android device skipped), and two automations — a nightly
+// schedule and an alert trigger. The job's per-device rows live in jobDeviceRows;
+// GET /jobs/{id} derives progress from them (reading each live command's status
+// when one exists, else the stored status for the seeded rows).
+const scripts: Script[] = [
+  { id: 80, org_id: null, name: 'Disk usage report', description: 'df -h on every desktop', platform: 'any', kind: 'script', argv: [], shell: 'sh', body: 'df -h\n', timeout_s: 120, created_at: iso(86400e3 * 3), created_by: 1 },
+  { id: 81, org_id: 1, name: 'Flush DNS cache', description: 'Clear the systemd-resolved cache on Acme Linux desktops', platform: 'linux', kind: 'exec', argv: ['resolvectl', 'flush-caches'], shell: '', body: '', timeout_s: 60, created_at: iso(86400e3 * 2), created_by: 1 },
+];
+const jobs: Job[] = [
+  { id: 90, org_id: 1, name: 'Disk usage report', origin: 'manual', script_id: 80, created_by: 1, automation_id: null, created_at: iso(3600e3 * 2), total: 3 },
+];
+const jobDeviceRows: Record<number, JobDeviceRow[]> = {
+  90: [
+    { device_id: 1, hostname: 'ws-reception-01', org_id: 1, org_name: 'Acme Dental', command_id: 501, status: 'done', skipped: false, note: '' },
+    { device_id: 2, hostname: 'ws-xray', org_id: 1, org_name: 'Acme Dental', command_id: 502, status: 'failed', skipped: false, note: '' },
+    { device_id: 4, hostname: 'ws-backoffice', org_id: 1, org_name: 'Acme Dental', command_id: 503, status: 'done', skipped: false, note: '' },
+    { device_id: 3, hostname: 'Pixel 8', org_id: 1, org_name: 'Acme Dental', command_id: null, status: null, skipped: true, note: 'script commands are not supported on android' },
+  ],
+};
+const automations: Automation[] = [
+  // A nightly schedule: runs the global disk-usage script on Acme's Linux desktops.
+  { id: 95, org_id: 1, name: 'Nightly disk report', enabled: true, trigger: 'schedule', script_id: 80, target: { org_id: 1, platform: 'linux' }, schedule: { every_minutes: 1440 }, alert: null, last_run_at: iso(3600e3 * 10), next_run_at: iso(-3600e3 * 14), created_at: iso(86400e3 * 3), created_by: 1 },
+  // An alert trigger: flush DNS when a medium+ disk_full alert opens on the device.
+  { id: 96, org_id: 1, name: 'Flush DNS on disk pressure', enabled: false, trigger: 'alert', script_id: 81, target: {}, schedule: null, alert: { alert_type: 'disk_full', min_severity: 'medium' }, last_run_at: null, next_run_at: null, created_at: iso(86400e3 * 2), created_by: 1 },
+];
+// The non-skipped device rows of a job, with each live command's current status
+// folded in (a seeded row with no live command keeps its stored status).
+const jobRowsLive = (jobId: number): JobDeviceRow[] =>
+  (jobDeviceRows[jobId] ?? []).map((r) => {
+    if (r.skipped || r.command_id === null) return r;
+    const c = commands.find((c) => c.id === r.command_id);
+    return c ? { ...r, status: c.status } : r;
+  });
+const jobProgressOf = (jobId: number, total: number) => {
+  const p = { job_id: jobId, total, queued: 0, sent: 0, done: 0, failed: 0 };
+  for (const r of jobRowsLive(jobId)) {
+    if (r.skipped) continue;
+    if (r.status === 'queued') p.queued++;
+    else if (r.status === 'sent') p.sent++;
+    else if (r.status === 'done') p.done++;
+    else p.failed++; // failed, timeout, lost, cancelled
+  }
+  return p;
+};
+
 let nextId = 100;
 const log = (action: string, target_type: string, target_id: number | null, org_id: number | null, detail: Record<string, unknown> = {}) =>
   audit.unshift({ id: nextId++, at: iso(0), actor_type: 'user', actor_id: me.id, actor_label: me.email, org_id, action, target_type, target_id, ip: '127.0.0.1', detail });
@@ -856,7 +905,196 @@ function route(method: string, path: string, body: unknown): Reply {
     return ok({ deliveries: deliveries.filter((d) => (!st || d.status === st) && (!orgId || d.org_id === orgId)).slice(0, limit) });
   }
 
+  // --- AUT1 script library, bulk jobs and automations ---
+  // The mock does not model per-user org scoping (like the rest of it); the real
+  // server restricts every list to the caller's visible orgs and 404s a cross-org
+  // id (RS2). A global (org_id null) script/automation needs all-orgs: the mock
+  // enforces that for a non-admin role so &role=operator shows the gate.
+  const needGlobalAdmin = (orgId: number | null): Reply | null =>
+    orgId === null && me.role !== 'admin' ? err(403, 'forbidden', 'a global script needs access to all clients') : null;
+  const scriptOrgId = (v: unknown): number | null => (v === null || v === undefined ? null : Number(v));
+  if (p === '/api/v1/scripts' && method === 'GET') return ok({ scripts });
+  if (p === '/api/v1/scripts' && method === 'POST') {
+    const rr = needRole('operator'); if (rr) return rr;
+    const org_id = scriptOrgId(b.org_id);
+    const g = needGlobalAdmin(org_id); if (g) return g;
+    const v = validateScriptBody(b); if ('status' in v) return v;
+    const sc: Script = { id: nextId++, org_id, ...v.fields, created_at: iso(0), created_by: me.id };
+    scripts.unshift(sc); log('script.created', 'script', sc.id, org_id, { name: sc.name, kind: sc.kind });
+    return ok({ script: sc }, 201);
+  }
+  if ((x = m(/^\/api\/v1\/scripts\/(\d+)$/))) {
+    const sc = scripts.find((s) => s.id === Number(x![1])); if (!sc) return err(404, 'not_found');
+    if (method === 'DELETE') {
+      const rr = needRole('operator'); if (rr) return rr;
+      const g = needGlobalAdmin(sc.org_id); if (g) return g;
+      scripts.splice(scripts.indexOf(sc), 1); log('script.deleted', 'script', sc.id, sc.org_id, { name: sc.name });
+      return ok(null, 204);
+    }
+    const rr = needRole('operator'); if (rr) return rr;
+    const org_id = scriptOrgId(b.org_id);
+    const g = needGlobalAdmin(org_id) ?? needGlobalAdmin(sc.org_id); if (g) return g;
+    const v = validateScriptBody(b); if ('status' in v) return v;
+    sc.org_id = org_id; sc.name = v.fields.name; sc.description = v.fields.description;
+    sc.platform = v.fields.platform; sc.kind = v.fields.kind; sc.argv = v.fields.argv;
+    sc.shell = v.fields.shell; sc.body = v.fields.body; sc.timeout_s = v.fields.timeout_s;
+    log('script.updated', 'script', sc.id, org_id, { name: sc.name, kind: sc.kind });
+    return ok({ script: sc });
+  }
+  if (p === '/api/v1/jobs' && method === 'GET') {
+    const orgId = Number(q.get('org_id') ?? 0);
+    return ok({ jobs: jobs.filter((j) => !orgId || j.org_id === orgId) });
+  }
+  if (p === '/api/v1/jobs' && method === 'POST') {
+    const rr = needRole('operator'); if (rr) return rr;
+    const nj = (b ?? {}) as unknown as NewJob;
+    const target = (nj.target ?? {}) as TargetSpec;
+    let gate: { platform: string; kind: string };
+    let fields: { kind: Command['kind']; argv: string[]; shell: string; body: string; timeout_s: number };
+    let scriptId: number | null = null;
+    let name = (nj.name ?? '').trim();
+    if (nj.script_id) {
+      const sc = scripts.find((s) => s.id === Number(nj.script_id)); if (!sc) return err(404, 'not_found');
+      gate = { platform: sc.platform, kind: sc.kind };
+      fields = { kind: sc.kind, argv: sc.argv, shell: sc.shell, body: sc.body, timeout_s: sc.timeout_s };
+      scriptId = sc.id; if (!name) name = sc.name;
+    } else {
+      const kind = nj.kind === 'script' ? 'script' : 'exec';
+      if (kind === 'exec' && !(Array.isArray(nj.argv) && nj.argv.length)) return err(400, 'invalid_request', 'exec needs argv with at least one element');
+      if (kind === 'script' && !String(nj.body ?? '').trim()) return err(400, 'invalid_request', 'script needs a non-empty body');
+      gate = { platform: 'any', kind };
+      fields = { kind, argv: nj.argv ?? [], shell: nj.shell ?? '', body: nj.body ?? '', timeout_s: Number(nj.timeout_s) || 300 };
+      if (!name) name = 'Bulk run';
+    }
+    const matched = resolveTarget(devices, target);
+    if (matched.length === 0) return err(400, 'invalid_request', 'the target matches no visible device');
+    const jobId = nextId++;
+    const rows: JobDeviceRow[] = [];
+    let total = 0;
+    for (const d of matched) {
+      const base = { device_id: d.id, hostname: d.hostname, org_id: d.org_id, org_name: d.org_name };
+      if (d.revoked) { rows.push({ ...base, command_id: null, status: null, skipped: true, note: 'device is revoked' }); continue; }
+      const note = scriptSkipNote(gate, d);
+      if (note) { rows.push({ ...base, command_id: null, status: null, skipped: true, note }); continue; }
+      const c: Command = {
+        id: nextId++, device_id: d.id, org_id: d.org_id, created_by: me.id, created_by_email: me.email, kind: fields.kind,
+        argv: fields.argv, shell: fields.shell, body: fields.body, text: '', timeout_s: fields.timeout_s, status: 'queued',
+        created_at: iso(0), sent_at: null, started_at: null, finished_at: null, exit_code: null, stdout: '', stderr: '', truncated: false, error: '',
+        job_id: jobId,
+      };
+      commands.unshift(c); total++;
+      rows.push({ ...base, command_id: c.id, status: 'queued', skipped: false, note: '' });
+      if (d.status !== 'offline') setTimeout(() => finish(c), 400); // offline stays queued
+    }
+    const org_id = target.org_id ?? null;
+    const job: Job = { id: jobId, org_id, name, origin: 'manual', script_id: scriptId, created_by: me.id, automation_id: null, created_at: iso(0), total };
+    jobs.unshift(job); jobDeviceRows[jobId] = rows;
+    log('job.created', 'job', jobId, org_id, { origin: 'manual', script_id: scriptId, total });
+    return ok({ job_id: jobId, total }, 201);
+  }
+  if ((x = m(/^\/api\/v1\/jobs\/(\d+)$/))) {
+    const job = jobs.find((j) => j.id === Number(x![1])); if (!job) return err(404, 'not_found');
+    return ok({ job, progress: jobProgressOf(job.id, job.total), devices: jobRowsLive(job.id) });
+  }
+  if (p === '/api/v1/automations' && method === 'GET') return ok({ automations });
+  if (p === '/api/v1/automations' && method === 'POST') {
+    const rr = needRole('operator'); if (rr) return rr;
+    const org_id = scriptOrgId(b.org_id);
+    const g = needGlobalAdmin(org_id); if (g) return g;
+    const v = validateAutomationBody(b); if ('status' in v) return v;
+    const a: Automation = {
+      id: nextId++, org_id, name: v.fields.name, enabled: v.fields.enabled, trigger: v.fields.trigger,
+      script_id: v.fields.script_id, target: v.fields.target, schedule: v.fields.schedule, alert: v.fields.alert,
+      last_run_at: null, next_run_at: v.fields.trigger === 'schedule' && v.fields.schedule?.every_minutes ? iso(-v.fields.schedule.every_minutes * 60e3) : null,
+      created_at: iso(0), created_by: me.id,
+    };
+    automations.unshift(a); log('automation.created', 'automation', a.id, org_id, { name: a.name, trigger: a.trigger });
+    return ok({ automation: a }, 201);
+  }
+  if ((x = m(/^\/api\/v1\/automations\/(\d+)\/enable$/))) {
+    const rr = needRole('operator'); if (rr) return rr;
+    const a = automations.find((a) => a.id === Number(x![1])); if (!a) return err(404, 'not_found');
+    const g = needGlobalAdmin(a.org_id); if (g) return g;
+    a.enabled = b.enabled !== false;
+    log('automation.enabled_changed', 'automation', a.id, a.org_id, { enabled: a.enabled });
+    return ok(null, 204);
+  }
+  if ((x = m(/^\/api\/v1\/automations\/(\d+)$/))) {
+    const a = automations.find((a) => a.id === Number(x![1])); if (!a) return err(404, 'not_found');
+    if (method === 'DELETE') {
+      const rr = needRole('operator'); if (rr) return rr;
+      const g = needGlobalAdmin(a.org_id); if (g) return g;
+      automations.splice(automations.indexOf(a), 1); log('automation.deleted', 'automation', a.id, a.org_id, { name: a.name });
+      return ok(null, 204);
+    }
+    const rr = needRole('operator'); if (rr) return rr;
+    const org_id = scriptOrgId(b.org_id);
+    const g = needGlobalAdmin(org_id) ?? needGlobalAdmin(a.org_id); if (g) return g;
+    const v = validateAutomationBody(b); if ('status' in v) return v;
+    a.org_id = org_id; a.name = v.fields.name; a.enabled = v.fields.enabled; a.trigger = v.fields.trigger;
+    a.script_id = v.fields.script_id; a.target = v.fields.target; a.schedule = v.fields.schedule; a.alert = v.fields.alert;
+    a.next_run_at = v.fields.trigger === 'schedule' && v.fields.schedule?.every_minutes ? iso(-v.fields.schedule.every_minutes * 60e3) : null;
+    log('automation.updated', 'automation', a.id, org_id, { name: a.name, trigger: a.trigger });
+    return ok({ automation: a });
+  }
+
   return err(404, 'not_found');
+}
+
+// Validate a script create/update body (mock): the shape the server checks.
+// Returns the normalised fields or an error Reply.
+type ScriptFields = Omit<Script, 'id' | 'org_id' | 'created_at' | 'created_by'>;
+function validateScriptBody(b: Record<string, unknown>): { fields: ScriptFields } | Reply {
+  const nb = b as unknown as NewScript;
+  const name = String(nb.name ?? '').trim();
+  const platform = String(nb.platform ?? '');
+  const kind = String(nb.kind ?? '');
+  if (!name) return err(400, 'invalid_request', 'a name is required');
+  if (!['linux', 'windows', 'any'].includes(platform)) return err(400, 'invalid_request', 'platform must be linux, windows or any');
+  if (!['exec', 'script'].includes(kind)) return err(400, 'invalid_request', 'kind must be exec or script');
+  const argv = Array.isArray(nb.argv) ? nb.argv.map(String).filter((a) => a.trim() !== '') : [];
+  const shell = String(nb.shell ?? '');
+  const body = String(nb.body ?? '');
+  if (kind === 'exec' && argv.length === 0) return err(400, 'invalid_request', 'an exec script needs a non-empty argv');
+  if (kind === 'script' && !shell.trim()) return err(400, 'invalid_request', 'a script needs a shell');
+  if (kind === 'script' && !body.trim()) return err(400, 'invalid_request', 'a script needs a non-empty body');
+  const timeout = Number(nb.timeout_s);
+  if (!Number.isInteger(timeout) || timeout < 1 || timeout > 86400) return err(400, 'invalid_request', 'timeout_s must be 1..86400');
+  return { fields: {
+    name, description: String(nb.description ?? ''), platform: platform as Script['platform'], kind: kind as Script['kind'],
+    argv: kind === 'exec' ? argv : [], shell: kind === 'script' ? shell : '', body: kind === 'script' ? body : '', timeout_s: timeout,
+  } };
+}
+
+// Validate an automation create/update body (mock).
+type AutomationFields = Pick<Automation, 'name' | 'enabled' | 'trigger' | 'script_id' | 'target' | 'schedule' | 'alert'>;
+function validateAutomationBody(b: Record<string, unknown>): { fields: AutomationFields } | Reply {
+  const nb = b as unknown as NewAutomation;
+  const name = String(nb.name ?? '').trim();
+  const trigger = String(nb.trigger ?? '');
+  if (!name) return err(400, 'invalid_request', 'a name is required');
+  if (!['schedule', 'alert'].includes(trigger)) return err(400, 'invalid_request', 'trigger must be schedule or alert');
+  const scriptId = Number(nb.script_id ?? 0);
+  if (!scriptId || !scripts.some((s) => s.id === scriptId)) return err(404, 'not_found');
+  const target = (nb.target ?? {}) as TargetSpec;
+  let schedule: Automation['schedule'] = null;
+  let alert: Automation['alert'] = null;
+  if (trigger === 'schedule') {
+    const every = Number(nb.schedule?.every_minutes ?? 0);
+    const cron = String(nb.schedule?.cron ?? '').trim();
+    if (!cron) {
+      if (!Number.isInteger(every) || every < 1 || every > 40320) return err(400, 'invalid_request', 'schedule every_minutes must be 1..40320');
+      schedule = { every_minutes: every };
+    } else {
+      schedule = { cron };
+    }
+  } else {
+    const at = String(nb.alert?.alert_type ?? '').trim();
+    const sev = String(nb.alert?.min_severity ?? '').trim();
+    if (sev && !['low', 'medium', 'high'].includes(sev)) return err(400, 'invalid_request', 'min_severity must be low, medium or high');
+    alert = { ...(at ? { alert_type: at } : {}), ...(sev ? { min_severity: sev } : {}) } as NonNullable<Automation['alert']>;
+  }
+  return { fields: { name, enabled: nb.enabled !== false, trigger: trigger as Automation['trigger'], script_id: scriptId, target, schedule, alert } };
 }
 
 export function mockRequest(method: string, path: string, body?: unknown): Promise<Reply> {

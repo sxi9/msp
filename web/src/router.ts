@@ -5,12 +5,13 @@ import { useEffect, useState } from 'preact/hooks';
 export type Route =
   | { name: 'login' } | { name: 'fleet' } | { name: 'device'; id: number } | { name: 'alerts' }
   | { name: 'orgs' } | { name: 'org'; id: number } | { name: 'notify' } | { name: 'deliveries' }
-  | { name: 'software' } | { name: 'audit' } | { name: 'users' } | { name: 'account' } | { name: 'notfound' };
+  | { name: 'software' } | { name: 'scripts' } | { name: 'jobs' } | { name: 'job'; id: number }
+  | { name: 'automations' } | { name: 'audit' } | { name: 'users' } | { name: 'account' } | { name: 'notfound' };
 
 export function parseRoute(hash: string): Route {
   const parts = hash.replace(/^#\/?/, '').split('/').filter(Boolean);
   const id = parts.length === 2 ? Number(parts[1]) : NaN;
-  const withId = (name: 'device' | 'org'): Route => (Number.isInteger(id) && id > 0 ? { name, id } : { name: 'notfound' });
+  const withId = (name: 'device' | 'org' | 'job'): Route => (Number.isInteger(id) && id > 0 ? { name, id } : { name: 'notfound' });
   switch (parts[0]) {
     case undefined: return { name: 'fleet' };
     case 'login': return { name: 'login' };
@@ -20,6 +21,9 @@ export function parseRoute(hash: string): Route {
     case 'notify': return { name: 'notify' };
     case 'deliveries': return { name: 'deliveries' };
     case 'software': return { name: 'software' };
+    case 'scripts': return { name: 'scripts' };
+    case 'jobs': return parts.length === 1 ? { name: 'jobs' } : withId('job');
+    case 'automations': return { name: 'automations' };
     case 'audit': return { name: 'audit' };
     case 'users': return { name: 'users' };
     case 'account': return { name: 'account' };

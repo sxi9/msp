@@ -1,11 +1,12 @@
 // fetch() wrapper for /api/v1 plus one typed function per endpoint. With
 // ?mock=1 in the URL every call is answered in-memory by mock.ts instead.
 import type {
-  AgentRelease, Alert, AuditEntry, ChannelUpdate, Command, Device, DeviceDetail, EnrollmentToken,
-  EscalationPolicy, Heartbeat, LibraryFile, LoginResult, MaintenanceWindow, NewChannel, NewCommand,
-  NewDeploy, NewPatch, NewPolicy, NewRule, NewShell, NewWindow, NotificationDelivery, NotifyChannel,
-  NotifyRule, Org, OrgAssignment, PolicyUpdate, PresetLibrary, RecoveryCodes, RemoteDesktopOpened,
-  RuleUpdate, RustdeskInfo, ShellOpened, SoftwareSearchResult, Summary, TokenCreated, TotpSetup, User,
+  AgentRelease, Alert, AuditEntry, Automation, ChannelUpdate, Command, Device, DeviceDetail,
+  EnrollmentToken, EscalationPolicy, Heartbeat, Job, JobCreated, JobDetail, LibraryFile, LoginResult,
+  MaintenanceWindow, NewAutomation, NewChannel, NewCommand, NewDeploy, NewJob, NewPatch, NewPolicy,
+  NewRule, NewScript, NewShell, NewWindow, NotificationDelivery, NotifyChannel, NotifyRule, Org,
+  OrgAssignment, PolicyUpdate, PresetLibrary, RecoveryCodes, RemoteDesktopOpened, RuleUpdate,
+  RustdeskInfo, Script, ShellOpened, SoftwareSearchResult, Summary, TokenCreated, TotpSetup, User,
 } from './types.ts';
 import { mockRequest } from './mock.ts';
 
@@ -204,4 +205,27 @@ export const api = {
   // Delivery log (read-only, org-scoped; viewer may read).
   listDeliveries: (f: { status?: string; org_id?: number; limit?: number } = {}) =>
     request<{ deliveries: NotificationDelivery[] }>('GET', `/api/v1/notify/deliveries${qs(f)}`),
+
+  // --- AUT1 script library, bulk jobs and automations (/api/v1) ---
+  // Scripts: the editable library. GET needs viewer; writes need operator (admin
+  // for a global org_id-null script). Org-scoped (RS2): a scoped caller sees only
+  // their clients' scripts, never a global one.
+  listScripts: () => request<{ scripts: Script[] }>('GET', '/api/v1/scripts'),
+  createScript: (s: NewScript) => request<{ script: Script }>('POST', '/api/v1/scripts', s),
+  updateScript: (id: number, s: NewScript) => request<{ script: Script }>('PUT', `/api/v1/scripts/${id}`, s),
+  deleteScript: (id: number) => request<void>('DELETE', `/api/v1/scripts/${id}`),
+  // Jobs: a bulk run (manual) and the fan-outs automations produce. createJob
+  // resolves the target to the caller's visible devices, queues one command each
+  // (skipping android for exec/script), and returns the new job id + count.
+  listJobs: (orgId?: number) => request<{ jobs: Job[] }>('GET', `/api/v1/jobs${qs({ org_id: orgId })}`),
+  getJob: (id: number) => request<JobDetail>('GET', `/api/v1/jobs/${id}`),
+  createJob: (j: NewJob) => request<JobCreated>('POST', '/api/v1/jobs', j),
+  // Automations: scheduled (every N minutes) or alert-triggered rules that run a
+  // script on a target. enable/disable is a dedicated action so a toggle needs no
+  // full edit.
+  listAutomations: () => request<{ automations: Automation[] }>('GET', '/api/v1/automations'),
+  createAutomation: (a: NewAutomation) => request<{ automation: Automation }>('POST', '/api/v1/automations', a),
+  updateAutomation: (id: number, a: NewAutomation) => request<{ automation: Automation }>('PUT', `/api/v1/automations/${id}`, a),
+  setAutomationEnabled: (id: number, enabled: boolean) => request<void>('POST', `/api/v1/automations/${id}/enable`, { enabled }),
+  deleteAutomation: (id: number) => request<void>('DELETE', `/api/v1/automations/${id}`),
 };

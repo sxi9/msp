@@ -182,6 +182,17 @@ pre.out { margin: 0; padding: 8px 64px 8px 10px; background: var(--code-bg); bor
    the page on desktop; on phones the grid stacks (see the media query). */
 .log-scroll { overflow-x: auto; border-radius: 8px; }
 
+/* AUT1 scripts, jobs and automations. The editors reuse .card/.form-row/.grid;
+   the few tweaks: full-width description/body inputs, a monospace body textarea,
+   and the device picker / per-device rows reuse .apps-scroll. The job progress
+   bar reuses .bar/.bar-fill (bar-crit tints it on failures) at a wider size. */
+.aut-form .full { width: 100%; box-sizing: border-box; margin: 8px 0; }
+.aut-form textarea { width: 100%; box-sizing: border-box; margin: 8px 0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.aut-form h3 { margin: 12px 0 2px; }
+.aut-form label { display: inline-flex; gap: 4px; align-items: center; }
+.aut-form input[type="number"] { width: 90px; }
+.aut-form .muted code { overflow-wrap: anywhere; }
+
 .login { width: 320px; display: flex; flex-direction: column; gap: 12px; }
 .login label { flex-direction: column; align-items: stretch; gap: 4px; }
 
