@@ -2,9 +2,9 @@
 // ?mock=1 in the URL every call is answered in-memory by mock.ts instead.
 import type {
   Alert, AuditEntry, ChannelUpdate, Command, Device, DeviceDetail, EnrollmentToken, Heartbeat,
-  MaintenanceWindow, NewChannel, NewCommand, NewPatch, NewRule, NewShell, NewWindow, NotificationDelivery,
-  NotifyChannel, NotifyRule, Org, OrgAssignment, PresetLibrary, RemoteDesktopOpened, RuleUpdate,
-  RustdeskInfo, ShellOpened, Summary, TokenCreated, User,
+  LibraryFile, MaintenanceWindow, NewChannel, NewCommand, NewDeploy, NewPatch, NewRule, NewShell,
+  NewWindow, NotificationDelivery, NotifyChannel, NotifyRule, Org, OrgAssignment, PresetLibrary,
+  RemoteDesktopOpened, RuleUpdate, RustdeskInfo, ShellOpened, Summary, TokenCreated, User,
 } from './types.ts';
 import { mockRequest } from './mock.ts';
 
@@ -54,6 +54,33 @@ export async function request<T>(method: string, path: string, body?: unknown): 
   throw new ApiError(status, data?.error ?? `http_${status}`, data?.detail ?? '');
 }
 
+// uploadFile posts a multipart/form-data upload to POST /api/v1/files. Under
+// ?mock=1 there is no server, so it routes a synthetic JSON body through the mock
+// instead; the real path uses FormData so a large artifact streams up. Errors map
+// to ApiError exactly like request().
+async function uploadFile(file: File, name: string, orgId: number | null): Promise<{ file: LibraryFile }> {
+  if (MOCK) {
+    return request<{ file: LibraryFile }>('POST', '/api/v1/files', { name, org_id: orgId, size: file.size, filename: file.name });
+  }
+  const fd = new FormData();
+  fd.append('name', name);
+  if (orgId !== null) fd.append('org_id', String(orgId));
+  fd.append('file', file);
+  let res: Response;
+  try {
+    res = await fetch('/api/v1/files', { method: 'POST', headers: { 'X-Requested-With': 'msp' }, credentials: 'same-origin', body: fd });
+  } catch {
+    throw new ApiError(0, 'network_error', 'server unreachable');
+  }
+  let data: { error?: string; detail?: string; file?: LibraryFile } | null = null;
+  try { data = await res.json(); } catch {
+    if (res.ok) throw new ApiError(res.status, 'bad_response', 'expected a JSON body');
+  }
+  if (res.ok) return data as { file: LibraryFile };
+  if (res.status === 401) location.hash = '#/login';
+  throw new ApiError(res.status, data?.error ?? `http_${res.status}`, data?.detail ?? '');
+}
+
 const qs = (params: Record<string, string | number | undefined>): string => {
   const p = new URLSearchParams();
   for (const [k, v] of Object.entries(params)) if (v !== undefined && v !== '' && v !== 0) p.set(k, String(v));
@@ -92,6 +119,16 @@ export const api = {
   // install log lands on the command result like exec/script.
   queuePatch: (deviceId: number, p: NewPatch) => request<{ command: Command }>('POST', `/api/v1/devices/${deviceId}/patch`, p),
   presets: () => request<PresetLibrary>('GET', '/api/v1/presets'),
+  // Software deployment (SD1). The file library is staff-only metadata; the bytes
+  // are streamed to agents, never to the browser.
+  listFiles: (orgId?: number) => request<{ files: LibraryFile[] }>('GET', `/api/v1/files${qs({ org_id: orgId })}`),
+  getFile: (id: number) => request<{ file: LibraryFile }>('GET', `/api/v1/files/${id}`),
+  deleteFile: (id: number) => request<void>('DELETE', `/api/v1/files/${id}`),
+  // Multipart upload (not JSON); orgId null uploads a global file (needs all-orgs).
+  uploadFile: (file: File, name: string, orgId: number | null) => uploadFile(file, name, orgId),
+  // Queues a deploy command (SD1): push a library file (optionally run it) or
+  // install a package. 201 with the queued command; the log lands on the result.
+  deploy: (deviceId: number, d: NewDeploy) => request<{ command: Command }>('POST', `/api/v1/devices/${deviceId}/deploy`, d),
   rustdesk: () => request<RustdeskInfo>('GET', '/api/v1/rustdesk'),
   remoteDesktop: (deviceId: number) => request<RemoteDesktopOpened>('POST', `/api/v1/devices/${deviceId}/remote-desktop`),
   revokeDevice: (id: number) => request<void>('POST', `/api/v1/devices/${id}/revoke`),

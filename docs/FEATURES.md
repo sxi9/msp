@@ -12,7 +12,7 @@ P1 = first build. P2 = next. P3 = after that.
 - P1 Reconnect with backoff, offline tolerant
 - RS1 (built) Interactive remote shell over WebSocket relay (PTY / ConPTY), audited and transcribed; Windows ConPTY cross-builds but is not runtime-verified
 - PM1 (built) Patch status and install: periodic pending-updates report (apt on Linux, Windows Update on Windows, behind an injectable command executor), and install all / security / named-ids through the command queue with a reboot policy; Windows Update path NOT VERIFIED on a real host
-- P2 Software deployment, file transfer
+- SD1 (built) Software deployment and file transfer: a server-side file library, push a file to a desktop device and optionally run it, or install a named package (apt on Linux), hash-verified on the device and audited; Windows installer path NOT VERIFIED on a real host
 - P2 Service and process watchlists, event log forwarding
 - P2 Agent self-update
 - RD1 (built) Remote desktop phase A: official RustDesk client installed by the installer (`--with-rustdesk`), pointed at our relay by `msp-agent rustdesk setup`, id reported in facts

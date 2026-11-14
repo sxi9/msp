@@ -337,7 +337,39 @@ credential. What that changes:
   stored on the command result (capped 64 KiB) like exec/script. The full package list is never
   written to the agent or server logs at info level.
 
-## 14. Reporting a vulnerability
+## 14. Software deployment (SD1)
+
+- **Hash verification before use.** A file deploy carries the library file's SHA-256, filled by
+  the server from the stored row (the caller never supplies it). The agent downloads the file over
+  its authenticated channel, verifies the response `Content-Length` and recomputes the SHA-256
+  **before** it writes or runs anything; a mismatch fails the command without writing the
+  destination. The download is also bounded to the declared length, so a server that streamed more
+  than it promised cannot fill the disk.
+- **Destination path validation.** `dest` must be absolute, cleaned and free of any `..` component
+  (on either separator); the server rejects a bad path with `400 invalid_request` and the agent
+  re-validates. The agent additionally resolves the parent directory and refuses to write through a
+  symlinked parent, then writes to a temp file in that directory and renames it into place (0755 if
+  it will run, else 0644), so a deploy cannot be redirected outside its intended directory.
+- **Org-scoped file access by agents.** The agent-download endpoint
+  (`GET /api/agent/v1/files/{id}`) serves a file only when its `org_id` is the device's own org or
+  NULL (a global artifact); any other org is `404 not_found`, indistinguishable from a missing file,
+  so a device token cannot enumerate or pull another client's library (section 4). Staff file access
+  is org-scoped exactly like the rest of RS2.
+- **Size caps.** Uploads are capped at `MSP_MAX_FILE_MB` (default 200), enforced while streaming
+  (the upload is exempt from the generic 512 KiB dashboard body limit but applies its own limit),
+  over it `413 file_too_large`.
+- **Package names are argv, never a shell.** A package deploy's name is a single token of
+  `[A-Za-z0-9._+-]` (≤ 256 bytes), validated on the server and again on the agent, and passed as one
+  argv element to `apt-get -y install` behind the same injectable executor PM1 uses — never through a
+  shell, so it cannot split, inject or add flags. Run arguments for a file deploy are likewise argv
+  (each ≤ 4096 bytes), only accepted with `run`, executed with no shell.
+- **Role-gated, tenant-scoped and audited.** Upload, delete and deploy require the operator or admin
+  role (never viewer) and the CSRF header; deploy to a device outside the visible org set, or for a
+  file not visible for that device, is `404 not_found` resolved before any side effect. Every upload,
+  delete and deploy writes an audit row (`file.uploaded`, `file.deleted`, `deploy.requested`); the
+  download/install/run log is stored on the command result (capped 64 KiB) like exec/script.
+
+## 15. Reporting a vulnerability
 
 Report privately to the maintainers of this repository (open a security advisory on the
 repository, or e-mail the address listed in its README once published). Please include the

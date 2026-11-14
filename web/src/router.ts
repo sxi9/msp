@@ -5,7 +5,7 @@ import { useEffect, useState } from 'preact/hooks';
 export type Route =
   | { name: 'login' } | { name: 'fleet' } | { name: 'device'; id: number } | { name: 'alerts' }
   | { name: 'orgs' } | { name: 'org'; id: number } | { name: 'notify' } | { name: 'deliveries' }
-  | { name: 'audit' } | { name: 'users' } | { name: 'account' } | { name: 'notfound' };
+  | { name: 'software' } | { name: 'audit' } | { name: 'users' } | { name: 'account' } | { name: 'notfound' };
 
 export function parseRoute(hash: string): Route {
   const parts = hash.replace(/^#\/?/, '').split('/').filter(Boolean);
@@ -19,6 +19,7 @@ export function parseRoute(hash: string): Route {
     case 'orgs': return parts.length === 1 ? { name: 'orgs' } : withId('org');
     case 'notify': return { name: 'notify' };
     case 'deliveries': return { name: 'deliveries' };
+    case 'software': return { name: 'software' };
     case 'audit': return { name: 'audit' };
     case 'users': return { name: 'users' };
     case 'account': return { name: 'account' };

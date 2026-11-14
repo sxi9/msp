@@ -4,7 +4,9 @@
 export type Role = 'admin' | 'operator' | 'viewer';
 export type Platform = 'linux' | 'windows' | 'android';
 export type DeviceStatus = 'online' | 'offline' | 'pending';
-export type CommandKind = 'exec' | 'script' | 'lock' | 'ping' | 'message' | 'shell' | 'patch';
+export type CommandKind = 'exec' | 'script' | 'lock' | 'ping' | 'message' | 'shell' | 'patch' | 'deploy';
+/** Deploy command source (SD1): push a library file, or install an OS package. */
+export type DeploySource = 'file' | 'package';
 export type CommandStatus = 'queued' | 'sent' | 'done' | 'failed' | 'timeout' | 'lost' | 'cancelled';
 /** Patch command fields (PM1). */
 export type PatchAction = 'scan' | 'install';
@@ -82,6 +84,35 @@ export interface Command {
   shell_session?: ShellSession | null;
   /** Present only for kind `patch` (PM1): what the command asked the agent to do. */
   action?: PatchAction; mode?: PatchMode; ids?: string[]; reboot?: PatchReboot;
+  /**
+   * Present only for kind `deploy` (SD1): the source (file/package) and its fields.
+   * A file deploy carries file_id + sha256 + dest and optionally run + run_args; a
+   * package deploy carries the package name.
+   */
+  source?: DeploySource; file_id?: number; sha256?: string; dest?: string; run?: boolean;
+  run_args?: string[]; package?: string;
+}
+
+/**
+ * A server-side file-library entry (SD1): the metadata the staff endpoints return;
+ * the bytes live on the server and are streamed to agents, never to the browser.
+ * `org_id` is null for a global artifact usable by any client, or a client org id.
+ */
+export interface LibraryFile {
+  id: number; org_id: number | null; name: string; size: number; sha256: string;
+  content_type: string; created_at: string; created_by: number | null; created_by_email: string;
+}
+
+/**
+ * Body of POST /api/v1/devices/{id}/deploy (SD1). A file deploy sets file_id, dest
+ * and optionally run + run_args; a package deploy sets package. The server fills
+ * the sha256 from the library file, so the client never sends it.
+ */
+export interface NewDeploy {
+  source: DeploySource;
+  file_id?: number; dest?: string; run?: boolean; run_args?: string[];
+  package?: string;
+  timeout_s?: number;
 }
 
 /** The shell_session block a kind `shell` command carries (RS1 A). */

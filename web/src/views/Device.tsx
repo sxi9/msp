@@ -8,7 +8,8 @@ import { loadPresets, presetFill, presetsFor } from '../lib/presets.ts';
 import { notReportedHint, remoteDesktopError, technicianHint } from '../lib/rustdesk.ts';
 import { appsOf, appsSummary, filterApps, type InstalledApp } from '../lib/apps.ts';
 import { patchReportOf, rebootBadge, sortUpdates, summarisePatches } from '../lib/patches.ts';
-import { COMMAND_DONE, canOperate, isAdmin, type Command, type Device as DeviceT, type NewCommand, type NewPatch, type Preset, type RemoteDesktopOpened, type RustdeskInfo, type User } from '../types.ts';
+import { destError, fileSize, filesForDevice, validPackageName } from '../lib/deploy.ts';
+import { COMMAND_DONE, canOperate, isAdmin, type Command, type Device as DeviceT, type NewCommand, type NewDeploy, type NewPatch, type Preset, type RemoteDesktopOpened, type RustdeskInfo, type User } from '../types.ts';
 import { RemoteShell, ShellResult } from './Shell.tsx';
 import { StatusDot } from '../components/StatusDot.tsx';
 import { Sparkline } from '../components/Sparkline.tsx';
@@ -51,6 +52,9 @@ export function describe(c: Command): string {
       const mode = c.mode ?? 'security';
       return `patch: install ${mode}${mode === 'ids' && c.ids?.length ? ` (${c.ids.join(', ')})` : ''}`;
     }
+    case 'deploy':
+      if (c.source === 'package') return `deploy: install ${c.package ?? ''}`;
+      return `deploy: ${c.dest ?? 'file'}${c.run ? ' (run)' : ''}`;
     default: return '';
   }
 }
@@ -87,6 +91,19 @@ export function Device({ id, user }: { id: number; user: User }) {
       setError(t.startsWith('device_offline') ? 'The device is offline; it must be online to patch.'
         : t.startsWith('unsupported_on_platform') ? 'Patching is not supported on this platform.'
         : t.startsWith('unsupported_on_device') ? 'This device is revoked; re-enroll it first.' : t);
+    }
+  };
+  const queueDeploy = async (dreq: NewDeploy) => {
+    setError('');
+    try {
+      setTracked((await api.deploy(id, dreq)).command);
+      history.reload();
+    } catch (e) {
+      const t = errorText(e);
+      setError(t.startsWith('device_offline') ? 'The device is offline; it must be online to deploy.'
+        : t.startsWith('unsupported_on_platform') ? 'Software deployment is not supported on this platform.'
+        : t.startsWith('unsupported_on_device') ? 'This device is revoked; re-enroll it first.'
+        : t.startsWith('not_found') ? 'That file is not available for this device.' : t);
     }
   };
   // 1 s polling of the command just queued until it reaches a final status.
@@ -170,6 +187,7 @@ export function Device({ id, user }: { id: number; user: User }) {
       {builtins && <BuiltIns device={d} onQueue={queue} />}
       <RemoteShell device={d} user={user} />
       {!d.revoked && <RemoteDesktop device={d} operator={operator} />}
+      {operator && d.can_run_commands && <Deploy device={d} onDeploy={queueDeploy} />}
       {operator && d.can_run_commands && <Console device={d} onQueue={queue} />}
       {error && <p class="error">{error}</p>}
       {tracked && <CommandResult command={tracked} />}
@@ -419,6 +437,93 @@ function Console({ device, onQueue }: { device: DeviceT; onQueue: (c: NewCommand
       <textarea rows={mode === 'exec' ? 4 : 8} spellcheck={false} placeholder={mode === 'exec' ? 'One argument per line, e.g.\nuname\n-a' : `Script body for ${shell}`} value={text} onInput={(e) => setText(e.currentTarget.value)} />
       {mode === 'exec' && <p class="muted">argv: <code>{argv.length ? argvPreview(argv) : '(empty)'}</code> — no shell is involved; metacharacters are literal.</p>}
       <button type="submit" class="btn btn-primary" disabled={busy || !valid}>Run on {device.hostname}</button>
+    </form>
+  );
+}
+
+/**
+ * Software deployment (SD1): push a library file to the device (optionally running
+ * it) or install a named OS package. The file picker is the library filtered to
+ * this device's org plus global files; the dest is validated client-side (absolute,
+ * no ".."). The queued command's result (download + install log) shows below.
+ */
+function Deploy({ device, onDeploy }: { device: DeviceT; onDeploy: (d: NewDeploy) => Promise<void> }) {
+  const lib = usePoll(() => api.listFiles().then((r) => r.files), [device.org_id], 0);
+  const files = filesForDevice(lib.data ?? [], device.org_id);
+  const [mode, setMode] = useState<'file' | 'package'>('file');
+  const [fileId, setFileId] = useState(0);
+  const [dest, setDest] = useState('');
+  const [run, setRun] = useState(false);
+  const [argsText, setArgsText] = useState('');
+  const [pkg, setPkg] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  const destMsg = dest.trim() ? destError(dest.trim()) : null;
+  const runArgs = argsText.split('\n').map((s) => s.trim()).filter(Boolean);
+  const pkgTrim = pkg.trim();
+  const fileValid = fileId > 0 && dest.trim() !== '' && destMsg === null;
+  const pkgValid = validPackageName(pkgTrim);
+  const valid = mode === 'file' ? fileValid : pkgValid;
+
+  const submit = async (e: Event) => {
+    e.preventDefault();
+    setBusy(true);
+    try {
+      if (mode === 'file') {
+        await onDeploy({ source: 'file', file_id: fileId, dest: dest.trim(), run, run_args: run ? runArgs : [] });
+      } else {
+        await onDeploy({ source: 'package', package: pkgTrim });
+      }
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <form class="card deploy" onSubmit={submit}>
+      <div class="form-row">
+        <h2>Deploy software</h2>
+        <div class="tabs">
+          <button type="button" class={mode === 'file' ? 'active' : ''} onClick={() => setMode('file')}>Deploy a file</button>
+          <button type="button" class={mode === 'package' ? 'active' : ''} onClick={() => setMode('package')}>Install a package</button>
+        </div>
+      </div>
+      {mode === 'file' ? (
+        <>
+          {lib.error && <p class="error">{lib.error}</p>}
+          {!lib.data ? <p class="muted">Loading the library…</p> : files.length === 0 ? (
+            <p class="muted">No files for this client yet. Upload one on the <a href="#/software">Software</a> page.</p>
+          ) : (
+            <>
+              <div class="form-row">
+                <label>File
+                  <select value={fileId} onChange={(e) => setFileId(Number(e.currentTarget.value))}>
+                    <option value={0}>Choose a file…</option>
+                    {files.map((f) => (
+                      <option key={f.id} value={f.id}>{f.name} ({fileSize(f.size)}{f.org_id === null ? ', all clients' : ''})</option>
+                    ))}
+                  </select>
+                </label>
+                <input type="text" class="deploy-dest" placeholder="Destination path, e.g. /opt/acme/installer.sh" value={dest} onInput={(e) => setDest(e.currentTarget.value)} />
+                <label><input type="checkbox" checked={run} onChange={(e) => setRun(e.currentTarget.checked)} /> Run after copying</label>
+              </div>
+              {run && <textarea rows={3} spellcheck={false} placeholder={'Run arguments, one per line (optional), e.g.\n--silent'} value={argsText} onInput={(e) => setArgsText(e.currentTarget.value)} />}
+              {dest.trim() && destMsg && <p class="warn">{destMsg}</p>}
+              <button type="submit" class="btn btn-primary" disabled={busy || !valid}>Deploy to {device.hostname}</button>
+              <p class="muted">The agent downloads the file, verifies its SHA-256, writes it to the destination{run ? ' and runs it with the arguments above (argv, no shell)' : ''}. A hash mismatch fails without writing.</p>
+            </>
+          )}
+        </>
+      ) : (
+        <>
+          <div class="form-row">
+            <input type="text" class="deploy-dest" placeholder="Package name, e.g. htop" value={pkg} onInput={(e) => setPkg(e.currentTarget.value)} />
+            <button type="submit" class="btn btn-primary" disabled={busy || !valid}>Install on {device.hostname}</button>
+          </div>
+          {pkgTrim && !pkgValid && <p class="warn">A package name is 1–256 characters of letters, digits and <code>. _ + -</code></p>}
+          <p class="muted">Installs the package through the host's package manager ({device.platform === 'windows' ? 'the Windows installer path' : 'apt'}); the install log appears in the command history below.</p>
+        </>
+      )}
     </form>
   );
 }

@@ -2,14 +2,15 @@
 // (add &role=viewer|operator to try a weaker role). Lets the dashboard be
 // developed and demoed without a backend. Nothing here ships to the server.
 import type {
-  Alert, AuditEntry, Command, Device, EnrollmentToken, MaintenanceWindow, NewCommand, NewPatch, NewShell,
-  NotificationDelivery, NotifyChannel, NotifyRule, Org, Preset, User,
+  Alert, AuditEntry, Command, Device, EnrollmentToken, LibraryFile, MaintenanceWindow, NewCommand,
+  NewDeploy, NewPatch, NewShell, NotificationDelivery, NotifyChannel, NotifyRule, Org, Preset, User,
 } from './types.ts';
 import type { ShellSocket } from './lib/shell.ts';
 
 interface Reply { status: number; body: unknown }
 
 const iso = (msAgo: number) => new Date(Date.now() - msAgo).toISOString();
+const randHex = (n: number) => Array.from({ length: n }, () => Math.floor(Math.random() * 16).toString(16)).join('');
 const role = (new URLSearchParams(location.search).get('role') ?? 'admin') as User['role'];
 const me: User = { id: 1, email: 'admin@example.com', role, created_at: iso(86400e3 * 30), disabled_at: null, all_orgs: true, org_ids: [] };
 const users: User[] = [
@@ -64,6 +65,12 @@ const patchReports: Record<number, Record<string, unknown>> = {
   },
   5: { checked_at: iso(7200e3), manager: 'wu', reboot_required: true, count: 0, security_count: 0, error: '', updates: [] },
 };
+// The server file library (SD1): one global artifact usable by any client and one
+// scoped to Acme Dental (org 1). The Deploy dialog filters these to a device's org.
+const files: LibraryFile[] = [
+  { id: 70, org_id: null, name: 'bootstrap.sh', size: 4096, sha256: 'a1b2c3d4e5f60718293a4b5c6d7e8f90112233445566778899aabbccddeeff00', content_type: 'text/x-shellscript', created_at: iso(86400e3 * 2), created_by: 1, created_by_email: 'admin@example.com' },
+  { id: 71, org_id: 1, name: 'acme-vpn-setup.exe', size: 18874368, sha256: '00ffeeddccbbaa998877665544332211009f8e7d6c5b4a39281706f5e4d3c2b1', content_type: 'application/vnd.microsoft.portable-executable', created_at: iso(86400e3), created_by: 1, created_by_email: 'admin@example.com' },
+];
 const alerts: Alert[] = [
   { id: 1, org_id: 1, org_name: 'Acme Dental', device_id: 4, hostname: 'ws-backoffice', type: 'offline', severity: 'high', message: 'no sync for 6h', opened_at: iso(3600e3 * 5), resolved_at: null, acknowledged_by: null, acknowledged_at: null },
   { id: 2, org_id: 1, org_name: 'Acme Dental', device_id: 2, hostname: 'ws-xray', type: 'disk_full', severity: 'medium', message: 'disk 93% used', opened_at: iso(3600e3), resolved_at: null, acknowledged_by: null, acknowledged_at: null },
@@ -176,6 +183,13 @@ function finish(c: Command) {
       c.stdout = c.action === 'scan'
         ? 'Reading package lists...\nscan complete: 3 updates pending (1 security)\n'
         : `Reading package lists...\nThe following packages will be upgraded:\n  ${c.mode === 'security' ? 'openssl' : 'openssl curl vim'}\nSetting up openssl ...\ndone.\n`;
+    }
+    else if (c.kind === 'deploy') {
+      c.status = 'done'; c.exit_code = 0;
+      c.stdout = c.source === 'package'
+        ? `Reading package lists...\nInstalling ${c.package} ...\nSetting up ${c.package} ...\ndone.\n`
+        : `Downloaded ${c.dest} (sha256 ${c.sha256?.slice(0, 12)}… verified)\n` +
+          (c.run ? `Running ${c.dest} ${(c.run_args ?? []).join(' ')}\nmarker written\n` : 'wrote file (not run)\n');
     }
     else { c.status = 'done'; c.exit_code = 0; c.stdout = out[c.kind]; }
     c.finished_at = iso(-700);
@@ -359,6 +373,65 @@ function route(method: string, path: string, body: unknown): Reply {
       action === 'scan' ? { action, hostname: d.hostname } : { action, mode, reboot, hostname: d.hostname, ...(mode === 'ids' ? { ids } : {}) });
     setTimeout(() => finish(c), 400); // the device is online here (checked above)
     return ok({ command: c }, 201);
+  }
+  if ((x = m(/^\/api\/v1\/devices\/(\d+)\/deploy$/))) {
+    const r = needRole('operator'); if (r) return r;
+    const d = devices.find((d) => d.id === Number(x![1])); if (!d) return err(404, 'not_found');
+    if (d.revoked) return err(400, 'unsupported_on_device');
+    if (d.platform === 'android') return err(400, 'unsupported_on_platform');
+    const nd = b as unknown as NewDeploy;
+    if (nd.source !== 'file' && nd.source !== 'package') return err(400, 'invalid_request', 'deploy source must be one of file, package');
+    let fileId = 0, sha = '';
+    if (nd.source === 'file') {
+      const f = files.find((f) => f.id === Number(nd.file_id));
+      if (!f) return err(404, 'not_found');
+      if (f.org_id !== null && f.org_id !== d.org_id) return err(404, 'not_found');
+      const dest = String(nd.dest ?? '');
+      const absolute = dest.startsWith('/') || dest.startsWith('\\\\') || /^[A-Za-z]:[/\\]/.test(dest);
+      if (!dest || dest.replace(/\\/g, '/').split('/').includes('..') || !absolute) return err(400, 'invalid_request', 'deploy dest must be an absolute path with no ".."');
+      fileId = f.id; sha = f.sha256;
+    } else if (!/^[A-Za-z0-9._+-]{1,256}$/.test(String(nd.package ?? ''))) {
+      return err(400, 'invalid_request', 'deploy package must be 1..256 characters of [A-Za-z0-9._+-]');
+    }
+    if (d.status !== 'online') return err(409, 'device_offline');
+    const c: Command = {
+      id: nextId++, device_id: d.id, org_id: d.org_id, created_by: me.id, created_by_email: me.email, kind: 'deploy',
+      argv: [], shell: '', body: '', text: '', timeout_s: nd.timeout_s || 3600, status: 'queued',
+      created_at: iso(0), sent_at: null, started_at: null, finished_at: null, exit_code: null, stdout: '', stderr: '', truncated: false, error: '',
+      source: nd.source, file_id: fileId || undefined, sha256: sha || undefined, dest: nd.dest, run: nd.run, run_args: nd.run_args, package: nd.package,
+    };
+    commands.unshift(c);
+    log('deploy.requested', 'command', c.id, d.org_id, nd.source === 'file'
+      ? { source: 'file', file_id: fileId, dest: nd.dest, run: !!nd.run }
+      : { source: 'package', package: nd.package });
+    setTimeout(() => finish(c), 400); // the device is online here (checked above)
+    return ok({ command: c }, 201);
+  }
+  if (p === '/api/v1/files' && method === 'GET') {
+    const orgId = Number(q.get('org_id') ?? 0);
+    return ok({ files: files.filter((f) => !orgId || f.org_id === orgId) });
+  }
+  if (p === '/api/v1/files' && method === 'POST') {
+    const r = needRole('operator'); if (r) return r;
+    const name = String(b.name ?? '').trim();
+    if (!name) return err(400, 'invalid_request', 'a file name is required');
+    const org_id = b.org_id === null || b.org_id === undefined ? null : Number(b.org_id);
+    const size = Number(b.size ?? 0);
+    const f: LibraryFile = {
+      id: nextId++, org_id, name, size: Number.isFinite(size) && size >= 0 ? size : 0,
+      sha256: randHex(64), content_type: '', created_at: iso(0), created_by: me.id, created_by_email: me.email,
+    };
+    files.unshift(f); log('file.uploaded', 'file', f.id, org_id, { name: f.name, size: f.size });
+    return ok({ file: f }, 201);
+  }
+  if ((x = m(/^\/api\/v1\/files\/(\d+)$/))) {
+    const f = files.find((f) => f.id === Number(x![1])); if (!f) return err(404, 'not_found');
+    if (method === 'DELETE') {
+      const r = needRole('operator'); if (r) return r;
+      files.splice(files.indexOf(f), 1); log('file.deleted', 'file', f.id, f.org_id, { name: f.name });
+      return ok(null, 204);
+    }
+    return ok({ file: f });
   }
   if (p === '/api/v1/presets') return ok({ presets, source: 'builtin', path: '' });
   if ((x = m(/^\/api\/v1\/commands\/(\d+)$/))) {

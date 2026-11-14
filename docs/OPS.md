@@ -21,6 +21,8 @@ environment variables; a flag of the same name overrides the variable.
 | `MSP_PRESETS`        | `""`         | JSON command preset library for the device console; unset = the builtin set (see below) |
 | `MSP_RUSTDESK_HOST`  | `""`         | self-hosted RustDesk ID/relay server as clients reach it, bare hostname or IP (section 10) |
 | `MSP_RUSTDESK_KEY`   | `""`         | that server's public key (content of `id_ed25519.pub`); set with `MSP_RUSTDESK_HOST` or not at all: the server refuses to start with only one |
+| `MSP_FILES_DIR`      | `<dir of MSP_DB>/files` | file-library directory for software deployment (SD1); created on start, artifacts live at `<MSP_FILES_DIR>/<id>` (section 13) |
+| `MSP_MAX_FILE_MB`    | `200`        | upload size cap in MiB for the file library; must be ≥ 1 |
 
 Bootstrap (first admin, first org, first enrollment token), then serve:
 
@@ -192,7 +194,7 @@ TLS can be used; it is never published (section 3).
 
 ## 7. Backups and upgrades
 
-Everything lives in one SQLite file. Back it up while the server runs with the online backup
+The database lives in one SQLite file. Back it up while the server runs with the online backup
 API (consistent even in WAL mode; the `sqlite3` CLI runs on the host against the bind-mounted
 file, the alpine image does not ship it):
 
@@ -202,6 +204,12 @@ sqlite3 deploy/data/msp.db ".backup deploy/data/backup-$(date +%F).db"
 
 or stop the server and copy `msp.db` **together with** `msp.db-wal` and `msp.db-shm`. Restore by
 putting the file back (and deleting any stale `-wal`/`-shm`) before starting the server.
+
+The software-deployment file library (SD1) stores its bytes outside the database, under
+`MSP_FILES_DIR` (default `<dir of MSP_DB>/files`, so in the Docker image it is `/data/files` and
+is already inside the backed-up `/data` volume). Include that directory in your backups alongside
+`msp.db`: the `files` table rows and the `MSP_FILES_DIR/<id>` bytes must be restored together, or a
+deploy will find metadata with no bytes (the agent download then 404s).
 
 Upgrade = replace the binary or pull the new image and restart; migrations run at start and
 are recorded in `schema_migrations`. Downgrades are not supported: restore the backup taken
@@ -522,3 +530,25 @@ tested against a local fake SMTP listener and `httptest` webhooks (`internal/e2e
 `TestNotificationsDelivery`, `internal/server` `TestStdSenderEmailAgainstFakeSMTP`); a real
 email to an inbox or a post to a real Slack workspace must be confirmed on a deployed host with
 egress.
+
+## 13. Software deployment (SD1)
+
+Push a file to a desktop device and optionally run it, or install a named package. The bytes live
+in the file library under `MSP_FILES_DIR` (default `<dir of MSP_DB>/files`, created on `serve`
+start); `MSP_MAX_FILE_MB` (default 200) caps each upload, over it the upload is `413`.
+
+- **Storage.** Each uploaded file is a row in the `files` table plus a blob at
+  `MSP_FILES_DIR/<id>`; back the directory up with the database (section 7). In the Docker image
+  the default resolves to `/data/files`, already inside the backed-up `/data` volume.
+- **Network.** Deploy adds no new egress: agents download files over the **same outbound HTTPS**
+  connection they already use for sync (section 10 firewall), so there is nothing to open — the
+  agent needs outbound to the server only, no direct internet. The server fetches nothing; the
+  artifacts are the ones staff uploaded.
+- **Package installs.** Linux installs with `apt-get -y install <name>` as root (the agent already
+  runs as root under systemd); the name is one argv token, never a shell. The Windows installer
+  path is **NOT VERIFIED** — a package deploy on Windows fails cleanly for now.
+- **Scope and audit.** Upload, delete and deploy are role-gated (operator or admin, never viewer)
+  and tenant-scoped (docs/SECURITY.md): a technician sees only their clients' files, a device
+  downloads only its own client's or a global file, destination paths are validated and the hash is
+  re-checked on the device. Every upload, delete and deploy is audited (`file.uploaded`,
+  `file.deleted`, `deploy.requested`).

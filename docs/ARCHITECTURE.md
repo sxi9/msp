@@ -120,6 +120,7 @@ dispatches on it, the fixtures are round-tripped through it.
 | message | yes   | yes     | yes     | text non-empty <= 4096 bytes                        |
 | shell   | yes   | yes     | no      | optional shell; timeout = max session (RS1)         |
 | patch   | yes   | yes     | no      | action/mode/reboot/ids; android -> 400 (PM1)        |
+| deploy  | yes   | yes     | no      | source file (file_id/sha256/dest/run) or package; android -> 400 (SD1) |
 
 Lock is only ever possible for a device enrolled under this server (it needs a valid device
 token to receive the command) and visible to the technician (404 otherwise), never by free
@@ -342,3 +343,55 @@ channel for the report and the command queue for the install — no new transpor
   Updates column + "has pending security" filter, from pure helpers with a `node --test`.
 - **Proof**: `internal/e2e/patch_test.go` and `scripts/e2e.sh` drive the real Linux agent against a
   fake `apt-get` on PATH; the Windows Update path is cross-built and parser-unit-tested only.
+
+## Software deployment and file transfer (SD1, phase 2)
+
+Push a file to a desktop device and optionally run it, or install a named package, through the
+existing command queue and the agent's existing authenticated channel. No new transport.
+
+```
+ dashboard ──► POST /api/v1/files (multipart) ──► files table + <MSP_FILES_DIR>/<id>
+ dashboard ──► POST /devices/{id}/deploy ──► CreateCommand(kind deploy) ──► ClaimQueuedCommands
+                                              (store, migration 0008)        (emits source/file_id/sha256/dest/run/run_args/package)
+ agent sync ──► KindDeploy ──► Deployer.RunDeploy ──► file: GET /api/agent/v1/files/{id}
+                                                       (verify size+sha256 BEFORE write, temp+rename, optional argv run)
+                                                     ──► package: apt-get -y install <name> (PM1 injectable executor)
+```
+
+- **Protocol** (`internal/protocol/types.go`, fixture `command_deploy.json`): `KindDeploy`, the
+  deploy fields on `Command`, the `DeploySource*` constants, `ValidDeploySource`/`ValidPackageName`/
+  `ValidSHA256Hex`/`ValidDeployDest`, `KindsFor` (desktop only), and the `Command.Validate` deploy
+  arm (source required; file needs file_id+sha256+dest; package needs a valid name; run_args only
+  with run; reject a non-absolute or `..` dest).
+- **Agent** (`internal/agent/deploy.go`): a `Deployer` dispatched from the Run loop
+  (`KindDeploy` → `RunDeploy`, beside `KindPatch`). The file source streams the library file through
+  `(*Client).downloadFile` (the device token + the Client's TLS/CA transport, a ctx-bounded http
+  client so a large download is not cut by the 40 s long-poll timeout), verifies the Content-Length
+  and SHA-256 **before** writing, creates the parent 0755, refuses a symlinked parent, writes a temp
+  file in the dest directory and renames it into place (0755 when run else 0644), then optionally runs
+  dest with run_args via argv (no shell). The package source installs one validated name through the
+  same injectable executor PM1 uses (`apt-get -y install`); the Windows installer path is NOT
+  VERIFIED and fails cleanly. The deploy run path reuses `runProcess`/`makeCommandDir` from the
+  runner; no new agent test seam is needed (the e2e test's fake `apt-get` on PATH drives package
+  mode, a real Client drives file mode).
+- **Store** (`internal/store/files.go`, `commands.go`, migration `0008_files_and_deploy`): the
+  `files` table (`org_id` nullable FK → orgs ON DELETE CASCADE; index `files_org`) and the deploy
+  command columns (`source`/`file_id`/`sha256`/`dest`/`run`/`run_args_json`/`package`).
+  `CreateFile`/`GetFile`/`ListFiles` (RS2 `org_id IN (…)`, nil = all incl. global)/`DeleteFile`
+  persist only the rows — the server owns the bytes on disk and the per-file org check.
+  `CreateCommand`/`ClaimQueuedCommands` persist and emit the deploy fields; deploy uses the ordinary
+  `ClampTimeout`.
+- **Server** (`internal/server/dashboard_files.go`, `api_agent_files.go`, `dashboard_deploy.go`): the
+  staff file endpoints (`POST`/`GET`/`DELETE /api/v1/files`, org-scoped like RS2, the upload exempt
+  from the dashboard body limit and capped by `MSP_MAX_FILE_MB`), the device-token download
+  (`GET /api/agent/v1/files/{id}`, global-or-own-org else 404, `X-MSP-SHA256` + Content-Length), and
+  `POST /devices/{id}/deploy` (device 404 → org-visible RS2 404 → revoked → platform → shape →
+  file-visibility 404 → online; the server fills the sha256 from the stored file; audit
+  `file.uploaded`/`file.deleted`/`deploy.requested`). `MSP_FILES_DIR` is created on `serve` start.
+  Routes self-register via `dashboardRoutes`, with `RegisterFiles`/`RegisterAgentFiles`/
+  `RegisterDeploy` for a hand-assembled mux.
+- **Dashboard** (`web/src/lib/deploy.ts`, the Software page + device Deploy dialog): a per-client file
+  library and a two-mode deploy dialog, from pure helpers with a `node --test`.
+- **Proof**: `internal/e2e/deploy_test.go` drives the real Linux agent against a local file server and
+  the fake `apt-get` on PATH (never the public internet, never a real package); the Windows installer
+  path is cross-built only.

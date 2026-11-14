@@ -142,6 +142,11 @@ func Run(ctx context.Context, cfg Config, version string, log *slog.Logger) erro
 	}
 	col := newCollector()
 	patchCol := newPatchReporter()
+	// Software deployment (SD1): a kind deploy command downloads a library file
+	// over this client (file source) or installs a package through the shared
+	// executor (package source). The deployer is built once over the same Client
+	// the sync loop uses, like patchCol above.
+	deployer := NewDeployer(client)
 
 	waitS := min(protocol.MaxWaitS, cfg.IntervalS-1)
 	if waitS < 0 {
@@ -245,12 +250,16 @@ func Run(ctx context.Context, cfg Config, version string, log *slog.Logger) erro
 				defer func() { <-sem }()
 				log.Info("command received", "id", cmd.ID, "kind", cmd.Kind)
 				// A kind patch command (PM1) scans or installs through the patch
-				// collector (so the fresh report rides the next sync); every other
-				// kind runs through Execute.
+				// collector (so the fresh report rides the next sync); a kind deploy
+				// command (SD1) downloads+runs a file or installs a package through
+				// the deployer; every other kind runs through Execute.
 				var res protocol.CommandResult
-				if cmd.Kind == protocol.KindPatch {
+				switch cmd.Kind {
+				case protocol.KindPatch:
 					res = patchCol.RunPatch(ctx, cmd)
-				} else {
+				case protocol.KindDeploy:
+					res = deployer.RunDeploy(ctx, cmd)
+				default:
 					res = Execute(ctx, cmd)
 				}
 				log.Info("command finished", "id", cmd.ID, "exit_code", res.ExitCode, "error", res.Error)

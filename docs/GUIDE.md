@@ -27,6 +27,7 @@ Phase 1 features (built and verified on Linux; Windows and Android runtime need 
 | Remote desktop | Official RustDesk client on the device, your own relay (hbbs/hbbr) next to the server, Connect button on the device page, every connection audited (section 8) |
 | Remote shell | Interactive browser terminal to a desktop device over a server WebSocket relay; operator or admin; opened, connected and closed are audited and the output is transcribed (section 9) |
 | Patching | Pending OS updates per desktop device (apt / Windows Update) with a fleet column, and install all / security / named packages through the command queue; operator or admin; audited (section 10) |
+| Software deployment | A per-client file library, push a file to a desktop device and optionally run it, or install a named package (apt); hash-verified on the device and audited; operator or admin (section 11) |
 | Alerts | `offline`, `disk_full` (≥ 90 %), `memory_high` (≥ 95 %), `battery_low` (≤ 15 %, not charging); acknowledge; auto-resolve |
 | Audit | Every login, token, enrollment, command, lock, alert ack and user change, with actor and IP; never pruned |
 | Ops | Docker compose, Caddy TLS example, systemd unit, Windows service, Android foreground service, health endpoint |
@@ -375,7 +376,41 @@ patch a device in a client you can see, exactly like running a command, and ever
 writes an audit row (`patch.scan_requested` / `patch.install_requested`) with the mode and the named
 packages. Installing specific packages is restricted to the ones already pending on that device.
 
-## 11. Alerts
+## 11. Software deployment
+
+Push a file to a desktop device and optionally run it, or install a named OS package — all
+hash-verified and audited. Linux installs packages with `apt`; the Windows installer path is not
+verified yet.
+
+**The file library.** The **Software** page (admin|operator) is a per-client library of
+deployable artifacts: upload a file (a script, an installer, a config) with a name and either a
+client or "All clients" (a global artifact any client can use). The table lists each file's name,
+size, sha256 (short), client, who uploaded it and when, with **Delete**. The library is scoped to
+your clients exactly like everything else: a scoped technician sees only their clients' files, and
+a global file is visible only to all-clients staff. Uploads are capped at `MSP_MAX_FILE_MB` (200
+by default).
+
+**Deploy from the device page.** The **Deploy** button opens a dialog with two modes:
+
+- *Deploy a file* — pick a file from the library (filtered to the device's client plus global
+  artifacts), give an absolute destination path, and optionally toggle **Run** with arguments. The
+  server queues the deploy; the agent downloads the file over its authenticated channel, verifies
+  the size and SHA-256 **before** writing, places it at the destination (0755 if it will run, else
+  0644) and, when Run is set, executes it with the given arguments (argv, never a shell). A hash
+  mismatch fails the command without writing anything.
+- *Install a package* — type one package name; the agent installs it with
+  `apt-get -y install <name>` (a single argv token, never a shell).
+
+The download/install/run log comes back on the command and shows in the device's command history
+like any other command's output.
+
+**Safe and audited.** Deploy is role-gated (never viewer) and tenant-scoped: you can only deploy to
+a device in a client you can see, a device can only download a file in its own client's library or
+a global one (any other is a 404), destination paths are validated (absolute, no `..`, no symlink
+traversal), and the hash is always re-checked on the device. Every upload, delete and deploy writes
+an audit row (`file.uploaded`, `file.deleted`, `deploy.requested`).
+
+## 12. Alerts
 
 Alerts are evaluated by the server on every sync and by a sweeper every 15 s. No separate
 monitoring process.
@@ -418,7 +453,7 @@ webhook URL is unreachable from the server — the server connects **out** to th
 must be allowed (docs/OPS.md section 11). Everything here is scoped to your clients exactly like
 the rest of the dashboard. SMS and multi-step escalation policies are the NS2 follow-ons.
 
-## 12. Users, roles, audit
+## 13. Users, roles, audit
 
 - **Users** (admin only): add technicians with email, password (10+ characters) and role;
   disable them when they leave. Sessions are cookies; the dashboard sends a CSRF header on
@@ -445,7 +480,7 @@ the "Add client" button is hidden for everyone else.
 - **Audit** page: every action with time, actor (user email, `device:<id>` or `system`),
   action name, client and device, and the client IP. Append-only, never pruned.
 
-## 13. Housekeeping
+## 14. Housekeeping
 
 - **Token hygiene**: one token per rollout, short expiry, revoke after use. The server keeps
   only a hash and the first 10 characters.
@@ -459,7 +494,7 @@ the "Add client" button is hidden for everyone else.
 - **Firewall**: agents need outbound HTTPS to the server only. The server needs 443 inbound
   (80 + 443 with Caddy). Restrict the dashboard to your own addresses at the proxy.
 
-## 14. Troubleshooting
+## 15. Troubleshooting
 
 | Symptom | Check |
 |---|---|
@@ -476,7 +511,7 @@ the "Add client" button is hidden for everyone else.
 | Connect does nothing on your PC | Your own RustDesk client is not installed or not registered for `rustdesk://` links; open it and enter the id by hand (Copy button) |
 | Your client says the id is unknown / cannot connect | Your client and the device must use the same ID server, relay and key; check Settings > Network on both; relay ports open on the server host? |
 
-## 15. Where to look in the repository
+## 16. Where to look in the repository
 
 | Path | What |
 |---|---|

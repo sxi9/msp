@@ -257,6 +257,20 @@ desktop package management), and a sync between scans omits it (the field is `om
   `pending_patches`, `security_patches`, `reboot_required` and `patches_checked_at` (the counts are
   derived from the list but never fall below the agent's own totals). Fixture `sync_patches.json`.
 
+### 3.7 `GET /api/agent/v1/files/{id}` (Bearer `dt_`) — library file download **(SD1)**
+
+Streams a file-library artifact (section 6, "File library") to an authenticated device so a
+`kind deploy` file command can fetch it. Device-token auth, never a session; no CSRF.
+
+- Allowed only when the file's `org_id` is the device's own org or NULL (a global artifact);
+  any other org is `404 {"error":"not_found"}`, indistinguishable from a missing file, so a
+  device token cannot probe another client's library.
+- `200` streams the bytes with `Content-Type: application/octet-stream`, a `Content-Length` and
+  an `X-MSP-SHA256` header (the stored hash). The agent re-verifies the length and SHA-256 after
+  download and before it writes or runs anything; a mismatch fails the command.
+- `404 not_found` when the file does not exist, is not visible to the device, or its bytes are
+  missing on disk; `401 invalid_device_token` without a valid token.
+
 ## 4. Status and timing
 
 - Desktop interval 30 s, Android 60 s, `wait_s` 25 (agent HTTP timeout 40 s).
@@ -272,10 +286,12 @@ desktop package management), and a sync between scans omits it (the field is `om
 ## 5. Commands **(A1)**
 
 Command kinds are exactly `exec`, `script`, `lock`, `ping`, `message`, `shell` **(RS1, D3)**,
-`patch` **(PM1)**.
+`patch` **(PM1)**, `deploy` **(SD1)**.
 The Go form is `protocol.Command{ID, Kind, Argv, Shell, Body, Text, Action, Mode, IDs, Reboot,
-TimeoutS, Cols, Rows, ShellSession}` (`Action`/`Mode`/`IDs`/`Reboot` belong to `patch`, the last
-three to `shell`); `Command.Validate()` checks the shape,
+Source, FileID, SHA256, Dest, Run, RunArgs, Package,
+TimeoutS, Cols, Rows, ShellSession}` (`Action`/`Mode`/`IDs`/`Reboot` belong to `patch`,
+`Source`/`FileID`/`SHA256`/`Dest`/`Run`/`RunArgs`/`Package` to `deploy`, the last three to
+`shell`); `Command.Validate()` checks the shape,
 `KindSupportedOn(kind, platform)` checks the platform, `KindsFor(platform)` and
 `ShellsFor(platform)` drive the UI.
 
@@ -288,6 +304,7 @@ three to `shell`); `Command.Validate()` checks the shape,
 | `message` | linux, windows, android | `text` (non-empty, <= 4096 bytes) | shows the text to the logged-in user            |
 | `shell`   | linux, windows          | `shell` (optional), `cols`/`rows` (optional), `timeout_s` = max duration | opens a PTY/ConPTY and relays it over a WebSocket (section 6, "Remote shell") |
 | `patch`   | linux, windows          | `action`, `mode`, `ids`, `reboot`, `timeout_s` (max 14400) | scans or installs OS updates via apt / Windows Update (section 5, "patch", PM1) |
+| `deploy`  | linux, windows          | `source`, and for file `file_id`/`sha256`/`dest`/`run`/`run_args`, for package `package` | downloads a library file and optionally runs it, or installs a named package (section 5, "deploy", SD1) |
 
 Common rules:
 
@@ -388,6 +405,35 @@ Applies or scans OS updates. The agent-facing command JSON is
   `ClampPatchTimeout`. Linux drives apt (`apt-get -s dist-upgrade` to scan, `apt-get -y ...` to
   install); Windows drives Windows Update. Both go through an injectable command executor so tests
   feed a fake apt / captured output; the agent never logs the full package list at info level.
+
+### deploy (desktop only — SD1)
+
+Pushes a file to a device and optionally runs it, or installs a named OS package. The
+agent-facing command JSON carries only the keys of its source:
+
+```json
+{"id":N,"kind":"deploy","source":"file","file_id":M,"sha256":"<64 hex>",
+ "dest":"/opt/acme/installer.sh","run":true,"run_args":["--silent"],"timeout_s":3600}
+{"id":N,"kind":"deploy","source":"package","package":"htop","timeout_s":3600}
+```
+
+- `source:"file"`: `file_id` + `sha256` name a server-side library file (section 6, "File
+  library"); `dest` is where it is written (absolute, cleaned, no `..`, not through a symlinked
+  parent; the parent is created 0755 if missing). The agent downloads
+  `GET /api/agent/v1/files/{file_id}`, verifies the response `Content-Length` and the SHA-256
+  **before** writing, writes a temp file in the dest directory and renames it into `dest` (0755
+  when `run` else 0644), and when `run` is set executes `dest` with `run_args` via argv (no
+  shell), capturing output like exec/script. A hash mismatch fails the command without writing
+  dest. `run_args` is allowed only with `run`; each element ≤ 4096 bytes.
+- `source:"package"`: `package` is one name (charset `[A-Za-z0-9._+-]`, ≤ 256 bytes), installed
+  through the same injectable executor PM1 uses:
+  `DEBIAN_FRONTEND=noninteractive apt-get -y install <pkg>` on Linux (argv, never a shell); the
+  Windows installer path is NOT VERIFIED and a package deploy on Windows fails cleanly. The
+  captured install log comes back in the command result.
+- `timeout_s` uses the ordinary 0 (default 60) or 1..3600 rule.
+- `Command.Validate()`: `source` required; a file source needs `file_id` + a 64-hex `sha256` +
+  a valid `dest`; a package source needs a valid package name and must not set the file fields;
+  `run_args` only with `run`. Fixture `command_deploy.json`.
 
 ### Android (A1)
 
@@ -637,6 +683,57 @@ re-reads the file when its mtime or size changed; an invalid rewrite is logged o
 `WARN presets reload failed, keeping the last good set` with the same detail and the last
 good set keeps being served.
 
+### File library and deployment (SD1)
+
+A server-side file library holds deployable artifacts; agents download them over the
+device-token endpoint (section 3.7) and a `kind deploy` command pushes one to a device or installs
+a named package. Metadata lives in a `files` table, the bytes on disk under `MSP_FILES_DIR/<id>`
+(created on start). The four staff endpoints are org-scoped exactly like RS2: a scoped
+operator/viewer sees only files whose `org_id` is in their visible set, a global (`org_id` NULL)
+file is visible only to all-orgs users, and a cross-org single file is `404 not_found`. Size cap
+`MSP_MAX_FILE_MB` (default 200), over it `413 file_too_large`.
+
+- `POST /api/v1/files` (admin|operator; CSRF; `multipart/form-data`: a `file` part plus `name`
+  and optional `org_id`) -> `201 {"file":FILE}`. Streams the part to a temp file in
+  `MSP_FILES_DIR` while computing its sha256 and size, then inserts the row and renames the bytes
+  into `MSP_FILES_DIR/<id>`. Admin, or an operator for an org they can see; a global file
+  (`org_id` omitted) requires all-orgs (`403 forbidden` otherwise). Exempt from the 512 KiB
+  dashboard body limit (it enforces its own `MSP_MAX_FILE_MB` cap). Audit `file.uploaded` (name,
+  size, sha256).
+
+```
+FILE = {"id":12,"org_id":1,"name":"installer.sh","size":1024,"sha256":"<64 hex>",
+        "content_type":"application/x-sh","created_at":"...","created_by":1,
+        "created_by_email":"admin@example.com"}
+```
+
+`org_id` is `null` for a global artifact usable by any client; `created_by`/`created_by_email`
+name the uploader (`null`/`""` when unknown).
+
+- `GET /api/v1/files?org_id=` (viewer) -> `{"files":[FILE...]}` newest first, org-scoped; never
+  streams the bytes.
+- `GET /api/v1/files/{id}` (viewer) -> `{"file":FILE}`; `404 not_found` when missing or not
+  visible (RS2).
+- `DELETE /api/v1/files/{id}` (admin|operator) -> `204`; removes the row and the disk file.
+  `404 not_found` across orgs before the delete. Audit `file.deleted`.
+
+- `POST /api/v1/devices/{id}/deploy` (admin|operator; CSRF) with one of
+  `{"source":"file","file_id":12,"dest":"/opt/acme/installer.sh","run":true,"run_args":["--silent"],"timeout_s":3600}`
+  or `{"source":"package","package":"htop","timeout_s":3600}`
+  -> `201 {"command":COMMAND}` (a queued `kind deploy` command). The caller never supplies the
+  `sha256`: the server looks the library file up and fills the deploy command with the stored
+  hash, so a deploy cannot be pointed at a forged digest.
+  Validation order (mirrors the patch open): device exists (`404`) -> org visible (`404` across
+  orgs, RS2) -> not revoked (`400 unsupported_on_device`) -> desktop platform
+  (`400 unsupported_on_platform`, i.e. android) -> body shape (`400 invalid_request`, via
+  `Command.Validate`) -> for a file source, the file must be visible for the device's org or
+  global (`404 not_found` otherwise) -> online (`409 device_offline`). Then the command is
+  queued, audited (`deploy.requested` with source, file_id/package, dest, run) and the device's
+  parked sync woken. `403 forbidden` for viewer. The download + install/run log comes back on the
+  command result like exec/script, visible in the command history. A `kind deploy` COMMAND
+  additionally carries `source`, `file_id`, `sha256`, `dest`, `run`, `run_args` and `package`
+  (`omitempty`, so they appear only on a deploy COMMAND).
+
 ### Alerts, audit, users
 
 - `GET /api/v1/alerts?state=open|all&org_id=` -> `{"alerts":[{"id":9,"org_id":1,"org_name":"...","device_id":42,"hostname":"ws-01","type":"offline","severity":"high","message":"no sync for 6m","opened_at":"...","resolved_at":null,"acknowledged_by":null,"acknowledged_at":null}]}` (default open; limit 500). Filtered to the caller's visible orgs **(RS2)**; an explicit `?org_id=` outside the visible set is `404 not_found`.
@@ -759,7 +856,8 @@ enqueue time. The dispatcher retries with backoff and lands `failed` after `maxA
 `token.created`, `token.revoked`, `device.enrolled`, `device.revoked`, `device.deleted`,
 `device.lock_requested` **(A1)**, `device.remote_desktop_opened` **(RD1)**,
 `shell.opened`, `shell.connected`, `shell.closed` **(RS1)**,
-`patch.scan_requested`, `patch.install_requested` **(PM1)**, `command.queued`,
+`patch.scan_requested`, `patch.install_requested` **(PM1)**,
+`file.uploaded`, `file.deleted`, `deploy.requested` **(SD1)**, `command.queued`,
 `command.finished`, `command.lost`, `alert.ack`,
 `notify.channel_created`, `notify.channel_updated`, `notify.channel_deleted`,
 `notify.channel_tested`, `notify.rule_created`, `notify.rule_updated`, `notify.rule_deleted`,
@@ -796,7 +894,10 @@ library, section 6 "Presets"; `--presets`), `MSP_RUSTDESK_HOST` + `MSP_RUSTDESK_
 `--rustdesk-host` / `--rustdesk-key`: the self-hosted RustDesk relay as a bare hostname or IP
 (no port: 21116/21117 are implied) and its public key, one base64 line; both enable remote
 desktop, neither disables it, one alone makes `serve` exit 2 with "must be set together", a
-malformed value exits 2 with the reason).
+malformed value exits 2 with the reason);
+`MSP_FILES_DIR` (`""` -> `<dir of MSP_DB>/files`; `--files-dir`: the file-library directory,
+created on `serve` start; artifacts live at `<MSP_FILES_DIR>/<id>`) **(SD1)**;
+`MSP_MAX_FILE_MB` (200; `--max-file-mb`: the upload size cap in MiB, must be ≥ 1) **(SD1)**.
 
 **Agent** (`cmd/msp-agent`):
 `msp-agent enroll --server URL --token et_... [--config PATH] [--ca-file PEM] [--interval 30] [--insecure-http]`
@@ -834,6 +935,7 @@ Config file JSON `{"server_url","device_token","device_id","interval_s","ca_file
 | `sync_android_apps.json`      | SyncRequest       | like `sync_android.json` with facts and `facts.apps` (5 entries: 3 user apps incl. a label fallback and an empty version, then 2 system apps) |
 | `command_result.json`         | CommandResult     | exit 0, RFC3339 UTC times                                  |
 | `sync_patches.json`           | SyncRequest       | like `sync_linux.json` with a `patches` report (PM1): apt, reboot required, three updates incl. a security one |
+| `command_deploy.json`         | Command           | kind `deploy`, source `file` (SD1): file_id, sha256, dest, run, run_args |
 | `error.json`                  | ErrorResponse     | `invalid_device_token`, no detail                          |
 
 A change to any wire shape must update `types.go`, the fixture, `types_test.go` and this
