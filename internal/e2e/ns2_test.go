@@ -501,7 +501,7 @@ func TestNS2OrgScoping(t *testing.T) {
 	// does not reveal whether it exists.
 	var pe errorJSON
 	if code := op.do(http.MethodPost, "/api/v1/notify/rules", map[string]any{
-		"name": "x", "min_severity": "low", "channel_id": chA.ID, "escalation_policy_id": polB.ID,
+		"name": "x", "org_id": orgA.ID, "min_severity": "low", "channel_id": chA.ID, "escalation_policy_id": polB.ID,
 	}, &pe); code != 400 || pe.Error != "invalid_request" {
 		t.Fatalf("scoped rule->B policy = %d %q, want 400 invalid_request", code, pe.Error)
 	}
