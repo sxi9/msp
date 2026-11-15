@@ -32,6 +32,7 @@ test or a screenshot in `docs/screenshots/`. Unticked items are not done.
 - [x] Alert rules evaluated on heartbeat; alert opens, acks, resolves, auto-resolves (open + ack in the live run, screenshots 11–12; `TestOfflineAlertOpensAndResolves` covers the auto-resolve when the device syncs again, `TestThresholdAlerts`, `TestDashboardAlertsAndAudit`)
 - [x] Audit log records every user action (screenshot 09; e2e "audit trail (user vs device actors)"; `TestAuditAndSummary`)
 - [x] Metrics retention job (`TestPruneOnce`; `MSP_RETENTION_DAYS`) — not exercised in the live run
+- [x] Reports and exports (RP1): read-only, RS2 org-scoped uptime / disk-trend / patch-compliance reports at `GET /api/v1/reports/{uptime,disk,disk/top,patch-compliance}` + sibling `.csv` exports (attachment, CRLF, formula-injection-guarded text cells), period bounded by `MSP_RETENTION_DAYS`; no new migration, no agent change; `internal/e2e/TestReports`, `internal/store` reports tests, `internal/server/dashboard_reports_test.go`
 - [x] docker-compose.yml and TLS reverse proxy example (`deploy/docker-compose.yml`, `deploy/Caddyfile.example`; `docker compose config` validates and `bash -n` passes on the scripts). Not verified: the image build and a real TLS deployment (no Docker daemon here)
 
 ## Desktop agent (Go)
@@ -63,6 +64,7 @@ test or a screenshot in `docs/screenshots/`. Unticked items are not done.
 - [x] Alerts page with acknowledge / resolve (screenshots 08, 11, 12: open then acked; resolve is automatic when the device syncs again, `TestOfflineAlertOpensAndResolves`)
 - [x] Audit log page (screenshot 09)
 - [x] Command preset library: file loads, endpoint serves it, dashboard uses it, live reload (live run with `MSP_PRESETS=deploy/presets.example.json`: `GET /api/v1/presets` returned `source: file` with the 10 Linux + 10 Windows entries; picking "Failed services" filled argv and timeout and ran on the agent, screenshots 14, 15; an edit to the file showed up on the next request without restart, a broken file kept the last good set and was logged; `TestPresets*`, `web/src/lib/presets.test.ts`)
+- [x] Reports page (RP1): org + period toolbar, uptime table with the org mean, a hand-written SVG disk-trend chart (theme-aware, no new chart dependency), patch-compliance tiles + per-device table, each with a Download-CSV button; `?mock=1` seeds all three; `web/src/lib/reports.test.ts`; live-browser run with the real Linux agent, screenshots 41 (uptime table), 42 (disk-trend chart), 43 (patch-compliance summary), desktop and phone, phone `scrollWidth` 400
 - [x] Phone width: no horizontal scroll (scrollWidth 400 at a 400 px viewport on all 15 pages)
 - [x] Screenshots of every page in docs/screenshots/ (15 pages × desktop and phone, see its README)
 

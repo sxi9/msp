@@ -305,12 +305,15 @@ type PatchBuckets struct {
 }
 
 // DevicePatch is one device's current patch state for the compliance breakdown.
+// The JSON/CSV field set is the RP1 wire contract (docs/PROTOCOL.md): device_id,
+// hostname, org_id, org_name, pending, security, reboot_required, checked_at — it
+// deliberately omits platform so the JSON, the CSV export and the web
+// PatchComplianceRow type agree.
 type DevicePatch struct {
 	DeviceID       int64      `json:"device_id"`
 	Hostname       string     `json:"hostname"`
 	OrgID          int64      `json:"org_id"`
 	OrgName        string     `json:"org_name"`
-	Platform       string     `json:"platform"`
 	Pending        int        `json:"pending"`
 	Security       int        `json:"security"`
 	RebootRequired bool       `json:"reboot_required"`
@@ -339,7 +342,7 @@ type PatchComplianceResult struct {
 // visibleOrgs (nil = every org) and optionally a single orgID.
 func (s *Store) PatchCompliance(ctx context.Context, visibleOrgs []int64, orgID *int64) (PatchComplianceResult, error) {
 	where, args := reportOrgWhere(orgID, visibleOrgs)
-	q := `SELECT d.id, d.hostname, d.org_id, o.name, d.platform,
+	q := `SELECT d.id, d.hostname, d.org_id, o.name,
 	             d.pending_patches, d.security_patches, d.reboot_required, d.patches_checked_at
 	        FROM devices d JOIN orgs o ON o.id = d.org_id`
 	if where != "" {
@@ -362,7 +365,7 @@ func (s *Store) PatchCompliance(ctx context.Context, visibleOrgs []int64, orgID 
 			reboot    int
 			checkedAt sql.NullString
 		)
-		if err := rows.Scan(&dp.DeviceID, &dp.Hostname, &dp.OrgID, &dp.OrgName, &dp.Platform,
+		if err := rows.Scan(&dp.DeviceID, &dp.Hostname, &dp.OrgID, &dp.OrgName,
 			&dp.Pending, &dp.Security, &reboot, &checkedAt); err != nil {
 			return PatchComplianceResult{}, fmt.Errorf("store: patch compliance: %w", err)
 		}
@@ -402,7 +405,13 @@ func bucketPatch(b *PatchBuckets, dp DevicePatch) {
 	if dp.CheckedAt != nil && dp.Security > 0 {
 		b.SecurityPending++
 	}
-	if dp.RebootRequired {
+	// reboot_required is a flag on the checked set (like security_pending), so a
+	// never-checked device never contributes even if its reboot_required column is
+	// set. This mirrors the web bucketDevices helper (web/src/lib/reports.ts),
+	// which skips a device with no patches_checked_at before the reboot check, and
+	// the documented contract (docs/PROTOCOL.md: "additional overlapping flags on
+	// the checked set").
+	if dp.CheckedAt != nil && dp.RebootRequired {
 		b.RebootRequired++
 	}
 }

@@ -91,6 +91,17 @@ test('bucketDevices: empty', () => {
   assert.deepEqual(bucketDevices([]), { total: 0, up_to_date: 0, pending: 0, security_pending: 0, reboot_required: 0, never_checked: 0 });
 });
 
+test('bucketDevices: a never-checked device with reboot_required set is not counted (parity with the server)', () => {
+  // reboot_required and security_pending are flags on the checked set, so a device
+  // that has never reported a patch scan contributes to neither even if its
+  // reboot_required column is set. This mirrors the server bucketPatch helper
+  // (internal/store/reports.go), which guards the reboot count on patches_checked_at.
+  const counts = bucketDevices([
+    dev({ patches_checked_at: null, reboot_required: true, security_patches: 2 }),
+  ]);
+  assert.deepEqual(counts, { total: 1, up_to_date: 0, pending: 0, security_pending: 0, reboot_required: 0, never_checked: 1 });
+});
+
 test('csvCell: quotes comma/quote/newline, doubles embedded quotes', () => {
   assert.equal(csvCell('plain'), 'plain');
   assert.equal(csvCell('a,b'), '"a,b"');

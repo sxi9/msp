@@ -14,6 +14,7 @@ P1 = first build. P2 = next. P3 = after that.
 - PM1 (built) Patch status and install: periodic pending-updates report (apt on Linux, Windows Update on Windows, behind an injectable command executor), and install all / security / named-ids through the command queue with a reboot policy; Windows Update path NOT VERIFIED on a real host
 - SD1 (built) Software deployment and file transfer: a server-side file library, push a file to a desktop device and optionally run it, or install a named package (apt on Linux), hash-verified on the device and audited; Windows installer path NOT VERIFIED on a real host
 - SI1 (built) Installed-software inventory on desktops: the agent reports installed software (dpkg/rpm on Linux, the uninstall registry on Windows; read-only), shown on the device page and searchable fleet-wide for licensing and vulnerability hunting, org-scoped; Windows registry path NOT VERIFIED on a real host
+- RP1 (built) Reports and exports: read-only, org-scoped reports over the data already stored — device check-in uptime (with the OS `uptime_s` shown alongside), disk-usage trends and patch compliance — viewable on the dashboard Reports page and each exportable as injection-safe CSV; the period is bounded by `MSP_RETENTION_DAYS`
 - P2 Service and process watchlists, event log forwarding
 - AU1 (built) Agent self-update: the server publishes a release manifest (`agents.json` at `/dl/`) and advertises a newer build to each desktop; the agent downloads it over its authenticated channel, verifies the SHA-256, health-checks the new binary and atomically swaps itself, keeping a backup and rolling back on a bad start; automatic by default (opt out with `--no-auto-update`) or forced per device, role-gated and audited; Windows service-swap path NOT VERIFIED on a real host
 - RD1 (built) Remote desktop phase A: official RustDesk client installed by the installer (`--with-rustdesk`), pointed at our relay by `msp-agent rustdesk setup`, id reported in facts
@@ -63,7 +64,7 @@ P1 = first build. P2 = next. P3 = after that.
 - P1 Audit log view
 - RS1 (built) Browser terminal for remote shell (`@xterm/xterm`, resize, status line, Transcript link on finished shell commands)
 - AUT1 (built) Script library (CRUD, per-client or global, exec/script), "Run on devices" bulk action with a target picker and a job-progress view (n done / n total, per-device status), and an Automations page (schedule: every N minutes; or alert: type + min severity) with enable/disable and last-run/next-run; all org-scoped (RS2) and audited
-- P2 Reports: uptime, disk trends, patch compliance, exports
+- RP1 (built) Reports: uptime, disk trends, patch compliance, CSV exports (read-only, org-scoped, bounded by retention)
 - P2 Client portal with limited self-service view
 - RD1 (built) Remote desktop card on the device page: id, Copy, Connect button (opens `rustdesk://connect/<id>`), not-configured / not-reported states
 - RS2 (built) Users page "Edit access" dialog (All-clients toggle + per-client checklist) and the same control on the create-user form; "Add client" hidden for non-admins; a scoped technician's Fleet/Orgs/Alerts/Audit simply show less

@@ -595,3 +595,43 @@ Target resolution funnels through one helper (`resolveTargetDevices`) and one RS
 never reach a device outside the caller's / automation's visible org set. Everything is org-scoped like
 RS2 and audited (`script.*`, `job.created`, `automation.*`). Proven end to end by
 `internal/e2e/automations_test.go` (fake clock + the real Linux agent).
+
+## Reports and exports (RP1, phase 2)
+
+Three read-only, RS2 org-scoped reports turn the data already stored into something a technician or
+client can read — device check-in uptime, disk-usage trends and patch compliance — each as JSON and as
+a CSV export. No new table, no new command kind, no agent change: the aggregates read the per-minute
+`heartbeats` table and the denormalised device patch columns.
+
+```
+ dashboard Reports page ──► GET /api/v1/reports/{uptime,disk,disk/top,patch-compliance}
+                                │  (session auth ─► csrf ─► requireRole viewer; days ≤ MSP_RETENTION_DAYS)
+                                ▼
+            store.{UptimeReport,DiskSeries,DiskTop,PatchCompliance}  (visible-org filter in SQL)
+                                │
+                                ├─► JSON envelope the dashboard consumes
+                                └─► sibling .csv (attachment, CRLF, formula-injection-guarded cells)
+```
+
+- **Store** (`internal/store/reports.go`): `UptimeReport(ctx, visibleOrgs, orgID, days)` counts
+  heartbeat rows per device over the window and divides by the interval-derived, enrolment-prorated
+  `expected` (cadence = max(interval_s, 60s)); `DiskSeries(ctx, deviceID, days)` returns the ordered
+  disk series + min/max/latest (NULL disk rows skipped); `DiskTop(ctx, visibleOrgs, orgID, days, limit)`
+  the fleet's fullest latest disks; `PatchCompliance(ctx, visibleOrgs, orgID)` the overall + per-org
+  buckets and the per-device rows from the denormalised columns. The RS2 filter (`reportOrgWhere` over
+  `orgInClause`) and the retention clamp live here; `uptime_s` (the device's OS uptime) comes from the
+  latest heartbeat and is unrelated to `uptime_pct`.
+- **Server** (`internal/server/dashboard_reports.go`): the handlers validate `days` (1..retention) and
+  resolve the org/device scope (malformed -> 400; outside the visible set -> 404 before any work), then
+  emit the JSON the dashboard consumes or stream CSV through `beginCSV` (`UseCRLF`, the attachment
+  filename `msp-<report>-<date>.csv`) with `csvSafe` guarding each text cell. The routes self-register
+  via `dashboardRoutes = append(…, registerReports)` in `init()` — no change to `dashboard.go`, the
+  same pattern as `dashboard_patch.go`.
+- **Dashboard** (`web/src/views/Reports.tsx`, pure math in `web/src/lib/reports.ts`): an org + period
+  toolbar drives an uptime table (bar + org mean), a hand-written SVG disk-trend chart (no new chart
+  dependency) and the patch-compliance tiles + per-device table, each with a Download-CSV button;
+  `?mock=1` seeds all three.
+- **Package rules unchanged**: store queries + server handlers + a Preact view, no new module, no new
+  dependency, no migration. Proven end to end by `internal/e2e/TestReports` (seeded heartbeat history +
+  patch state: uptime proration, disk min/max/latest, patch bucketing, injection-safe CSV, RS2 404, the
+  retention bound).

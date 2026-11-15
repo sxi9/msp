@@ -524,7 +524,27 @@ swap a file.
 - **Android.** exec/script are desktop kinds, so a fan-out skips android with a per-device note
   rather than queueing a command the device cannot run.
 
-## 18. Reporting a vulnerability
+## 18. Reports and exports (RP1)
+
+- **Read-only.** Every report is a `GET` over data the platform already stores (the `heartbeats`
+  table and the denormalised device patch columns). There is no new table, no new command kind and
+  no agent change; a report can only read, never act, so a viewer may read them.
+- **Org scoping (RS2).** Each report filters to the caller's visible org set **in SQL** (the shared
+  visible-org helpers), and an explicit `org_id` (fleet reports) or `device_id` (the disk series)
+  outside that set is `404 not_found` — never a distinguishable 403, and resolved **before any work**,
+  so a scoped operator cannot even confirm that a client or device in another tenant exists. A scoped
+  operator's uptime/disk-top/patch reports contain only their own orgs' rows.
+- **CSV / formula injection.** The CSV exports neutralise spreadsheet formula injection: any text cell
+  (hostname, org name, platform) whose first character is `=`, `+`, `-`, `@`, TAB or CR is prefixed
+  with a single quote, so a crafted hostname like `=cmd|'/c calc'!A1` is rendered as literal text and
+  never evaluated when the file is opened in Excel/Sheets. Comma/quote/newline quoting is handled by
+  the standard CSV encoder; numeric and boolean cells are emitted verbatim. The same guard is mirrored
+  in the client-side CSV builder used for the dashboard preview. The export carries
+  `Content-Disposition: attachment` so a browser downloads rather than renders it.
+- **Retention bound.** The period is clamped to 1..`MSP_RETENTION_DAYS`; a longer `days` is rejected
+  `400`, so a report cannot be used to probe for data beyond what retention keeps.
+
+## 19. Reporting a vulnerability
 
 Report privately to the maintainers of this repository (open a security advisory on the
 repository, or e-mail the address listed in its README once published). Please include the

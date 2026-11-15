@@ -275,19 +275,38 @@ func TestPatchCompliance(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("RecordPatches d4: %v", err)
 	}
+	// D5 (regression, RP1 low finding): never checked but with reboot_required set
+	// (a zero CheckedAt leaves patches_checked_at NULL while reboot_required=1).
+	// reboot_required is a flag on the checked set, so bucketPatch must NOT count
+	// this device — mirroring the web bucketDevices helper, which skips a
+	// never-checked device before the reboot check. Without the guard the two
+	// "mirrored" helpers would disagree (server 2, web 1).
+	d5 := rptDevice(t, s, org.ID, "uid-p5", "ws-5")
+	if err := s.RecordPatches(ctx, d5.ID, protocol.PatchReport{
+		Manager: protocol.PatchManagerApt, RebootRequired: true,
+	}); err != nil {
+		t.Fatalf("RecordPatches d5: %v", err)
+	}
 
 	rep, err := s.PatchCompliance(ctx, nil, nil)
 	if err != nil {
 		t.Fatalf("PatchCompliance: %v", err)
 	}
-	// fixture's own device (ws-01) is never checked too, so total 5, never 2.
-	want := PatchBuckets{Total: 5, UpToDate: 1, Pending: 2, SecurityPending: 1, RebootRequired: 1, NeverChecked: 2}
+	// fixture's own device (ws-01) is never checked too; with d3 and d5 that is
+	// never 3, total 6. reboot_required stays 1 (only d4, which is checked): the
+	// never-checked d5 does not contribute, matching the web helper.
+	want := PatchBuckets{Total: 6, UpToDate: 1, Pending: 2, SecurityPending: 1, RebootRequired: 1, NeverChecked: 3}
 	if rep.Buckets != want {
 		t.Fatalf("buckets = %+v, want %+v", rep.Buckets, want)
 	}
 	byID := map[int64]DevicePatch{}
 	for _, d := range rep.Devices {
 		byID[d.DeviceID] = d
+	}
+	// d5 is never-checked yet carries the reboot_required flag; it is excluded from
+	// the reboot_required bucket above but the per-device row still reports the flag.
+	if dp := byID[d5.ID]; dp.CheckedAt != nil || !dp.RebootRequired {
+		t.Fatalf("d5 = %+v, want never-checked with reboot_required set", dp)
 	}
 	if dp := byID[d3.ID]; dp.CheckedAt != nil {
 		t.Fatalf("d3 checked_at = %v, want nil", dp.CheckedAt)

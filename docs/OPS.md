@@ -285,6 +285,13 @@ compose file carries the commented lines.
   batches of 5000 rows so syncs interleave); commands (with their
   captured output), alerts and audit rows are kept indefinitely. Watch the database size and
   run `VACUUM` after large deletions if needed.
+- Reports (RP1) are bounded by this same window: the uptime and disk-trend reports accept a
+  period of 1..`MSP_RETENTION_DAYS` days (a longer `days` is rejected `400`), because they read
+  the per-minute `heartbeats` the pruner keeps for only that long; patch compliance reads the
+  current denormalised device columns and is not windowed. For longer history, raise
+  `MSP_RETENTION_DAYS` (at the cost of database size) — or wait for the phase-3 rollups that will
+  summarise older data. If you raise retention, the dashboard's period picker (currently 1/3/7)
+  only offers up to 7 days until its option list is widened to match.
 - Firewall: agents need **outbound** HTTPS (443, or whatever port the server listens on)
   to the server only; nothing is opened inbound at client sites. The server needs 443 (or
   80 + 443 with Caddy) inbound and nothing else, plus the RustDesk relay ports of section 10
