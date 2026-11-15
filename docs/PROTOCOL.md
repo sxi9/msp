@@ -1151,6 +1151,49 @@ when the alert's org is inside an active maintenance window at enqueue time. The
 with backoff and lands `failed` after `maxAttempts`. `detail` and `last_error` are redacted of any
 secret or tokened URL (docs/SECURITY.md).
 
+### Reports and exports (RP1)
+
+Read-only, RS2 org-scoped aggregates over the data the platform already stores (heartbeats and the
+denormalised device patch columns); no new table, no agent change. All are `GET`, admin|operator|viewer
+(reports are read-only, so a viewer may read them). The period `days` defaults to `7`, must be a positive
+integer and is rejected (`400 invalid_request`) when non-numeric, non-positive or greater than
+`MSP_RETENTION_DAYS` (default 7) — a report can only cover what retention keeps. A malformed `org_id` is
+`400`; an explicit `org_id`/`device_id` outside the caller's visible org set is `404 not_found` (never a
+distinguishable 403), resolved before any work. **`uptime_pct` is a check-in approximation** ("did the
+agent report in"), not OS uptime: `expected` is the number of throttled heartbeat windows the device's
+`interval_s` (floored at the 1/min sample throttle) would produce over the window, prorated from
+`enrolled_at`; `samples` is the heartbeat rows seen; `uptime_pct = 100 * min(samples/expected, 1)`. The
+device's own OS uptime is the unrelated `uptime_s` (the last heartbeat's figure), shown alongside.
+
+- `GET /api/v1/reports/uptime?org_id=&days=N` ->
+  `{"days", "since", "mean_uptime_pct", "device_count",
+    "rows":[{"device_id","hostname","org_id","org_name","samples","expected","uptime_pct","uptime_s"}]}`.
+  `mean_uptime_pct` is the unweighted mean of the rows' `uptime_pct`.
+- `GET /api/v1/reports/disk?device_id=&days=N` -> one RS2-visible device's disk series:
+  `{"device_id","hostname","org_id","org_name","days","since",
+    "series":[{"at","disk_used_pct"}], "min","max","latest"}`. Heartbeats with a NULL disk reading are
+  skipped; `min`/`max`/`latest` are `null` when the series is empty. `device_id` is required (missing or
+  invalid -> `400`; unknown or invisible device -> `404`).
+- `GET /api/v1/reports/disk/top?org_id=&days=N&limit=` ->
+  `{"days","rows":[{"device_id","hostname","org_id","org_name","latest"}]}` — the devices with the
+  highest latest in-window disk usage, highest first (`limit` default 10, max 100; only devices with an
+  in-window disk sample).
+- `GET /api/v1/reports/patch-compliance?org_id=` ->
+  `{"overall":<counts>, "orgs":[{"org_id","org_name","counts":<counts>}],
+    "devices":[{"device_id","hostname","org_id","org_name","pending","security","reboot_required","checked_at"}]}`
+  where `<counts>` is `{"total","up_to_date","pending","security_pending","reboot_required","never_checked"}`.
+  `up_to_date`/`pending`/`never_checked` partition `total` (`up_to_date` = checked with 0 pending);
+  `security_pending` and `reboot_required` are additional overlapping flags on the checked set.
+  `never_checked` includes platforms that never scan (e.g. android) — this is the current denormalised
+  state, not windowed.
+- CSV exports mirror the JSON rows: `GET /api/v1/reports/uptime.csv?org_id=&days=N`,
+  `GET /api/v1/reports/disk.csv?device_id=&days=N`, `GET /api/v1/reports/patch-compliance.csv?org_id=`.
+  `Content-Type: text/csv; charset=utf-8`, `Content-Disposition: attachment; filename="msp-<report>-<YYYY-MM-DD>.csv"`,
+  CRLF-framed. Columns: uptime = `device_id,hostname,org_id,org_name,samples,expected,uptime_pct,os_uptime_s`;
+  disk = `at,disk_used_pct`; patch-compliance = `device_id,hostname,org_id,org_name,pending,security,reboot_required,checked_at`.
+  Text cells (hostname, org_name) are formula-injection-guarded: a leading `=`,`+`,`-`,`@`,TAB or CR is
+  prefixed with a single quote so a spreadsheet renders it as text (docs/SECURITY.md).
+
 ### Other paths and headers
 
 - `GET /healthz` -> `200 {"ok":true}` when the DB answers `SELECT 1`, else `503`.
