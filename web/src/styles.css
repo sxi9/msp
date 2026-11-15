@@ -150,6 +150,21 @@ pre.out { margin: 0; padding: 8px 64px 8px 10px; background: var(--code-bg); bor
 .agent-update .badge-amber { margin-left: 8px; }
 .banner { margin: 10px 0; padding: 8px 12px; border: 1px solid var(--line); border-left: 3px solid var(--accent); border-radius: 6px; background: var(--panel); color: var(--text); font-size: 13px; }
 .banner strong { color: var(--text); }
+/* WL1 watchlists + forwarded logs: the fleet Services column (a red count badge),
+   the device Watched-services state chips, the device Logs panel (level chips +
+   wrapping message in its own scroll box, reusing .apps-scroll) and the fleet
+   "only stopped services" filter. */
+.badge-bad { background: var(--bad); }
+.chip-run { color: var(--ok); }
+.chip-stop { color: var(--bad); }
+.lvl-error { color: var(--bad); }
+.lvl-warning { color: var(--warn); }
+.lvl-info { color: var(--accent); }
+.lvl-debug, .lvl-other { color: var(--muted); }
+.watched h2, .devlogs h2 { margin: 0; }
+.devlog td[data-label="Message"] { white-space: normal; overflow-wrap: anywhere; }
+.table-filter { display: inline-flex; align-items: center; gap: 6px; margin: 4px 0 8px; font-size: 13px; color: var(--muted); }
+.table-filter input { margin: 0; }
 /* Remote shell: the xterm viewport scrolls inside its own fixed-height box, so a
    long session never grows the page and the fit addon keeps cols within width. */
 .shell-card h2 { margin: 0; }

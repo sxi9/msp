@@ -9,6 +9,10 @@ import { notReportedHint, remoteDesktopError, technicianHint } from '../lib/rust
 import { appsOf, appsSummary, filterApps, type InstalledApp } from '../lib/apps.ts';
 import { factRows } from '../lib/facts.ts';
 import { filterSoftware, softwareOf, softwareSummary, sourceLabel } from '../lib/software.ts';
+import {
+  applicableItems, distinctUnits, filterLogs, levelClass, levelLabel, logSourceLabel, logSummary,
+  mergeWatched, servicesOf, serviceSummary, type Severity,
+} from '../lib/watchlist.ts';
 import { patchReportOf, rebootBadge, sortUpdates, summarisePatches } from '../lib/patches.ts';
 import { destError, fileSize, filesForDevice, validPackageName } from '../lib/deploy.ts';
 import { isOutdated, selfUpdateEnabled, targetVersion } from '../lib/agentver.ts';
@@ -145,7 +149,10 @@ export function Device({ id, user }: { id: number; user: User }) {
   // every other facts key is a Facts row (factRows excludes both arrays, which
   // the server stores inside facts_json).
   const apps = appsOf(facts);
-  const factEntries = factRows(facts);
+  // factRows already drops the apps/software inventory arrays; also drop the WL1
+  // services array (it has its own "Watched services" panel) so it never renders as
+  // an unreadable Facts row.
+  const factEntries = factRows(facts).filter(([k]) => k !== 'services');
   const metrics = detail.data.metrics ?? {};
   const disks = (metrics.disks as { mount: string; total_gb: number; used_gb: number }[] | undefined) ?? [];
   const operator = canOperate(user);
@@ -206,6 +213,8 @@ export function Device({ id, user }: { id: number; user: User }) {
       {d.platform !== 'android' && <InstalledSoftware device={d} software={detail.data.software} />}
       {d.platform !== 'android' && <Updates device={d} patches={detail.data.patches} canPatch={operator && !d.revoked && d.status === 'online'} onPatch={queuePatch} />}
       {d.platform !== 'android' && <AgentUpdate device={d} canUpdate={operator && !d.revoked && d.status === 'online'} onUpdate={queueUpdate} />}
+      {d.platform !== 'android' && <WatchedServices device={d} facts={facts} />}
+      {d.platform !== 'android' && <DeviceLogs device={d} />}
       {builtins && <BuiltIns device={d} onQueue={queue} />}
       <RemoteShell device={d} user={user} />
       {!d.revoked && <RemoteDesktop device={d} operator={operator} />}
@@ -299,6 +308,109 @@ function InstalledSoftware({ device, software }: { device: DeviceT; software?: u
           </div>
         )}
       {all.length > 0 && <p class="muted">{rows.length} of {all.length} shown. Search the whole fleet for a package on the <a href="#/software">Software</a> page.</p>}
+    </div>
+  );
+}
+
+/**
+ * Watched services (WL1): the device's applicable service/process watchlist (org
+ * items for its client + its own device items) merged with the latest running state
+ * the agent reported in facts.services. Each row shows the name, kind, a
+ * running/stopped/unknown chip and whether a stop opens an alert. Never shown for
+ * Android (which is not in a watchlist). Links to the Watchlists admin area.
+ */
+function WatchedServices({ device, facts }: { device: DeviceT; facts: Record<string, unknown> }) {
+  const wl = usePoll(() => api.listWatchlist({ org_id: device.org_id }).then((r) => r.items), [device.org_id], 30000);
+  const items = applicableItems(wl.data ?? [], device);
+  const states = servicesOf(facts) ?? [];
+  const rows = mergeWatched(items, states);
+  return (
+    <div class="card watched">
+      <div class="form-row">
+        <h2>Watched services <span class="muted">{serviceSummary(rows)}</span></h2>
+        <a class="btn btn-sm" href="#/watchlists">Manage watchlist</a>
+      </div>
+      <dl class="kv">
+        <dt>Last checked</dt><dd>{device.services_checked_at ? ago(device.services_checked_at) : <span class="muted">never</span>}</dd>
+      </dl>
+      {wl.error && <p class="error">{wl.error}</p>}
+      {rows.length === 0 ? (
+        <p class="muted">No service or process is watched on this device. Add one in the <a href="#/watchlists">Watchlists</a> area — an item for this client applies to every desktop, or add one just for this device.</p>
+      ) : (
+        <div class="apps-scroll">
+          <table class="grid">
+            <thead><tr><th>Name</th><th>Kind</th><th>State</th><th>Alerts</th></tr></thead>
+            <tbody>
+              {rows.map((s) => (
+                <tr key={`${s.kind}-${s.name}`}>
+                  <td data-label="Name"><code>{s.name}</code></td>
+                  <td data-label="Kind"><span class="chip">{s.kind}</span></td>
+                  <td data-label="State">
+                    {s.running === true ? <span class="chip chip-run">running</span>
+                      : s.running === false ? <span class="chip chip-stop">stopped</span>
+                      : <span class="chip">unknown</span>}
+                  </td>
+                  <td data-label="Alerts">{s.alert ? <span class="ok" title="opens a service_down alert when stopped">on</span> : <span class="muted">off</span>}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Forwarded logs (WL1): the recent warning+ log lines the agent forwarded for this
+ * device's watched units (journald on Linux, Event Log on Windows), newest first,
+ * in a scroll box with a unit and a level filter. Never shown for Android.
+ */
+function DeviceLogs({ device }: { device: DeviceT }) {
+  const logs = usePoll(() => api.deviceLogs(device.id, { limit: 500 }).then((r) => r.logs), [device.id], 20000);
+  const [unit, setUnit] = useState('');
+  const [severity, setSeverity] = useState<Severity | ''>('');
+  const all = logs.data ?? [];
+  const units = distinctUnits(all);
+  const rows = filterLogs(all, { unit, severity });
+  return (
+    <div class="card devlogs">
+      <div class="form-row">
+        <h2>Logs <span class="muted">{logSummary(all)}</span></h2>
+        <select value={unit} onChange={(e) => setUnit(e.currentTarget.value)}>
+          <option value="">All units</option>
+          {units.map((u) => <option key={u} value={u}>{u}</option>)}
+        </select>
+        <select value={severity} onChange={(e) => setSeverity(e.currentTarget.value as Severity | '')}>
+          <option value="">Any level</option>
+          <option value="error">Error</option>
+          <option value="warning">Warning</option>
+          <option value="info">Info</option>
+          <option value="debug">Debug</option>
+          <option value="other">Other</option>
+        </select>
+      </div>
+      {logs.error && <p class="error">{logs.error}</p>}
+      {all.length === 0 ? (
+        <p class="muted">No forwarded log lines yet. The agent forwards warning-and-above entries for the device's watched units; add a watchlist item to collect its logs.</p>
+      ) : rows.length === 0 ? <p class="muted">No log line matches the filter.</p> : (
+        <div class="apps-scroll devlog-scroll">
+          <table class="grid devlog">
+            <thead><tr><th>Time</th><th>Level</th><th>Unit</th><th>Message</th></tr></thead>
+            <tbody>
+              {rows.map((l) => (
+                <tr key={l.id}>
+                  <td data-label="Time" class="muted" title={when(l.at)}>{ago(l.at)}</td>
+                  <td data-label="Level"><span class={`chip ${levelClass(l.level)}`}>{levelLabel(l.level)}</span></td>
+                  <td data-label="Unit"><code>{l.unit || '—'}</code></td>
+                  <td data-label="Message">{l.message}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      {all.length > 0 && <p class="muted">{rows.length} of {all.length} shown · source {all.length ? logSourceLabel(all[0].source) : ''}.</p>}
     </div>
   );
 }

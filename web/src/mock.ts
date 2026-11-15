@@ -9,6 +9,7 @@ import type {
 } from './types.ts';
 import type { ShellSocket } from './lib/shell.ts';
 import type { SoftwareHit, SoftwareItem } from './lib/software.ts';
+import type { DeviceLog, ServiceState, WatchlistItem } from './lib/watchlist.ts';
 import { resolveTarget, scriptSkipNote } from './lib/automations.ts';
 import { bucketDevices, expectedWindows, meanUptime, seriesStats, uptimePct } from './lib/reports.ts';
 import type { DiskPoint, DiskTopRow, PatchComplianceRow, UptimeRow } from './lib/reports.ts';
@@ -61,7 +62,7 @@ const dev = (id: number, org_id: number, hostname: string, platform: Device['pla
   battery_pct: null, battery_charging: null, uptime_s: status === 'pending' ? null : 86400 * 3 + 4000, open_alerts: 0,
   can_run_commands: platform !== 'android', rustdesk_id: null,
   pending_patches: 0, security_patches: 0, reboot_required: false, patches_checked_at: null,
-  software_count: 0, software_checked_at: null, ...extra,
+  software_count: 0, software_checked_at: null, services_down: 0, services_checked_at: null, ...extra,
 });
 // The mock relay; add &rustdesk=0 to the URL to see the "not configured" card.
 const rustdesk = new URLSearchParams(location.search).get('rustdesk') === '0'
@@ -84,7 +85,7 @@ const agentManifest: AgentManifest = new URLSearchParams(location.search).get('s
 const devices: Device[] = [
   // A device with pending updates including a security one (PM1); agent 0.1.0, older
   // than the released 0.2.0, so it shows as an outdated agent (AU1).
-  dev(1, 1, 'ws-reception-01', 'linux', 'online', { rustdesk_id: '123456789', pending_patches: 3, security_patches: 1, patches_checked_at: iso(3600e3) }),
+  dev(1, 1, 'ws-reception-01', 'linux', 'online', { rustdesk_id: '123456789', pending_patches: 3, security_patches: 1, patches_checked_at: iso(3600e3), open_alerts: 1 }),
   // An up-to-date agent (0.2.0): no update offered (AU1).
   dev(2, 1, 'ws-xray', 'windows', 'online', { disk_used_pct: 93.1, open_alerts: 1, rustdesk_id: '987654321', agent_version: '0.2.0' }),
   dev(3, 1, 'Pixel 8', 'android', 'online', { battery_pct: 12, battery_charging: false, open_alerts: 1 }),
@@ -145,6 +146,53 @@ for (const d of devices) {
   const inv = softwareInventory[d.id];
   if (inv) { d.software_count = inv.length; d.software_checked_at = iso(3600e3); }
 }
+// Service/process watchlists (WL1): two org-scoped items for Acme (every desktop)
+// and one device-scoped process on ws-reception-01, plus a Zed Legal org item for
+// RS2 contrast. The device page's Watched-services panel merges these with each
+// device's reported facts.services (serviceState below).
+const watchlist: WatchlistItem[] = [
+  { id: 60, org_id: 1, org_name: 'Acme Dental', scope: 'org', device_id: null, hostname: '', kind: 'service', name: 'ssh.service', alert: true, created_at: iso(86400e3 * 4), created_by: 1 },
+  { id: 61, org_id: 1, org_name: 'Acme Dental', scope: 'org', device_id: null, hostname: '', kind: 'service', name: 'nginx.service', alert: true, created_at: iso(86400e3 * 4), created_by: 1 },
+  { id: 62, org_id: 1, org_name: 'Acme Dental', scope: 'device', device_id: 1, hostname: 'ws-reception-01', kind: 'process', name: 'cron', alert: false, created_at: iso(86400e3 * 2), created_by: 1 },
+  { id: 63, org_id: 2, org_name: 'Zed Legal', scope: 'org', device_id: null, hostname: '', kind: 'service', name: 'Spooler', alert: true, created_at: iso(86400e3 * 3), created_by: 1 },
+];
+// The running state a desktop agent last reported for its applicable watchlist
+// (facts.services), keyed by device id. ws-reception-01 has nginx.service stopped,
+// which has opened the service_down alert below and drives its services_down count.
+const serviceState: Record<number, ServiceState[]> = {
+  1: [
+    { kind: 'service', name: 'ssh.service', running: true },
+    { kind: 'service', name: 'nginx.service', running: false },
+    { kind: 'process', name: 'cron', running: true },
+  ],
+  2: [
+    { kind: 'service', name: 'ssh.service', running: true },
+    { kind: 'service', name: 'nginx.service', running: true },
+  ],
+  4: [
+    { kind: 'service', name: 'ssh.service', running: true },
+    { kind: 'service', name: 'nginx.service', running: true },
+  ],
+};
+for (const d of devices) {
+  const svc = serviceState[d.id];
+  if (svc && d.platform !== 'android') { d.services_checked_at = iso(60e3); d.services_down = svc.filter((s) => !s.running).length; }
+}
+// Forwarded warning+ log lines (WL1), keyed by device id, newest first — journald
+// on Linux, Event Log on Windows. The device Logs panel reads these.
+const deviceLogs: Record<number, DeviceLog[]> = {
+  1: [
+    { id: 201, device_id: 1, org_id: 1, at: iso(120e3), source: 'journald', unit: 'nginx.service', level: 'crit', message: 'nginx.service: Main process exited, code=exited, status=1/FAILURE' },
+    { id: 202, device_id: 1, org_id: 1, at: iso(180e3), source: 'journald', unit: 'nginx.service', level: 'err', message: 'bind() to 0.0.0.0:80 failed (98: Address already in use)' },
+    { id: 203, device_id: 1, org_id: 1, at: iso(600e3), source: 'journald', unit: 'ssh.service', level: 'warning', message: 'Failed password for invalid user admin from 10.0.1.9 port 52344 ssh2' },
+    { id: 204, device_id: 1, org_id: 1, at: iso(900e3), source: 'journald', unit: 'cron.service', level: 'warning', message: '(root) CMD (command exited with status 1)' },
+    { id: 205, device_id: 1, org_id: 1, at: iso(3600e3), source: 'journald', unit: 'ssh.service', level: 'notice', message: 'Server listening on 0.0.0.0 port 22.' },
+  ],
+  2: [
+    { id: 210, device_id: 2, org_id: 1, at: iso(300e3), source: 'eventlog', unit: 'Service Control Manager', level: 'Error', message: 'The Print Spooler service terminated unexpectedly.' },
+    { id: 211, device_id: 2, org_id: 1, at: iso(1500e3), source: 'eventlog', unit: 'Microsoft-Windows-WindowsUpdateClient', level: 'Warning', message: 'Installation Failure: update failed with error 0x80070002.' },
+  ],
+};
 // The server file library (SD1): one global artifact usable by any client and one
 // scoped to Acme Dental (org 1). The Deploy dialog filters these to a device's org.
 const files: LibraryFile[] = [
@@ -156,6 +204,8 @@ const alerts: Alert[] = [
   { id: 2, org_id: 1, org_name: 'Acme Dental', device_id: 2, hostname: 'ws-xray', type: 'disk_full', severity: 'medium', message: 'disk 93% used', opened_at: iso(3600e3), resolved_at: null, acknowledged_by: null, acknowledged_at: null },
   { id: 3, org_id: 1, org_name: 'Acme Dental', device_id: 3, hostname: 'Pixel 8', type: 'battery_low', severity: 'low', message: 'battery 12% and not charging', opened_at: iso(600e3), resolved_at: null, acknowledged_by: null, acknowledged_at: null },
   { id: 4, org_id: 2, org_name: 'Zed Legal', device_id: 5, hostname: 'LAPTOP-7Q2', type: 'offline', severity: 'high', message: 'no sync for 2m', opened_at: iso(86400e3), resolved_at: iso(80000e3), acknowledged_by: 1, acknowledged_at: iso(85000e3) },
+  // A watched service down (WL1): nginx.service on ws-reception-01 is not running.
+  { id: 5, org_id: 1, org_name: 'Acme Dental', device_id: 1, hostname: 'ws-reception-01', type: 'service_down', severity: 'medium', message: 'nginx.service is not running', opened_at: iso(1200e3), resolved_at: null, acknowledged_by: null, acknowledged_at: null },
 ];
 const tokens: EnrollmentToken[] = [
   { id: 1, org_id: 1, token_prefix: 'et_Ab12cD3', label: 'front desk', max_uses: 10, uses: 2, expires_at: iso(-86400e3 * 6), created_by: 1, created_at: iso(86400e3), revoked_at: null },
@@ -463,7 +513,7 @@ function route(method: string, path: string, body: unknown): Reply {
       // included) in devices.facts_json and returns it here, so a real desktop
       // carries `software` inside facts; the Device view must exclude it from the
       // Facts panel (it has its own "Installed software" panel). Mirror that here.
-      facts: d.status === 'pending' ? {} : d.platform === 'android' ? androidFacts(d) : { kernel: '6.8.0-45-generic', cpu_model: 'Intel(R) Core(TM) i5-1345U', cpu_count: 8, mem_total_mb: 16000, manufacturer: 'Dell Inc.', model: 'Latitude 5540', serial: 'ABC123', ips: [d.last_ip], software: softwareInventory[d.id] ?? [] },
+      facts: d.status === 'pending' ? {} : d.platform === 'android' ? androidFacts(d) : { kernel: '6.8.0-45-generic', cpu_model: 'Intel(R) Core(TM) i5-1345U', cpu_count: 8, mem_total_mb: 16000, manufacturer: 'Dell Inc.', model: 'Latitude 5540', serial: 'ABC123', ips: [d.last_ip], software: softwareInventory[d.id] ?? [], services: serviceState[d.id] ?? [] },
       metrics: d.status === 'pending' ? {} : { cpu_pct: d.cpu_pct, mem_total_mb: 16000, mem_used_mb: 8120, disks: [{ mount: d.platform === 'windows' ? 'C:' : '/', total_gb: 476, used_gb: 201.3 }], battery_pct: d.battery_pct, ips: [d.last_ip] },
       alerts: alerts.filter((a) => a.device_id === d.id && !a.resolved_at),
       commands: commands.filter((c) => c.device_id === d.id).slice(0, 20).map((c) => ({ ...c, stdout: '', stderr: '' })),
@@ -1038,6 +1088,66 @@ function route(method: string, path: string, body: unknown): Reply {
     a.next_run_at = v.fields.trigger === 'schedule' && v.fields.schedule?.every_minutes ? iso(-v.fields.schedule.every_minutes * 60e3) : null;
     log('automation.updated', 'automation', a.id, org_id, { name: a.name, trigger: a.trigger });
     return ok({ automation: a });
+  }
+
+  // --- WL1 service/process watchlists and forwarded logs (RS2 org-scoped) ---
+  if (p === '/api/v1/watchlist' && method === 'GET') {
+    const orgId = Number(q.get('org_id') ?? 0), deviceId = Number(q.get('device_id') ?? 0);
+    let items = watchlist;
+    if (orgId) { if (!orgs.some((o) => o.id === orgId)) return err(404, 'not_found'); items = items.filter((i) => i.org_id === orgId); }
+    if (deviceId) { if (!devices.some((d) => d.id === deviceId)) return err(404, 'not_found'); items = items.filter((i) => i.device_id === deviceId); }
+    return ok({ items });
+  }
+  if (p === '/api/v1/watchlist' && method === 'POST') {
+    const rr = needRole('operator'); if (rr) return rr;
+    const scope = String(b.scope ?? '');
+    const kind = b.kind === 'process' ? 'process' : b.kind === 'service' ? 'service' : '';
+    const name = String(b.name ?? '').trim();
+    if (kind === '') return err(400, 'invalid_request', 'kind must be service or process');
+    if (!name || name.length > 256) return err(400, 'invalid_request', 'name must be 1..256 bytes');
+    const alert = b.alert === undefined ? true : b.alert === true;
+    let it: WatchlistItem;
+    if (scope === 'org') {
+      if (b.org_id == null) return err(400, 'invalid_request', 'an org-scoped item requires org_id');
+      if (b.device_id != null) return err(400, 'invalid_request', 'an org-scoped item must not set device_id');
+      const org = orgs.find((o) => o.id === Number(b.org_id)); if (!org) return err(404, 'not_found');
+      it = { id: nextId++, org_id: org.id, org_name: org.name, scope: 'org', device_id: null, hostname: '', kind, name, alert, created_at: iso(0), created_by: me.id };
+    } else if (scope === 'device') {
+      if (b.device_id == null) return err(400, 'invalid_request', 'a device-scoped item requires device_id');
+      if (b.org_id != null) return err(400, 'invalid_request', 'a device-scoped item must not set org_id (it is derived from the device)');
+      const d = devices.find((x2) => x2.id === Number(b.device_id)); if (!d) return err(404, 'not_found');
+      if (d.platform === 'android') return err(400, 'unsupported_on_platform', 'watchlists are not available on android');
+      it = { id: nextId++, org_id: d.org_id, org_name: d.org_name, scope: 'device', device_id: d.id, hostname: d.hostname, kind, name, alert, created_at: iso(0), created_by: me.id };
+    } else return err(400, 'invalid_request', 'scope must be org or device');
+    watchlist.unshift(it);
+    log('watchlist.created', 'watchlist', it.id, it.org_id, { scope, kind, name, alert });
+    return ok({ item: it }, 201);
+  }
+  if ((x = m(/^\/api\/v1\/watchlist\/(\d+)$/))) {
+    const it = watchlist.find((i) => i.id === Number(x![1])); if (!it) return err(404, 'not_found');
+    if (method === 'DELETE') {
+      const rr = needRole('operator'); if (rr) return rr;
+      watchlist.splice(watchlist.indexOf(it), 1);
+      log('watchlist.deleted', 'watchlist', it.id, it.org_id, { scope: it.scope, kind: it.kind, name: it.name });
+      return ok(null, 204);
+    }
+    const rr = needRole('operator'); if (rr) return rr;
+    const kind = b.kind === 'process' ? 'process' : b.kind === 'service' ? 'service' : '';
+    const name = String(b.name ?? '').trim();
+    if (kind === '') return err(400, 'invalid_request', 'kind must be service or process');
+    if (!name || name.length > 256) return err(400, 'invalid_request', 'name must be 1..256 bytes');
+    it.kind = kind; it.name = name; if (b.alert !== undefined) it.alert = b.alert === true;
+    log('watchlist.updated', 'watchlist', it.id, it.org_id, { scope: it.scope, kind, name, alert: it.alert });
+    return ok({ item: it });
+  }
+  if ((x = m(/^\/api\/v1\/devices\/(\d+)\/logs$/))) {
+    const d = devices.find((x2) => x2.id === Number(x![1])); if (!d) return err(404, 'not_found');
+    const unit = (q.get('unit') ?? '').trim(), level = (q.get('level') ?? '').trim();
+    const limit = Math.min(Number(q.get('limit') ?? 200) || 200, 2000);
+    let ls = deviceLogs[d.id] ?? [];
+    if (unit) ls = ls.filter((l) => l.unit === unit);
+    if (level) ls = ls.filter((l) => l.level === level);
+    return ok({ logs: ls.slice(0, limit) });
   }
 
   // --- RP1 reports and exports (read-only, RS2 org-scoped) ---

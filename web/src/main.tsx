@@ -15,6 +15,7 @@ import { Org } from './views/Org.tsx';
 import { Notifications } from './views/Notifications.tsx';
 import { Deliveries } from './views/Deliveries.tsx';
 import { Software } from './views/Software.tsx';
+import { Watchlists } from './views/Watchlists.tsx';
 import { Scripts } from './views/Scripts.tsx';
 import { Jobs, JobView } from './views/Jobs.tsx';
 import { Automations } from './views/Automations.tsx';
@@ -33,6 +34,7 @@ function page(route: Route, user: User) {
     case 'notify': return user.role === 'viewer' ? <Deliveries /> : <Notifications user={user} />;
     case 'deliveries': return <Deliveries />;
     case 'software': return canOperate(user) ? <Software user={user} /> : <p class="error">Operators and admins only.</p>;
+    case 'watchlists': return canOperate(user) ? <Watchlists user={user} /> : <p class="error">Operators and admins only.</p>;
     case 'scripts': return canOperate(user) ? <Scripts user={user} /> : <p class="error">Operators and admins only.</p>;
     case 'jobs': return canOperate(user) ? <Jobs /> : <p class="error">Operators and admins only.</p>;
     case 'job': return canOperate(user) ? <JobView id={route.id} /> : <p class="error">Operators and admins only.</p>;

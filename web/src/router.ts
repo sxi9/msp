@@ -1,12 +1,12 @@
 // Hash router: #/login, #/ (fleet), #/devices/:id, #/alerts, #/orgs, #/orgs/:id,
-// #/notify, #/deliveries, #/software, #/scripts, #/jobs, #/automations, #/reports,
-// #/audit, #/users, #/account.
+// #/notify, #/deliveries, #/software, #/watchlists, #/scripts, #/jobs, #/automations,
+// #/reports, #/audit, #/users, #/account.
 import { useEffect, useState } from 'preact/hooks';
 
 export type Route =
   | { name: 'login' } | { name: 'fleet' } | { name: 'device'; id: number } | { name: 'alerts' }
   | { name: 'orgs' } | { name: 'org'; id: number } | { name: 'notify' } | { name: 'deliveries' }
-  | { name: 'software' } | { name: 'scripts' } | { name: 'jobs' } | { name: 'job'; id: number }
+  | { name: 'software' } | { name: 'watchlists' } | { name: 'scripts' } | { name: 'jobs' } | { name: 'job'; id: number }
   | { name: 'automations' } | { name: 'reports' } | { name: 'audit' } | { name: 'users' }
   | { name: 'account' } | { name: 'notfound' };
 
@@ -23,6 +23,7 @@ export function parseRoute(hash: string): Route {
     case 'notify': return { name: 'notify' };
     case 'deliveries': return { name: 'deliveries' };
     case 'software': return { name: 'software' };
+    case 'watchlists': return { name: 'watchlists' };
     case 'scripts': return { name: 'scripts' };
     case 'jobs': return parts.length === 1 ? { name: 'jobs' } : withId('job');
     case 'automations': return { name: 'automations' };

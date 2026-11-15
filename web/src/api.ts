@@ -4,11 +4,12 @@ import type {
   AgentRelease, Alert, AuditEntry, Automation, ChannelUpdate, Command, Device, DeviceDetail,
   DiskReport, DiskTopReport, EnrollmentToken, EscalationPolicy, Heartbeat, Job, JobCreated, JobDetail,
   LibraryFile, LoginResult, MaintenanceWindow, NewAutomation, NewChannel, NewCommand, NewDeploy, NewJob,
-  NewPatch, NewPolicy, NewRule, NewScript, NewShell, NewWindow, NotificationDelivery, NotifyChannel,
-  NotifyRule, Org, OrgAssignment, PatchComplianceReport, PolicyUpdate, PresetLibrary, RecoveryCodes,
-  RemoteDesktopOpened, RuleUpdate, RustdeskInfo, Script, ShellOpened, SoftwareSearchResult, Summary,
-  TokenCreated, TotpSetup, UptimeReport, User,
+  NewPatch, NewPolicy, NewRule, NewScript, NewShell, NewWatchlistItem, NewWindow, NotificationDelivery,
+  NotifyChannel, NotifyRule, Org, OrgAssignment, PatchComplianceReport, PolicyUpdate, PresetLibrary,
+  RecoveryCodes, RemoteDesktopOpened, RuleUpdate, RustdeskInfo, Script, ShellOpened, SoftwareSearchResult,
+  Summary, TokenCreated, TotpSetup, UptimeReport, User, WatchlistItem, WatchlistItemUpdate,
 } from './types.ts';
+import type { DeviceLog } from './lib/watchlist.ts';
 import { mockRequest } from './mock.ts';
 
 export const MOCK = typeof location !== 'undefined' && /(^|[?&])mock=1(&|$)/.test(location.search);
@@ -247,4 +248,19 @@ export const api = {
   reportUptimeCsvUrl: (f: { org_id?: number; days?: number } = {}) => `/api/v1/reports/uptime.csv${qs(f)}`,
   reportDiskCsvUrl: (deviceId: number, days?: number) => `/api/v1/reports/disk.csv${qs({ device_id: deviceId, days })}`,
   reportPatchComplianceCsvUrl: (orgId?: number) => `/api/v1/reports/patch-compliance.csv${qs({ org_id: orgId })}`,
+
+  // --- WL1 service/process watchlists and forwarded logs (/api/v1) ---
+  // Watchlist items, RS2 org-scoped. GET needs viewer; writes need operator. The
+  // ?org_id / ?device_id filters narrow the list (a cross-org value 404s). An item
+  // is org-scoped (every desktop in the org) or device-scoped (one device); android
+  // is never in a watchlist. deviceLogs reads a device's forwarded warning+ log
+  // lines (newest first), optionally filtered by exact unit/level, RS2-visible
+  // device only.
+  listWatchlist: (f: { org_id?: number; device_id?: number } = {}) =>
+    request<{ items: WatchlistItem[] }>('GET', `/api/v1/watchlist${qs(f)}`),
+  createWatchlistItem: (i: NewWatchlistItem) => request<{ item: WatchlistItem }>('POST', '/api/v1/watchlist', i),
+  updateWatchlistItem: (id: number, i: WatchlistItemUpdate) => request<{ item: WatchlistItem }>('PUT', `/api/v1/watchlist/${id}`, i),
+  deleteWatchlistItem: (id: number) => request<void>('DELETE', `/api/v1/watchlist/${id}`),
+  deviceLogs: (deviceId: number, f: { unit?: string; level?: string; limit?: number } = {}) =>
+    request<{ logs: DeviceLog[] }>('GET', `/api/v1/devices/${deviceId}/logs${qs(f)}`),
 };

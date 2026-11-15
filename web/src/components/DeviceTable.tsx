@@ -1,6 +1,8 @@
+import { useState } from 'preact/hooks';
 import type { AgentManifest, Device } from '../types.ts';
 import { groupByOrg, sortDevices } from '../lib/status.ts';
 import { hasPendingSecurity } from '../lib/patches.ts';
+import { hasStoppedService, stoppedServiceCount } from '../lib/watchlist.ts';
 import { isOutdated } from '../lib/agentver.ts';
 import { ago, pct } from '../lib/format.ts';
 import { StatusDot } from './StatusDot.tsx';
@@ -21,6 +23,14 @@ export function Updates({ device: d }: { device: Device }) {
   return <span title={title}>{d.pending_patches}</span>;
 }
 
+/** Fleet Services cell: a red badge with the count when a watched service is stopped (WL1); "ok"/"—" otherwise. */
+export function Services({ device: d }: { device: Device }) {
+  const down = stoppedServiceCount(d);
+  if (down > 0) return <span class="badge badge-bad" title={`${down} watched service${down === 1 ? '' : 's'} stopped`}>{down}</span>;
+  if (d.services_checked_at) return <span class="ok" title="all watched services running">ok</span>;
+  return <span class="muted">—</span>;
+}
+
 /** Fleet Agent cell: the reported version, flagged "outdated" when the release manifest has a newer one (AU1). */
 export function AgentCell({ device: d, manifest }: { device: Device; manifest?: AgentManifest | null }) {
   if (!d.agent_version) return <span class="muted">—</span>;
@@ -32,36 +42,50 @@ export function AgentCell({ device: d, manifest }: { device: Device; manifest?: 
 
 /** Fleet table: sorted by urgency, grouped under org header rows (the Org page hides them). */
 export function DeviceTable({ devices, grouped = true, empty, manifest }: { devices: Device[]; grouped?: boolean; empty: string; manifest?: AgentManifest | null }) {
+  // Fleet-level filter (WL1): show only devices with a stopped watched service. The
+  // toggle appears only when at least one device has one, so other usages (the Org
+  // page) are unchanged when nothing is down.
+  const [onlyStopped, setOnlyStopped] = useState(false);
+  const stoppedTotal = devices.filter(hasStoppedService).length;
+  const shown = onlyStopped ? devices.filter(hasStoppedService) : devices;
+  const filter = stoppedTotal > 0 && (
+    <label class="table-filter"><input type="checkbox" checked={onlyStopped} onChange={(e) => setOnlyStopped(e.currentTarget.checked)} /> Only stopped services <span class="badge badge-bad">{stoppedTotal}</span></label>
+  );
   if (devices.length === 0) return <p class="empty">{empty}</p>;
-  const sorted = sortDevices(devices);
+  if (shown.length === 0) return <>{filter}<p class="empty">No device has a stopped watched service.</p></>;
+  const sorted = sortDevices(shown);
   const groups = grouped ? groupByOrg(sorted) : [{ org_id: 0, org_name: '', devices: sorted }];
   return (
-    <table class="grid">
-      <thead>
-        <tr><th></th><th>Hostname</th><th>OS</th><th>Arch</th><th>Last seen</th><th>CPU</th><th>Memory</th><th>Disk</th><th>Battery</th><th>Alerts</th><th>Updates</th><th>Software</th><th>Agent</th></tr>
-      </thead>
-      <tbody>
-        {groups.map((g) => [
-          grouped && <tr class="orghead" key={`org-${g.org_id}`}><td colSpan={13}><a href={`#/orgs/${g.org_id}`}>{g.org_name}</a> <span class="muted">{g.devices.length}</span></td></tr>,
-          ...g.devices.map((d) => (
-            <tr key={d.id} class={d.revoked ? 'revoked' : ''}>
-              <td data-label="Status"><StatusDot status={d.status} alerting={d.open_alerts > 0} /></td>
-              <td data-label="Hostname"><a href={`#/devices/${d.id}`}>{d.hostname}</a>{d.revoked && <span class="chip">revoked</span>}</td>
-              <td data-label="OS"><span class="chip">{PLATFORM_SHORT[d.platform] ?? d.platform}</span> {d.os_version}</td>
-              <td data-label="Arch" class="muted">{d.arch}</td>
-              <td data-label="Last seen">{ago(d.last_seen_at)}</td>
-              <td data-label="CPU"><Bar value={d.cpu_pct} /></td>
-              <td data-label="Memory"><Bar value={d.mem_used_pct} /></td>
-              <td data-label="Disk"><Bar value={d.disk_used_pct} /></td>
-              <td data-label="Battery"><Battery pct={d.battery_pct} charging={d.battery_charging} /></td>
-              <td data-label="Alerts">{d.open_alerts > 0 ? <span class="badge badge-amber">{d.open_alerts}</span> : <span class="muted">0</span>}</td>
-              <td data-label="Updates"><Updates device={d} /></td>
-              <td data-label="Software">{d.software_count > 0 ? <a href={`#/devices/${d.id}`} title={`${d.software_count} installed packages`}>{d.software_count}</a> : <span class="muted">0</span>}</td>
-              <td data-label="Agent"><AgentCell device={d} manifest={manifest} /></td>
-            </tr>
-          )),
-        ])}
-      </tbody>
-    </table>
+    <>
+      {filter}
+      <table class="grid">
+        <thead>
+          <tr><th></th><th>Hostname</th><th>OS</th><th>Arch</th><th>Last seen</th><th>CPU</th><th>Memory</th><th>Disk</th><th>Battery</th><th>Alerts</th><th>Services</th><th>Updates</th><th>Software</th><th>Agent</th></tr>
+        </thead>
+        <tbody>
+          {groups.map((g) => [
+            grouped && <tr class="orghead" key={`org-${g.org_id}`}><td colSpan={14}><a href={`#/orgs/${g.org_id}`}>{g.org_name}</a> <span class="muted">{g.devices.length}</span></td></tr>,
+            ...g.devices.map((d) => (
+              <tr key={d.id} class={d.revoked ? 'revoked' : ''}>
+                <td data-label="Status"><StatusDot status={d.status} alerting={d.open_alerts > 0} /></td>
+                <td data-label="Hostname"><a href={`#/devices/${d.id}`}>{d.hostname}</a>{d.revoked && <span class="chip">revoked</span>}</td>
+                <td data-label="OS"><span class="chip">{PLATFORM_SHORT[d.platform] ?? d.platform}</span> {d.os_version}</td>
+                <td data-label="Arch" class="muted">{d.arch}</td>
+                <td data-label="Last seen">{ago(d.last_seen_at)}</td>
+                <td data-label="CPU"><Bar value={d.cpu_pct} /></td>
+                <td data-label="Memory"><Bar value={d.mem_used_pct} /></td>
+                <td data-label="Disk"><Bar value={d.disk_used_pct} /></td>
+                <td data-label="Battery"><Battery pct={d.battery_pct} charging={d.battery_charging} /></td>
+                <td data-label="Alerts">{d.open_alerts > 0 ? <span class="badge badge-amber">{d.open_alerts}</span> : <span class="muted">0</span>}</td>
+                <td data-label="Services"><Services device={d} /></td>
+                <td data-label="Updates"><Updates device={d} /></td>
+                <td data-label="Software">{d.software_count > 0 ? <a href={`#/devices/${d.id}`} title={`${d.software_count} installed packages`}>{d.software_count}</a> : <span class="muted">0</span>}</td>
+                <td data-label="Agent"><AgentCell device={d} manifest={manifest} /></td>
+              </tr>
+            )),
+          ])}
+        </tbody>
+      </table>
+    </>
   );
 }

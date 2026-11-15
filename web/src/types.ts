@@ -4,9 +4,11 @@
 import type { SoftwareHit, SoftwareItem } from './lib/software.ts';
 import type { AgentManifest } from './lib/agentver.ts';
 import type { DiskPoint, DiskTopRow, PatchComplianceRow, PatchCounts, UptimeRow } from './lib/reports.ts';
+import type { WatchKind, WatchScope } from './lib/watchlist.ts';
 
 export type { AgentManifest, AgentManifestFile } from './lib/agentver.ts';
 export type { DiskPoint, DiskTopRow, PatchComplianceRow, PatchCounts, UptimeRow } from './lib/reports.ts';
+export type { DeviceLog, LogSource, ServiceState, WatchKind, WatchScope, WatchedService, WatchlistItem } from './lib/watchlist.ts';
 
 export type Role = 'admin' | 'operator' | 'viewer';
 export type Platform = 'linux' | 'windows' | 'android';
@@ -102,6 +104,16 @@ export interface Device {
    * page shows the apps panel instead.
    */
   software_count: number; software_checked_at: string | null;
+  /**
+   * Watched-service state (WL1), denormalised from the last facts.services a
+   * desktop agent reported. services_down is how many of the device's applicable
+   * watchlist items are currently stopped — it drives the fleet "Services" column
+   * and filter; services_checked_at is when the state was last reported. Both are
+   * optional on the wire (0/absent until the first report, and absent for Android,
+   * which is never in a watchlist). The per-item state is on the device-detail
+   * facts.services, not here.
+   */
+  services_down?: number; services_checked_at?: string | null;
 }
 
 /** Body of GET /api/v1/software (SI1): the cross-fleet package-search results. */
@@ -237,8 +249,8 @@ export type SmsProvider = 'twilio' | 'generic';
 export type DeliveryEvent = 'opened' | 'resolved' | 'test';
 export type DeliveryStatus = 'pending' | 'sent' | 'failed' | 'suppressed';
 
-/** The four alert types the evaluator opens (internal/server/alerts.go). */
-export const ALERT_TYPES = ['offline', 'disk_full', 'memory_high', 'battery_low'] as const;
+/** The alert types the evaluator opens (internal/server/alerts.go + watchlist_eval.go). */
+export const ALERT_TYPES = ['offline', 'disk_full', 'memory_high', 'battery_low', 'service_down'] as const;
 
 /** Non-secret settings of an email channel (config of a kind `email` channel). */
 export interface EmailConfig { host: string; port: number; from: string; to: string[]; starttls: boolean; username: string }
@@ -452,6 +464,23 @@ export interface PatchComplianceOrg { org_id: number; org_name: string; counts: 
 
 /** GET /api/v1/reports/patch-compliance body: overall + per-org counts + per-device rows. */
 export interface PatchComplianceReport { overall: PatchCounts; orgs: PatchComplianceOrg[]; devices: PatchComplianceRow[] }
+
+// --- WL1 service/process watchlists and forwarded logs ------------------------
+// Watch services/processes on desktops and alert when one is down (service_down),
+// and read the warning+ log lines agents forward. All RS2 org-scoped. The item and
+// log wire shapes (WatchlistItem, DeviceLog, ServiceState) are re-exported above
+// from lib/watchlist.ts, which also holds the pure panel/column helpers.
+
+/**
+ * POST /api/v1/watchlist body. An org-scoped item sets scope 'org' + org_id (it
+ * applies to every desktop in the org); a device-scoped item sets scope 'device' +
+ * device_id (its org is derived from the device). `alert` omitted defaults to true.
+ */
+export interface NewWatchlistItem {
+  scope: WatchScope; org_id?: number; device_id?: number; kind: WatchKind; name: string; alert?: boolean;
+}
+/** PUT /api/v1/watchlist/{id} body: only kind/name/alert change (scope/org/device are fixed at creation). */
+export interface WatchlistItemUpdate { kind: WatchKind; name: string; alert?: boolean }
 
 export const ROLE_RANK: Record<Role, number> = { viewer: 0, operator: 1, admin: 2 };
 export const canOperate = (u: User | null): boolean => !!u && ROLE_RANK[u.role] >= ROLE_RANK.operator;
