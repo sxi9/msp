@@ -10,6 +10,8 @@ import type {
 import type { ShellSocket } from './lib/shell.ts';
 import type { SoftwareHit, SoftwareItem } from './lib/software.ts';
 import { resolveTarget, scriptSkipNote } from './lib/automations.ts';
+import { bucketDevices, expectedWindows, meanUptime, seriesStats, uptimePct } from './lib/reports.ts';
+import type { DiskPoint, DiskTopRow, PatchComplianceRow, UptimeRow } from './lib/reports.ts';
 
 interface Reply { status: number; body: unknown }
 
@@ -1036,6 +1038,83 @@ function route(method: string, path: string, body: unknown): Reply {
     a.next_run_at = v.fields.trigger === 'schedule' && v.fields.schedule?.every_minutes ? iso(-v.fields.schedule.every_minutes * 60e3) : null;
     log('automation.updated', 'automation', a.id, org_id, { name: a.name, trigger: a.trigger });
     return ok({ automation: a });
+  }
+
+  // --- RP1 reports and exports (read-only, RS2 org-scoped) ---
+  // The mock does not model per-user org scoping (like the rest of it); the real
+  // server restricts every report to the caller's visible orgs and 404s a cross-org
+  // org_id/device_id (RS2). It honours the org_id filter and the retention-bounded
+  // `days` so all three reports render under ?mock=1. The .csv exports are not routed
+  // here: the dashboard builds them client-side from the loaded report when MOCK.
+  const RETENTION_DAYS = 7;
+  const reportDays = (): number | Reply => {
+    const raw = q.get('days');
+    if (raw === null || raw === '') return RETENTION_DAYS;
+    const n = Number(raw);
+    if (!Number.isInteger(n) || n < 1 || n > RETENTION_DAYS) return err(400, 'invalid_request', `days must be between 1 and ${RETENTION_DAYS}`);
+    return n;
+  };
+  const orgExists = (orgId: number): boolean => !orgId || orgs.some((o) => o.id === orgId);
+  if (p === '/api/v1/reports/uptime') {
+    const days = reportDays(); if (typeof days !== 'number') return days;
+    const orgId = Number(q.get('org_id') ?? 0);
+    if (!orgExists(orgId)) return err(404, 'not_found');
+    const rows: UptimeRow[] = devices
+      .filter((d) => !orgId || d.org_id === orgId)
+      .map((d) => {
+        const expected = expectedWindows(days, d.interval_s, Date.parse(d.enrolled_at));
+        // Seed plausible check-in coverage: online near-complete, offline partial,
+        // pending (never synced) zero. (The 5-day-ago enrollment is prorated against
+        // a longer window, so expected < days*windows demonstrates the proration.)
+        const factor = d.status === 'online' ? 0.995 : d.status === 'offline' ? 0.3 : 0;
+        const samples = Math.min(expected, Math.round(expected * factor));
+        return {
+          device_id: d.id, hostname: d.hostname, org_id: d.org_id, org_name: d.org_name,
+          samples, expected, uptime_pct: uptimePct(samples, expected), uptime_s: d.uptime_s,
+        };
+      });
+    return ok({ days, rows, mean_uptime_pct: meanUptime(rows), device_count: rows.length });
+  }
+  if (p === '/api/v1/reports/disk/top') {
+    const days = reportDays(); if (typeof days !== 'number') return days;
+    const orgId = Number(q.get('org_id') ?? 0);
+    if (!orgExists(orgId)) return err(404, 'not_found');
+    const limit = Math.min(Math.max(Number(q.get('limit') ?? 10) || 10, 1), 100);
+    const rows: DiskTopRow[] = devices
+      .filter((d) => (!orgId || d.org_id === orgId) && d.disk_used_pct !== null)
+      .map((d) => ({ device_id: d.id, hostname: d.hostname, org_id: d.org_id, org_name: d.org_name, latest: d.disk_used_pct }))
+      .sort((a, b) => (b.latest ?? 0) - (a.latest ?? 0))
+      .slice(0, limit);
+    return ok({ days, rows });
+  }
+  if (p === '/api/v1/reports/disk') {
+    const days = reportDays(); if (typeof days !== 'number') return days;
+    const d = devices.find((x) => x.id === Number(q.get('device_id') ?? 0));
+    if (!d) return err(404, 'not_found');
+    const n = d.status === 'pending' ? 0 : 120;
+    const spanMs = days * 86400e3;
+    const base = d.disk_used_pct ?? 40;
+    // A gently rising series ending at the device's current disk_used_pct, oldest first.
+    const series: DiskPoint[] = Array.from({ length: n }, (_, i) => ({
+      at: iso(((n - i) / n) * spanMs),
+      disk_used_pct: Math.round((base - (n - i) * 0.02 + 2 * Math.sin(i / 9)) * 10) / 10,
+    }));
+    return ok({ device_id: d.id, hostname: d.hostname, org_id: d.org_id, org_name: d.org_name, days, series, ...seriesStats(series) });
+  }
+  if (p === '/api/v1/reports/patch-compliance') {
+    const orgId = Number(q.get('org_id') ?? 0);
+    if (!orgExists(orgId)) return err(404, 'not_found');
+    const scoped = devices.filter((d) => !orgId || d.org_id === orgId);
+    const byOrg = new Map<number, Device[]>();
+    for (const d of scoped) { const a = byOrg.get(d.org_id) ?? []; a.push(d); byOrg.set(d.org_id, a); }
+    const orgRows = [...byOrg.entries()]
+      .map(([oid, ds]) => ({ org_id: oid, org_name: ds[0].org_name, counts: bucketDevices(ds) }))
+      .sort((a, b) => a.org_name.localeCompare(b.org_name));
+    const deviceRows: PatchComplianceRow[] = scoped.map((d) => ({
+      device_id: d.id, hostname: d.hostname, org_id: d.org_id, org_name: d.org_name,
+      pending: d.pending_patches, security: d.security_patches, reboot_required: d.reboot_required, checked_at: d.patches_checked_at,
+    }));
+    return ok({ overall: bucketDevices(scoped), orgs: orgRows, devices: deviceRows });
   }
 
   return err(404, 'not_found');

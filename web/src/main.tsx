@@ -18,6 +18,7 @@ import { Software } from './views/Software.tsx';
 import { Scripts } from './views/Scripts.tsx';
 import { Jobs, JobView } from './views/Jobs.tsx';
 import { Automations } from './views/Automations.tsx';
+import { Reports } from './views/Reports.tsx';
 import { Audit } from './views/Audit.tsx';
 import { Users } from './views/Users.tsx';
 import { Account } from './views/Account.tsx';
@@ -36,6 +37,7 @@ function page(route: Route, user: User) {
     case 'jobs': return canOperate(user) ? <Jobs /> : <p class="error">Operators and admins only.</p>;
     case 'job': return canOperate(user) ? <JobView id={route.id} /> : <p class="error">Operators and admins only.</p>;
     case 'automations': return canOperate(user) ? <Automations user={user} /> : <p class="error">Operators and admins only.</p>;
+    case 'reports': return <Reports user={user} />;
     case 'audit': return <Audit />;
     case 'users': return user.role === 'admin' ? <Users user={user} /> : <p class="error">Admins only.</p>;
     case 'account': return <Account user={user} />;

@@ -3,8 +3,10 @@
 
 import type { SoftwareHit, SoftwareItem } from './lib/software.ts';
 import type { AgentManifest } from './lib/agentver.ts';
+import type { DiskPoint, DiskTopRow, PatchComplianceRow, PatchCounts, UptimeRow } from './lib/reports.ts';
 
 export type { AgentManifest, AgentManifestFile } from './lib/agentver.ts';
+export type { DiskPoint, DiskTopRow, PatchComplianceRow, PatchCounts, UptimeRow } from './lib/reports.ts';
 
 export type Role = 'admin' | 'operator' | 'viewer';
 export type Platform = 'linux' | 'windows' | 'android';
@@ -423,6 +425,33 @@ export interface NewAutomation {
   org_id: number | null; name: string; enabled?: boolean; trigger: AutomationTrigger;
   script_id: number; target: TargetSpec; schedule?: ScheduleSpec | null; alert?: AlertTriggerSpec | null;
 }
+
+// --- RP1 reports and exports -------------------------------------------------
+// Read-only, RS2 org-scoped reports over the data already stored (heartbeats,
+// devices with their patch columns): device uptime, disk-usage trends and patch
+// compliance, each also exported as CSV from a sibling .csv endpoint (opened as a
+// real-browser download, never routed through request()). The per-row/point shapes
+// (UptimeRow, DiskPoint, DiskTopRow, PatchComplianceRow, PatchCounts) live in
+// lib/reports.ts with their pure math and are re-exported above. The period `days`
+// is bounded by MSP_RETENTION_DAYS (default 7); a longer window is rejected.
+
+/** GET /api/v1/reports/uptime body: the per-device rows and the org mean uptime. */
+export interface UptimeReport { days: number; rows: UptimeRow[]; mean_uptime_pct: number; device_count: number }
+
+/** GET /api/v1/reports/disk body: one device's disk series plus min/max/latest. */
+export interface DiskReport {
+  device_id: number; hostname: string; org_id: number; org_name: string; days: number;
+  series: DiskPoint[]; min: number | null; max: number | null; latest: number | null;
+}
+
+/** GET /api/v1/reports/disk/top body: the devices with the highest latest disk usage. */
+export interface DiskTopReport { days: number; rows: DiskTopRow[] }
+
+/** Per-org bucket of the patch-compliance report. */
+export interface PatchComplianceOrg { org_id: number; org_name: string; counts: PatchCounts }
+
+/** GET /api/v1/reports/patch-compliance body: overall + per-org counts + per-device rows. */
+export interface PatchComplianceReport { overall: PatchCounts; orgs: PatchComplianceOrg[]; devices: PatchComplianceRow[] }
 
 export const ROLE_RANK: Record<Role, number> = { viewer: 0, operator: 1, admin: 2 };
 export const canOperate = (u: User | null): boolean => !!u && ROLE_RANK[u.role] >= ROLE_RANK.operator;

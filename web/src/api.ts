@@ -2,11 +2,12 @@
 // ?mock=1 in the URL every call is answered in-memory by mock.ts instead.
 import type {
   AgentRelease, Alert, AuditEntry, Automation, ChannelUpdate, Command, Device, DeviceDetail,
-  EnrollmentToken, EscalationPolicy, Heartbeat, Job, JobCreated, JobDetail, LibraryFile, LoginResult,
-  MaintenanceWindow, NewAutomation, NewChannel, NewCommand, NewDeploy, NewJob, NewPatch, NewPolicy,
-  NewRule, NewScript, NewShell, NewWindow, NotificationDelivery, NotifyChannel, NotifyRule, Org,
-  OrgAssignment, PolicyUpdate, PresetLibrary, RecoveryCodes, RemoteDesktopOpened, RuleUpdate,
-  RustdeskInfo, Script, ShellOpened, SoftwareSearchResult, Summary, TokenCreated, TotpSetup, User,
+  DiskReport, DiskTopReport, EnrollmentToken, EscalationPolicy, Heartbeat, Job, JobCreated, JobDetail,
+  LibraryFile, LoginResult, MaintenanceWindow, NewAutomation, NewChannel, NewCommand, NewDeploy, NewJob,
+  NewPatch, NewPolicy, NewRule, NewScript, NewShell, NewWindow, NotificationDelivery, NotifyChannel,
+  NotifyRule, Org, OrgAssignment, PatchComplianceReport, PolicyUpdate, PresetLibrary, RecoveryCodes,
+  RemoteDesktopOpened, RuleUpdate, RustdeskInfo, Script, ShellOpened, SoftwareSearchResult, Summary,
+  TokenCreated, TotpSetup, UptimeReport, User,
 } from './types.ts';
 import { mockRequest } from './mock.ts';
 
@@ -228,4 +229,22 @@ export const api = {
   updateAutomation: (id: number, a: NewAutomation) => request<{ automation: Automation }>('PUT', `/api/v1/automations/${id}`, a),
   setAutomationEnabled: (id: number, enabled: boolean) => request<void>('POST', `/api/v1/automations/${id}/enable`, { enabled }),
   deleteAutomation: (id: number) => request<void>('DELETE', `/api/v1/automations/${id}`),
+
+  // --- RP1 reports and exports (/api/v1/reports) ---
+  // Read-only, RS2 org-scoped. `days` is bounded by MSP_RETENTION_DAYS (default 7);
+  // a longer window is rejected with a clear message. uptime reports per-device
+  // check-in coverage + the org mean; disk the per-device series + min/max/latest
+  // (disk/top is the fleet view, highest latest usage first); patch-compliance the
+  // overall/per-org buckets + a per-device breakdown.
+  reportUptime: (f: { org_id?: number; days?: number } = {}) => request<UptimeReport>('GET', `/api/v1/reports/uptime${qs(f)}`),
+  reportDisk: (deviceId: number, days?: number) => request<DiskReport>('GET', `/api/v1/reports/disk${qs({ device_id: deviceId, days })}`),
+  reportDiskTop: (f: { org_id?: number; days?: number; limit?: number } = {}) => request<DiskTopReport>('GET', `/api/v1/reports/disk/top${qs(f)}`),
+  reportPatchCompliance: (orgId?: number) => request<PatchComplianceReport>('GET', `/api/v1/reports/patch-compliance${qs({ org_id: orgId })}`),
+  // The matching .csv exports. These are opened directly as a browser download (an
+  // <a download href>), so the server's Content-Disposition names the file; they are
+  // never routed through request()/the mock. Under ?mock=1 the dashboard builds the
+  // CSV client-side from the loaded report instead (lib/reports.ts).
+  reportUptimeCsvUrl: (f: { org_id?: number; days?: number } = {}) => `/api/v1/reports/uptime.csv${qs(f)}`,
+  reportDiskCsvUrl: (deviceId: number, days?: number) => `/api/v1/reports/disk.csv${qs({ device_id: deviceId, days })}`,
+  reportPatchComplianceCsvUrl: (orgId?: number) => `/api/v1/reports/patch-compliance.csv${qs({ org_id: orgId })}`,
 };

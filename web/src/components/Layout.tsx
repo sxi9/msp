@@ -17,6 +17,7 @@ const NAV: { hash: string; label: string; match: Route['name'][]; admin?: boolea
   { hash: '#/software', label: 'Software', match: ['software'], operator: true },
   { hash: '#/scripts', label: 'Scripts', match: ['scripts', 'jobs', 'job'], operator: true },
   { hash: '#/automations', label: 'Automations', match: ['automations'], operator: true },
+  { hash: '#/reports', label: 'Reports', match: ['reports'] },
   { hash: '#/audit', label: 'Audit', match: ['audit'] },
   { hash: '#/users', label: 'Users', match: ['users'], admin: true },
 ];

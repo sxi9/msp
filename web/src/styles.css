@@ -193,6 +193,30 @@ pre.out { margin: 0; padding: 8px 64px 8px 10px; background: var(--code-bg); bor
 .aut-form input[type="number"] { width: 90px; }
 .aut-form .muted code { overflow-wrap: anywhere; }
 
+/* RP1 reports: section heads, stat tiles and the hand-written disk chart. The
+   chart follows the device sparkline style (accent line over a subtle area, grid +
+   axis lines in the line colour) and is theme-aware through the CSS variables. */
+.section-head { margin-top: 24px; }
+.section-head h2 { margin: 0; }
+.report-subhead { font-size: 13px; margin: 16px 0 6px; color: var(--text); }
+.report-stats, .report-tiles { display: grid; gap: 10px; margin: 12px 0; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); }
+.stat-tile { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
+.stat-value { font-size: 22px; font-weight: 700; line-height: 1.1; }
+.stat-value.ok { color: var(--ok); }
+.stat-value.warn { color: var(--warn); }
+.stat-value.bad { color: var(--bad); }
+.stat-value.muted { color: var(--muted); }
+.stat-label { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .3px; margin-top: 2px; }
+.chart { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; margin: 12px 0; }
+.chart svg { width: 100%; height: auto; display: block; }
+.chart-line { fill: none; stroke: var(--accent); stroke-width: 1.5; vector-effect: non-scaling-stroke; }
+.chart-area { fill: var(--accent); opacity: .12; stroke: none; }
+.chart-grid { stroke: var(--line); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.chart-axis-line { stroke: var(--muted); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.chart-axis { fill: var(--muted); font-size: 11px; }
+.chart-axis-y { text-anchor: end; }
+.chart-axis-x-end { text-anchor: end; }
+
 .login { width: 320px; display: flex; flex-direction: column; gap: 12px; }
 .login label { flex-direction: column; align-items: stretch; gap: 4px; }
 
