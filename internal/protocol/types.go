@@ -172,6 +172,46 @@ const (
 	SoftwareSourceRegistry = "registry"
 )
 
+// Service/process watchlists and log forwarding (WL1, desktops only). A device
+// reports the running state of its applicable watchlist items in facts.services
+// (at most MaxServices entries); the server delivers the applicable items back
+// in the sync response's watch list (at most MaxWatchItems entries, cap ~200).
+// Forwarded log entries ride the sync request's logs field, bounded to
+// MaxLogEntries entries and (via boundSyncBody, trimmed before the software
+// inventory) MaxLogBytes of serialised JSON per sync. Every name/unit/level
+// field is length-bounded and control-character-free; the watch kind and the log
+// source are enum-checked. Android is excluded from watchlists and log
+// forwarding entirely.
+const (
+	// WatchKind* identify a watchlist item and a reported ServiceState: a system
+	// service (systemd unit / Windows service) or a running process/executable.
+	WatchKindService = "service"
+	WatchKindProcess = "process"
+
+	// LogSource* identify where a forwarded LogEntry came from: the systemd
+	// journal on Linux or the Windows Event Log.
+	LogSourceJournald = "journald"
+	LogSourceEventlog = "eventlog"
+
+	// MaxServices caps facts.services (a device's applicable watchlist state) and
+	// MaxWatchItems caps the sync response's watch list; both are the ~200-item
+	// cap the spec sets. MaxWatchNameLen bounds a unit/service/process name.
+	MaxServices     = 200
+	MaxWatchItems   = 200
+	MaxWatchNameLen = 256
+
+	// Forwarded logs (SyncRequest.Logs): at most MaxLogEntries entries per sync,
+	// each field length-bounded, and the whole batch kept under MaxLogBytes of
+	// serialised JSON by the agent (and by boundSyncBody, which trims logs before
+	// software). The agent advances its journal/event-log cursor only after the
+	// server acks the sync, so entries dropped to fit the budget are re-sent.
+	MaxLogEntries    = 1000
+	MaxLogUnitLen    = 256
+	MaxLogLevelLen   = 32
+	MaxLogMessageLen = 8192
+	MaxLogBytes      = 128 * 1024
+)
+
 // RustdeskURIPrefix is the URL scheme the official RustDesk client registers
 // (get_uri_prefix() in src/common.rs: "<app name lowercased>://"), and
 // RustdeskConnectAuthority the authority for a remote-control session
@@ -222,6 +262,37 @@ type SoftwareItem struct {
 	Source    string `json:"source"`
 }
 
+// ServiceState is one watched service/process's running state (WL1), reported by
+// a desktop agent in facts.services for the device's applicable watchlist. Kind
+// is service or process, Name the unit/service or executable name, Running its
+// observed state at the scan.
+type ServiceState struct {
+	Kind    string `json:"kind"`
+	Name    string `json:"name"`
+	Running bool   `json:"running"`
+}
+
+// WatchItem is one applicable watchlist entry the server delivers to the agent in
+// the sync response's watch list (WL1): the item's kind (service|process) and
+// name. The agent reports each item's running state in the next sync's
+// facts.services.
+type WatchItem struct {
+	Kind string `json:"kind"`
+	Name string `json:"name"`
+}
+
+// LogEntry is one forwarded log line a desktop agent sends in the sync request's
+// logs field (WL1): At the entry's timestamp, Source journald or eventlog, Unit
+// the systemd unit / Event Log provider ("" when none), Level the severity label
+// (journald priority or Event Log level) and Message the (bounded) log text.
+type LogEntry struct {
+	At      time.Time `json:"at"`
+	Source  string    `json:"source"`
+	Unit    string    `json:"unit"`
+	Level   string    `json:"level"`
+	Message string    `json:"message"`
+}
+
 // Facts is the slow-changing inventory sent at enrollment, on the first sync
 // after start and every 120th sync. Three keys are optional: RustdeskID, the
 // id of the locally installed RustDesk client (digits, <= MaxRustdeskIDLen),
@@ -242,6 +313,10 @@ type Facts struct {
 	RustdeskID   string         `json:"rustdesk_id,omitempty"`
 	Apps         []App          `json:"apps,omitempty"`
 	Software     []SoftwareItem `json:"software,omitempty"`
+	// Services is the running state of the device's applicable watchlist items
+	// (WL1), reported by a desktop agent on the facts cadence; at most MaxServices
+	// entries. Omitted when the device has no watchlist (and always on Android).
+	Services []ServiceState `json:"services,omitempty"`
 }
 
 // PatchUpdate is one pending OS update in a PatchReport (PM1): the package
@@ -339,6 +414,11 @@ type SyncRequest struct {
 	// it on the first sync after start, every 6 h and right after an install or
 	// scan, independently of Facts (patches scan slower). Android never sends it.
 	PatchReport *PatchReport `json:"patches,omitempty"`
+	// Logs (WL1) is the optional batch of forwarded log entries, bounded to
+	// MaxLogEntries entries and (by boundSyncBody) MaxLogBytes of serialised JSON;
+	// omitted when there is nothing to forward. Desktop only; Android never sends
+	// it. The agent advances its cursor only after the server acks this sync.
+	Logs []LogEntry `json:"logs,omitempty"`
 }
 
 // Command is one unit of work delivered to an agent inside a SyncResponse.
@@ -429,6 +509,11 @@ type SyncResponse struct {
 	Commands      []Command    `json:"commands"`
 	Rustdesk      *Rustdesk    `json:"rustdesk,omitempty"`
 	AgentUpdate   *AgentUpdate `json:"agent_update,omitempty"`
+	// Watch (WL1) is the device's applicable watchlist, delivered so the agent can
+	// report each item's running state in its next sync's facts.services; at most
+	// MaxWatchItems entries. Omitted when the device has no watchlist (and always
+	// on Android).
+	Watch []WatchItem `json:"watch,omitempty"`
 }
 
 // CommandResult is the body of POST /api/agent/v1/commands/{id}/result.
@@ -537,6 +622,119 @@ func (f Facts) Validate() error {
 	for i, it := range f.Software {
 		if err := it.Validate(); err != nil {
 			return fmt.Errorf("facts.software[%d].%w", i, err)
+		}
+	}
+	if len(f.Services) > MaxServices {
+		return fmt.Errorf("facts.services has %d entries, at most %d are accepted", len(f.Services), MaxServices)
+	}
+	for i, s := range f.Services {
+		if err := s.Validate(); err != nil {
+			return fmt.Errorf("facts.services[%d].%w", i, err)
+		}
+	}
+	return nil
+}
+
+// ValidWatchKind reports whether k is service or process (WL1).
+func ValidWatchKind(k string) bool {
+	return k == WatchKindService || k == WatchKindProcess
+}
+
+// ValidLogSource reports whether s is journald or eventlog (WL1).
+func ValidLogSource(s string) bool {
+	return s == LogSourceJournald || s == LogSourceEventlog
+}
+
+// hasControlBytes reports whether s contains a C0 control byte or DEL. A
+// watchlist name or a log unit/level is surfaced in alert messages and the
+// dashboard, so a newline or other control character is refused (the log Message
+// itself is free text and is not checked here).
+func hasControlBytes(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] < 0x20 || s[i] == 0x7f {
+			return true
+		}
+	}
+	return false
+}
+
+// Validate checks one reported service state; the error names the field without
+// the "facts.services[i]." prefix, which Facts.Validate adds.
+func (s ServiceState) Validate() error {
+	if !ValidWatchKind(s.Kind) {
+		return fmt.Errorf("kind must be one of %s|%s", WatchKindService, WatchKindProcess)
+	}
+	if s.Name == "" || len(s.Name) > MaxWatchNameLen {
+		return fmt.Errorf("name must be 1..%d bytes", MaxWatchNameLen)
+	}
+	if hasControlBytes(s.Name) {
+		return fmt.Errorf("name must not contain control characters")
+	}
+	return nil
+}
+
+// Validate checks one watch item (the server-sent watchlist entry); the error
+// names the field without the "watch[i]." prefix, which ValidateWatch adds.
+func (w WatchItem) Validate() error {
+	if !ValidWatchKind(w.Kind) {
+		return fmt.Errorf("kind must be one of %s|%s", WatchKindService, WatchKindProcess)
+	}
+	if w.Name == "" || len(w.Name) > MaxWatchNameLen {
+		return fmt.Errorf("name must be 1..%d bytes", MaxWatchNameLen)
+	}
+	if hasControlBytes(w.Name) {
+		return fmt.Errorf("name must not contain control characters")
+	}
+	return nil
+}
+
+// Validate checks one forwarded log entry; the error names the field without the
+// "logs[i]." prefix, which ValidateLogs adds.
+func (e LogEntry) Validate() error {
+	if !ValidLogSource(e.Source) {
+		return fmt.Errorf("source must be one of %s|%s", LogSourceJournald, LogSourceEventlog)
+	}
+	if len(e.Unit) > MaxLogUnitLen {
+		return fmt.Errorf("unit exceeds %d bytes", MaxLogUnitLen)
+	}
+	if len(e.Level) > MaxLogLevelLen {
+		return fmt.Errorf("level exceeds %d bytes", MaxLogLevelLen)
+	}
+	if len(e.Message) > MaxLogMessageLen {
+		return fmt.Errorf("message exceeds %d bytes", MaxLogMessageLen)
+	}
+	if hasControlBytes(e.Unit) || hasControlBytes(e.Level) {
+		return fmt.Errorf("unit and level must not contain control characters")
+	}
+	return nil
+}
+
+// ValidateLogs bounds a forwarded log batch (SyncRequest.Logs, WL1): at most
+// MaxLogEntries entries, each well-formed. The returned text is the 400
+// invalid_request detail and names the offending index. The server calls it on
+// the sync request beside Facts.Validate / PatchReport.Validate.
+func ValidateLogs(logs []LogEntry) error {
+	if len(logs) > MaxLogEntries {
+		return fmt.Errorf("logs has %d entries, at most %d are accepted", len(logs), MaxLogEntries)
+	}
+	for i, e := range logs {
+		if err := e.Validate(); err != nil {
+			return fmt.Errorf("logs[%d].%w", i, err)
+		}
+	}
+	return nil
+}
+
+// ValidateWatch bounds the watch list the server puts on a sync response (WL1):
+// at most MaxWatchItems entries, each well-formed. The server self-checks the
+// list it builds with this before sending, like AgentUpdate.Validate.
+func ValidateWatch(items []WatchItem) error {
+	if len(items) > MaxWatchItems {
+		return fmt.Errorf("watch has %d entries, at most %d are accepted", len(items), MaxWatchItems)
+	}
+	for i, w := range items {
+		if err := w.Validate(); err != nil {
+			return fmt.Errorf("watch[%d].%w", i, err)
 		}
 	}
 	return nil

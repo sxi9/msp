@@ -267,9 +267,14 @@ func Run(ctx context.Context, cfg Config, version string, log *slog.Logger) erro
 		// software inventory ride the same sync and together can exceed it, which
 		// would 400 the sync before the heartbeat is recorded. Trim the software
 		// inventory (never the heartbeat, metrics or patch report) to fit (SI1).
-		if dropped := boundSyncBody(&req); dropped > 0 {
-			log.Warn("installed-software inventory trimmed to fit the sync body budget",
-				"dropped", dropped, "kept", len(req.Facts.Software), "budget_bytes", protocol.AgentBodyBudget)
+		if logsDropped, swDropped := boundSyncBody(&req); logsDropped > 0 || swDropped > 0 {
+			softwareKept := 0
+			if req.Facts != nil {
+				softwareKept = len(req.Facts.Software)
+			}
+			log.Warn("sync body trimmed to fit the agent body budget",
+				"logs_dropped", logsDropped, "software_dropped", swDropped,
+				"logs_kept", len(req.Logs), "software_kept", softwareKept, "budget_bytes", protocol.AgentBodyBudget)
 		}
 
 		t0 := time.Now()

@@ -58,6 +58,8 @@ func TestFixturesRoundTrip(t *testing.T) {
 		{"sync_android_apps.json", &SyncRequest{}},
 		{"sync_software.json", &SyncRequest{}},
 		{"sync_patches.json", &SyncRequest{}},
+		{"sync_services.json", &SyncRequest{}},
+		{"sync_logs.json", &SyncRequest{}},
 		{"command_result.json", &CommandResult{}},
 		{"command_shell.json", &Command{}},
 		{"command_deploy.json", &Command{}},
@@ -220,6 +222,48 @@ func TestFixtureSemantics(t *testing.T) {
 	if sl.Facts.Software != nil || srd.Facts.Software != nil || sapps.Facts.Software != nil ||
 		el.Facts.Software != nil || ea.Facts.Software != nil {
 		t.Fatal("plain and apps fixtures must not carry software")
+	}
+
+	// Service/process watchlists (WL1): a desktop sync whose facts carry the
+	// running state of the device's watchlist items. The plain fixtures carry none.
+	var ssv SyncRequest
+	roundTrip(t, "sync_services.json", &ssv)
+	if ssv.Facts == nil || len(ssv.Facts.Services) != 3 || ssv.Facts.Validate() != nil {
+		t.Fatalf("sync_services facts: %+v", ssv.Facts)
+	}
+	svcs := ssv.Facts.Services
+	if svcs[0].Kind != WatchKindService || svcs[0].Name != "ssh.service" || !svcs[0].Running {
+		t.Fatalf("services[0] = %+v", svcs[0])
+	}
+	if svcs[1].Running || svcs[2].Kind != WatchKindProcess {
+		t.Fatalf("services = %+v", svcs)
+	}
+	if ssv.Facts.Software != nil || ssv.Facts.Apps != nil || len(ssv.Logs) != 0 {
+		t.Fatal("a services fixture must carry neither software, apps nor logs")
+	}
+
+	// Log forwarding (WL1): a desktop sync whose logs carry warning+ journal
+	// entries. The plain fixtures carry none.
+	var slg SyncRequest
+	roundTrip(t, "sync_logs.json", &slg)
+	if len(slg.Logs) != 3 || ValidateLogs(slg.Logs) != nil {
+		t.Fatalf("sync_logs logs: %+v", slg.Logs)
+	}
+	if slg.Logs[0].Source != LogSourceJournald || slg.Logs[0].Unit != "nginx.service" || slg.Logs[0].Level != "warning" {
+		t.Fatalf("logs[0] = %+v", slg.Logs[0])
+	}
+	if slg.Logs[2].Unit != "" || slg.Logs[0].At.Location().String() != "UTC" || slg.Logs[0].At.IsZero() {
+		t.Fatalf("logs timestamps/empty unit: %+v", slg.Logs)
+	}
+	if slg.Facts != nil {
+		t.Fatal("the logs fixture carries no facts")
+	}
+	if sl.Facts.Services != nil || srd.Facts.Services != nil || ssw.Facts.Services != nil ||
+		el.Facts.Services != nil || ea.Facts.Services != nil {
+		t.Fatal("plain fixtures must not carry services")
+	}
+	if len(sl.Logs) != 0 || len(sa.Logs) != 0 || len(ssw.Logs) != 0 || len(ssv.Logs) != 0 {
+		t.Fatal("plain fixtures must not carry logs")
 	}
 
 	var res CommandResult
@@ -629,6 +673,149 @@ func TestFactsSoftwareValidate(t *testing.T) {
 	out, _ = json.Marshal(SoftwareItem{Name: "openssl", Version: "3.0.2", Publisher: "Ubuntu", Source: SoftwareSourceDpkg})
 	if string(out) != `{"name":"openssl","version":"3.0.2","publisher":"Ubuntu","source":"dpkg"}` {
 		t.Fatalf("software JSON shape: %s", out)
+	}
+}
+
+func TestWatchlistsAndLogs(t *testing.T) {
+	// Enum helpers.
+	if !ValidWatchKind(WatchKindService) || !ValidWatchKind(WatchKindProcess) ||
+		ValidWatchKind("") || ValidWatchKind("daemon") {
+		t.Fatal("ValidWatchKind")
+	}
+	if !ValidLogSource(LogSourceJournald) || !ValidLogSource(LogSourceEventlog) ||
+		ValidLogSource("") || ValidLogSource("syslog") {
+		t.Fatal("ValidLogSource")
+	}
+
+	// facts.services: capped at MaxServices, each entry well-formed; Facts.Validate
+	// names the offending index like apps/software do.
+	okServices := []Facts{
+		{},
+		{Services: []ServiceState{}},
+		{Services: []ServiceState{{Kind: WatchKindService, Name: "ssh.service", Running: true}}},
+		{Services: []ServiceState{{Kind: WatchKindProcess, Name: strings.Repeat("p", MaxWatchNameLen)}}},
+		{Services: make([]ServiceState, MaxServices)},
+	}
+	for i := range okServices[4].Services {
+		okServices[4].Services[i] = ServiceState{Kind: WatchKindService, Name: "x"}
+	}
+	for i, f := range okServices {
+		if err := f.Validate(); err != nil {
+			t.Errorf("okServices[%d]: unexpected error %v", i, err)
+		}
+	}
+	tooManySvc := make([]ServiceState, MaxServices+1)
+	for i := range tooManySvc {
+		tooManySvc[i] = ServiceState{Kind: WatchKindService, Name: "x"}
+	}
+	badServices := []struct {
+		f    Facts
+		want string
+	}{
+		{Facts{Services: []ServiceState{{Kind: "daemon", Name: "x"}}}, "facts.services[0].kind must be one of service|process"},
+		{Facts{Services: []ServiceState{{Kind: WatchKindService, Name: "ok"}, {Kind: WatchKindService, Name: ""}}}, "facts.services[1].name must be 1..256"},
+		{Facts{Services: []ServiceState{{Kind: WatchKindService, Name: strings.Repeat("n", MaxWatchNameLen+1)}}}, "facts.services[0].name must be 1..256"},
+		{Facts{Services: []ServiceState{{Kind: WatchKindService, Name: "a\nb"}}}, "facts.services[0].name must not contain control characters"},
+		{Facts{Services: tooManySvc}, "facts.services has 201 entries, at most 200"},
+	}
+	for i, b := range badServices {
+		err := b.f.Validate()
+		if err == nil {
+			t.Errorf("badServices[%d]: expected error containing %q", i, b.want)
+			continue
+		}
+		if !strings.Contains(err.Error(), b.want) {
+			t.Errorf("badServices[%d]: error %q does not contain %q", i, err, b.want)
+		}
+	}
+
+	// ValidateLogs: capped at MaxLogEntries, each entry well-formed, index named.
+	entry := func(src, unit, level, msg string) LogEntry {
+		return LogEntry{At: time.Now().UTC(), Source: src, Unit: unit, Level: level, Message: msg}
+	}
+	okLogs := [][]LogEntry{
+		nil,
+		{},
+		{entry(LogSourceJournald, "nginx.service", "warning", "down")},
+		{entry(LogSourceEventlog, strings.Repeat("u", MaxLogUnitLen), strings.Repeat("l", MaxLogLevelLen), strings.Repeat("m", MaxLogMessageLen))},
+		{entry(LogSourceJournald, "", "", "multi\nline\nmessage is fine")},
+		make([]LogEntry, MaxLogEntries),
+	}
+	for i := range okLogs[5] {
+		okLogs[5][i] = entry(LogSourceJournald, "u", "info", "m")
+	}
+	for i, l := range okLogs {
+		if err := ValidateLogs(l); err != nil {
+			t.Errorf("okLogs[%d]: unexpected error %v", i, err)
+		}
+	}
+	tooManyLogs := make([]LogEntry, MaxLogEntries+1)
+	for i := range tooManyLogs {
+		tooManyLogs[i] = entry(LogSourceJournald, "u", "info", "m")
+	}
+	badLogs := []struct {
+		l    []LogEntry
+		want string
+	}{
+		{[]LogEntry{entry("syslog", "u", "warn", "m")}, "logs[0].source must be one of journald|eventlog"},
+		{[]LogEntry{entry(LogSourceJournald, "ok", "warn", "m"), entry(LogSourceJournald, strings.Repeat("u", MaxLogUnitLen+1), "warn", "m")}, "logs[1].unit exceeds 256"},
+		{[]LogEntry{entry(LogSourceJournald, "u", strings.Repeat("l", MaxLogLevelLen+1), "m")}, "logs[0].level exceeds 32"},
+		{[]LogEntry{entry(LogSourceJournald, "u", "warn", strings.Repeat("m", MaxLogMessageLen+1))}, "logs[0].message exceeds 8192"},
+		{[]LogEntry{entry(LogSourceJournald, "a\tb", "warn", "m")}, "logs[0].unit and level must not contain control characters"},
+		{tooManyLogs, "logs has 1001 entries, at most 1000"},
+	}
+	for i, b := range badLogs {
+		err := ValidateLogs(b.l)
+		if err == nil {
+			t.Errorf("badLogs[%d]: expected error containing %q", i, b.want)
+			continue
+		}
+		if !strings.Contains(err.Error(), b.want) {
+			t.Errorf("badLogs[%d]: error %q does not contain %q", i, err, b.want)
+		}
+	}
+
+	// ValidateWatch: the server-sent watchlist, capped at MaxWatchItems.
+	if err := ValidateWatch([]WatchItem{{Kind: WatchKindService, Name: "ssh.service"}, {Kind: WatchKindProcess, Name: "backup"}}); err != nil {
+		t.Fatalf("valid watch: %v", err)
+	}
+	if err := ValidateWatch([]WatchItem{{Kind: "x", Name: "a"}}); err == nil || !strings.Contains(err.Error(), "watch[0].kind must be one of service|process") {
+		t.Fatalf("bad watch kind: %v", err)
+	}
+	tooManyWatch := make([]WatchItem, MaxWatchItems+1)
+	for i := range tooManyWatch {
+		tooManyWatch[i] = WatchItem{Kind: WatchKindService, Name: "x"}
+	}
+	if err := ValidateWatch(tooManyWatch); err == nil || !strings.Contains(err.Error(), "watch has 201 entries, at most 200") {
+		t.Fatalf("too many watch items: %v", err)
+	}
+
+	// JSON shape: services/logs/watch are omitted when empty, and present with
+	// exactly their keys otherwise.
+	out, _ := json.Marshal(Facts{IPs: []string{}, Services: []ServiceState{}})
+	if strings.Contains(string(out), "services") {
+		t.Fatalf("empty services must be omitted: %s", out)
+	}
+	out, _ = json.Marshal(SyncRequest{IntervalS: 30, Metrics: Metrics{Disks: []Disk{}, IPs: []string{}}})
+	if strings.Contains(string(out), "logs") {
+		t.Fatalf("nil logs must be omitted: %s", out)
+	}
+	out, _ = json.Marshal(SyncResponse{PollIntervalS: 30, Commands: []Command{}})
+	if strings.Contains(string(out), "watch") {
+		t.Fatalf("empty watch must be omitted: %s", out)
+	}
+	out, _ = json.Marshal(ServiceState{Kind: WatchKindService, Name: "ssh.service", Running: true})
+	if string(out) != `{"kind":"service","name":"ssh.service","running":true}` {
+		t.Fatalf("ServiceState JSON shape: %s", out)
+	}
+	out, _ = json.Marshal(WatchItem{Kind: WatchKindProcess, Name: "backup-agent"})
+	if string(out) != `{"kind":"process","name":"backup-agent"}` {
+		t.Fatalf("WatchItem JSON shape: %s", out)
+	}
+	at := time.Date(2026, 11, 13, 10, 0, 1, 0, time.UTC)
+	out, _ = json.Marshal(LogEntry{At: at, Source: LogSourceJournald, Unit: "sshd.service", Level: "err", Message: "boom"})
+	if string(out) != `{"at":"2026-11-13T10:00:01Z","source":"journald","unit":"sshd.service","level":"err","message":"boom"}` {
+		t.Fatalf("LogEntry JSON shape: %s", out)
 	}
 }
 

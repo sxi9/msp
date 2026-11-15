@@ -1,0 +1,20 @@
+{
+  "agent_version": "0.1.0",
+  "interval_s": 30,
+  "wait_s": 25,
+  "uptime_s": 86400,
+  "metrics": {
+    "cpu_pct": 4.2,
+    "mem_total_mb": 16000,
+    "mem_used_mb": 5100,
+    "disks": [
+      {"mount": "/", "total_gb": 476.0, "used_gb": 180.2}
+    ],
+    "ips": ["10.0.0.12"]
+  },
+  "logs": [
+    {"at": "2026-11-13T09:59:58Z", "source": "journald", "unit": "nginx.service", "level": "warning", "message": "worker process 1234 exited on signal 11"},
+    {"at": "2026-11-13T10:00:01Z", "source": "journald", "unit": "sshd.service", "level": "err", "message": "error: kex_exchange_identification: client sent invalid protocol identifier"},
+    {"at": "2026-11-13T10:00:03Z", "source": "journald", "unit": "", "level": "crit", "message": "kernel: Out of memory: Killed process 4567 (chrome)"}
+  ]
+}

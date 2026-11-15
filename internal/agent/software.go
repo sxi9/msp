@@ -131,41 +131,94 @@ func capSoftwareBytesTo(items []protocol.SoftwareItem, limit int) []protocol.Sof
 }
 
 // boundSyncBody keeps a sync request's serialised body within the agent body
-// budget by trimming the installed-software inventory, the largest and least
-// time-sensitive part of a facts-cadence sync. Each facts field is already
-// bounded on its own (capSoftwareBytes, finalizePatchReport), but the server caps
-// the whole /api/agent/ request at protocol.MaxAgentBodyBytes, and on the facts
-// cadence the facts envelope, a fresh patch report (PM1) and a near-maximum
-// software list (SI1) ride the same sync and together can exceed it — which would
-// 400 the sync before the heartbeat is recorded, bricking the device's sync.
-// Trimming software (never the heartbeat, metrics or patch report) keeps the
-// device manageable. It returns the number of software entries dropped (0 when
-// nothing needed trimming).
-func boundSyncBody(req *protocol.SyncRequest) int {
-	if req.Facts == nil || len(req.Facts.Software) == 0 {
-		return 0
-	}
+// budget by trimming, in order, the forwarded logs (WL1) and then the
+// installed-software inventory (SI1) — the two largest and least time-sensitive
+// parts of a facts-cadence sync. Each field is already bounded on its own
+// (capSoftwareBytes, finalizePatchReport, the logs collector's own cap), but the
+// server caps the whole /api/agent/ request at protocol.MaxAgentBodyBytes, and on
+// the facts cadence the facts envelope, a fresh patch report, a near-maximum
+// software list and a batch of forwarded logs can ride the same sync and together
+// exceed it — which would 400 the sync before the heartbeat is recorded, bricking
+// the device's sync.
+//
+// Logs are trimmed first (they are re-sent next sync, since the agent advances its
+// journal/event-log cursor only after the server acks this sync), then software;
+// the heartbeat, metrics and the patch report are never touched. Both slices keep
+// their longest prefix that fits, so the agent must order its log batch
+// oldest-first for the dropped (newest) entries to be re-sent. It returns the
+// number of log and software entries dropped (0, 0 when nothing needed trimming).
+func boundSyncBody(req *protocol.SyncRequest) (logsDropped, swDropped int) {
 	if body, err := json.Marshal(req); err != nil || len(body) <= protocol.AgentBodyBudget {
-		return 0
+		return 0, 0
+	}
+
+	// (1) Trim the forwarded logs. Logs is SyncRequest's last field, so with it
+	// cleared (omitempty drops the key) the remaining headroom minus the "logs"
+	// key overhead is what the array may occupy.
+	if len(req.Logs) > 0 {
+		fullLogs := req.Logs
+		req.Logs = nil
+		base, err := json.Marshal(req)
+		if err != nil {
+			logsDropped = len(fullLogs) // leave logs dropped; the heartbeat still gets through
+		} else {
+			const logsKeyOverhead = len(`,"logs":`)
+			budget := protocol.AgentBodyBudget - len(base) - logsKeyOverhead
+			if budget < len("[]") {
+				logsDropped = len(fullLogs) // no room for any logs
+			} else {
+				kept := capLogBytesTo(fullLogs, budget)
+				req.Logs = kept
+				logsDropped = len(fullLogs) - len(kept)
+			}
+		}
+		if body, err := json.Marshal(req); err == nil && len(body) <= protocol.AgentBodyBudget {
+			return logsDropped, 0
+		}
+	}
+
+	// (2) Still over budget: trim the installed-software inventory. The array is
+	// Facts' last field, so it serialises as `,"software":[…]` inside the facts
+	// object.
+	if req.Facts == nil || len(req.Facts.Software) == 0 {
+		return logsDropped, 0
 	}
 	full := req.Facts.Software
-	// Measure the body without the software array: omitempty drops the key, so the
-	// remaining headroom (minus the "software" key overhead) is what the array may
-	// occupy. The array is Facts' last field, so it serialises as `,"software":[…]`
-	// appended inside the facts object.
 	req.Facts.Software = nil
 	base, err := json.Marshal(req)
 	if err != nil {
-		return len(full) // leave software dropped; the heartbeat still gets through
+		return logsDropped, len(full) // leave software dropped; the heartbeat still gets through
 	}
 	const softwareKeyOverhead = len(`,"software":`)
 	budget := protocol.AgentBodyBudget - len(base) - softwareKeyOverhead
 	if budget < len("[]") {
-		return len(full) // no room for any software
+		return logsDropped, len(full) // no room for any software
 	}
 	kept := capSoftwareBytesTo(full, budget)
 	req.Facts.Software = kept
-	return len(full) - len(kept)
+	return logsDropped, len(full) - len(kept)
+}
+
+// capLogBytesTo returns the longest prefix of entries whose serialised JSON array
+// stays within limit bytes, accounting for the enclosing brackets and the comma
+// separators so the bound matches the wire size (the capSoftwareBytesTo pattern).
+func capLogBytesTo(entries []protocol.LogEntry, limit int) []protocol.LogEntry {
+	total := len("[]")
+	for i, e := range entries {
+		b, err := json.Marshal(e)
+		if err != nil {
+			return entries[:i]
+		}
+		add := len(b)
+		if i > 0 {
+			add++ // the comma before this entry
+		}
+		if total+add > limit {
+			return entries[:i]
+		}
+		total += add
+	}
+	return entries
 }
 
 // cutBytes truncates s to at most max bytes without splitting a UTF-8 rune

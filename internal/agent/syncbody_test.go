@@ -80,7 +80,10 @@ func TestBoundSyncBodyWorstCase(t *testing.T) {
 	// (Count stays the pre-cap total, Updates stays capped to MaxPatchUpdates).
 	wantPatch := *req.PatchReport
 
-	dropped := boundSyncBody(&req)
+	logsDropped, dropped := boundSyncBody(&req)
+	if logsDropped != 0 {
+		t.Fatalf("no logs to trim in this case, logsDropped=%d", logsDropped)
+	}
 	if dropped <= 0 {
 		t.Fatalf("expected software to be trimmed, dropped=%d", dropped)
 	}
