@@ -1,0 +1,3 @@
+{"__CURSOR":"s=aa;i=1;b=bb","__REALTIME_TIMESTAMP":"1731664800000000","PRIORITY":"4","_SYSTEMD_UNIT":"nginx.service","SYSLOG_IDENTIFIER":"nginx","MESSAGE":"upstream timed out while connecting"}
+{"__CURSOR":"s=aa;i=2;b=bb","__REALTIME_TIMESTAMP":"1731664860000000","PRIORITY":"3","_SYSTEMD_UNIT":"nginx.service","MESSAGE":"worker process 1234 exited with code 1"}
+{"__CURSOR":"s=aa;i=3;b=bb","__REALTIME_TIMESTAMP":"1731664920000000","PRIORITY":"2","SYSLOG_IDENTIFIER":"kernel","MESSAGE":[72,105,32,116,104,101,114,101]}

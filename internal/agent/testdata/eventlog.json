@@ -1,0 +1,4 @@
+[
+  {"time":"2026-11-15T09:00:00.1234567Z","provider":"Application Error","level":"Error","message":"Faulting application app.exe, exception 0xc0000005"},
+  {"time":"2026-11-15T09:05:30.0000000Z","provider":"Service Control Manager","level":"Warning","message":"The MSP Agent service was slow to start"}
+]
