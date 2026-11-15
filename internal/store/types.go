@@ -96,10 +96,17 @@ type Device struct {
 	// sibling "software" array. SoftwareCheckedAt is nil until the first report.
 	SoftwareCount     int        `json:"software_count"`
 	SoftwareCheckedAt *time.Time `json:"software_checked_at"`
+	// Watched-service state (WL1), denormalised from the last facts.services by
+	// RecordServices. ServicesCheckedAt is nil until the first report; the full
+	// [{kind,name,running}] array is kept in ServicesJSON (not marshalled into
+	// DEVICE, like FactsJSON/SoftwareJSON) and the device-detail handler emits it
+	// as the sibling "services" array beside the device's applicable watchlist.
+	ServicesCheckedAt *time.Time `json:"services_checked_at"`
 	FactsJSON         string     `json:"-"`
 	LastMetricsJSON   string     `json:"-"`
 	PatchesJSON       string     `json:"-"`
 	SoftwareJSON      string     `json:"-"`
+	ServicesJSON      string     `json:"-"`
 }
 
 // Heartbeat is one throttled metrics sample (at most one per device per

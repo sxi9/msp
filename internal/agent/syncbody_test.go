@@ -130,8 +130,8 @@ func TestBoundSyncBodyLeavesSmallSyncUntouched(t *testing.T) {
 			},
 		},
 	}
-	if n := boundSyncBody(&small); n != 0 {
-		t.Fatalf("small facts sync must be left untouched, dropped=%d", n)
+	if logs, sw := boundSyncBody(&small); logs != 0 || sw != 0 {
+		t.Fatalf("small facts sync must be left untouched, logsDropped=%d swDropped=%d", logs, sw)
 	}
 	if len(small.Facts.Software) != 2 {
 		t.Fatalf("software must be preserved: %d entries", len(small.Facts.Software))
@@ -139,8 +139,8 @@ func TestBoundSyncBodyLeavesSmallSyncUntouched(t *testing.T) {
 
 	// A metrics-only sync (no facts, no software) is a no-op.
 	heartbeat := protocol.SyncRequest{AgentVersion: "1.2.3", Metrics: protocol.Metrics{MemTotalMB: 16000}}
-	if n := boundSyncBody(&heartbeat); n != 0 {
-		t.Fatalf("metrics-only sync must be a no-op, dropped=%d", n)
+	if logs, sw := boundSyncBody(&heartbeat); logs != 0 || sw != 0 {
+		t.Fatalf("metrics-only sync must be a no-op, logsDropped=%d swDropped=%d", logs, sw)
 	}
 
 	// A worst-case software list over the budget but with no patch report fits on
@@ -153,8 +153,8 @@ func TestBoundSyncBodyLeavesSmallSyncUntouched(t *testing.T) {
 	}
 	softwareOnly := protocol.SyncRequest{Facts: &protocol.Facts{Kernel: "x", Software: finalizeSoftware(rawSw)}}
 	kept := len(softwareOnly.Facts.Software)
-	if n := boundSyncBody(&softwareOnly); n != 0 {
-		t.Fatalf("software-only sync within budget must be untouched, dropped=%d", n)
+	if logs, sw := boundSyncBody(&softwareOnly); logs != 0 || sw != 0 {
+		t.Fatalf("software-only sync within budget must be untouched, logsDropped=%d swDropped=%d", logs, sw)
 	}
 	if len(softwareOnly.Facts.Software) != kept {
 		t.Fatalf("software-only list changed: %d -> %d", kept, len(softwareOnly.Facts.Software))

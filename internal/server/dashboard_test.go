@@ -72,12 +72,15 @@ func dashKeys(m map[string]any) []string {
 // device-detail response, not part of DEVICE. software_count and
 // software_checked_at (SI1) are denormalised likewise; the full list is a sibling
 // "software" array on the device-detail response, not part of DEVICE.
+// services_checked_at (WL1) is denormalised likewise; the full watched-service
+// state is a sibling "services" array on the device-detail response, not DEVICE.
 var dashDeviceKeys = []string{
 	"agent_version", "arch", "battery_charging", "battery_pct", "can_run_commands", "cpu_pct",
 	"device_uid", "disk_used_pct", "enrolled_at", "hostname", "id", "interval_s", "last_ip",
 	"last_seen_at", "mem_used_pct", "open_alerts", "org_id", "org_name", "os_version",
 	"patches_checked_at", "pending_patches", "platform", "reboot_required", "revoked",
-	"rustdesk_id", "security_patches", "software_checked_at", "software_count", "status", "uptime_s",
+	"rustdesk_id", "security_patches", "services_checked_at", "software_checked_at", "software_count",
+	"status", "uptime_s",
 }
 
 func TestDashboardAuthAndRoles(t *testing.T) {

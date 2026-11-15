@@ -21,39 +21,41 @@ import (
 // Config is the server's runtime configuration. cmd/msp-server fills it from
 // environment variables and flags; tests fill it directly.
 type Config struct {
-	Listen        string // address for http.Server (default ":8080")
-	BaseURL       string // public base URL used in install one-liners; "" = derive from the request
-	TLSCert       string // PEM certificate path; TLS is served when TLSCert and TLSKey are both set
-	TLSKey        string
-	AgentDir      string        // directory served at /dl/ ("" = disabled)
-	FilesDir      string        // directory holding the uploaded file library (SD1); files live at <FilesDir>/<id>
-	MaxFileMB     int           // upload size cap in MiB for the file library (SD1; default 200)
-	PresetsPath   string        // JSON command preset library replacing the builtin set ("" = builtin); re-read when its mtime changes
-	RustdeskHost  string        // self-hosted RustDesk ID/relay server, bare hostname or IP (RD1); enabled only together with RustdeskKey
-	RustdeskKey   string        // the relay's public key (content of id_ed25519.pub)
-	SecureCookies bool          // force the Secure flag on the session cookie (behind a TLS proxy)
-	TrustProxy    bool          // honour the first X-Forwarded-For address
-	Version       string        // reported by /api/agent/v1/ping
-	RetentionDays int           // heartbeat retention for the hourly pruner
-	SampleEvery   time.Duration // minimum spacing of heartbeat rows per device
-	LostGrace     time.Duration // sent_at + timeout_s + LostGrace < now => command lost
-	OfflineGrace  time.Duration // reserved for a per-deployment offline margin (0 = protocol default)
-	DiskPct       float64       // disk_full threshold (>=)
-	MemPct        float64       // memory_high threshold (>=)
-	BatteryPct    int           // battery_low threshold (<=, not charging)
+	Listen           string // address for http.Server (default ":8080")
+	BaseURL          string // public base URL used in install one-liners; "" = derive from the request
+	TLSCert          string // PEM certificate path; TLS is served when TLSCert and TLSKey are both set
+	TLSKey           string
+	AgentDir         string        // directory served at /dl/ ("" = disabled)
+	FilesDir         string        // directory holding the uploaded file library (SD1); files live at <FilesDir>/<id>
+	MaxFileMB        int           // upload size cap in MiB for the file library (SD1; default 200)
+	PresetsPath      string        // JSON command preset library replacing the builtin set ("" = builtin); re-read when its mtime changes
+	RustdeskHost     string        // self-hosted RustDesk ID/relay server, bare hostname or IP (RD1); enabled only together with RustdeskKey
+	RustdeskKey      string        // the relay's public key (content of id_ed25519.pub)
+	SecureCookies    bool          // force the Secure flag on the session cookie (behind a TLS proxy)
+	TrustProxy       bool          // honour the first X-Forwarded-For address
+	Version          string        // reported by /api/agent/v1/ping
+	RetentionDays    int           // heartbeat retention for the hourly pruner
+	LogRetentionDays int           // forwarded-log (WL1 device_logs) retention for the hourly pruner
+	SampleEvery      time.Duration // minimum spacing of heartbeat rows per device
+	LostGrace        time.Duration // sent_at + timeout_s + LostGrace < now => command lost
+	OfflineGrace     time.Duration // reserved for a per-deployment offline margin (0 = protocol default)
+	DiskPct          float64       // disk_full threshold (>=)
+	MemPct           float64       // memory_high threshold (>=)
+	BatteryPct       int           // battery_low threshold (<=, not charging)
 }
 
 // DefaultConfig returns the phase-1 defaults from docs/PLAN.md.
 func DefaultConfig() Config {
 	return Config{
-		Listen:        ":8080",
-		RetentionDays: 7,
-		MaxFileMB:     200,
-		SampleEvery:   60 * time.Second,
-		LostGrace:     5 * time.Minute,
-		DiskPct:       90,
-		MemPct:        95,
-		BatteryPct:    15,
+		Listen:           ":8080",
+		RetentionDays:    7,
+		LogRetentionDays: 3,
+		MaxFileMB:        200,
+		SampleEvery:      60 * time.Second,
+		LostGrace:        5 * time.Minute,
+		DiskPct:          90,
+		MemPct:           95,
+		BatteryPct:       15,
 	}
 }
 
@@ -95,6 +97,9 @@ func New(st *store.Store, cfg Config, log *slog.Logger) *Server {
 	}
 	if cfg.RetentionDays <= 0 {
 		cfg.RetentionDays = def.RetentionDays
+	}
+	if cfg.LogRetentionDays <= 0 {
+		cfg.LogRetentionDays = def.LogRetentionDays
 	}
 	if cfg.MaxFileMB <= 0 {
 		cfg.MaxFileMB = def.MaxFileMB

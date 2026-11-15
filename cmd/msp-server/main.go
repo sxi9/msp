@@ -167,6 +167,7 @@ func cmdServe(args []string, stderr io.Writer, log *slog.Logger) int {
 	trustProxy := fs.Bool("trust-proxy", envBool("MSP_TRUST_PROXY"), "honour the first X-Forwarded-For (MSP_TRUST_PROXY)")
 	agentDir := fs.String("agent-dir", envStr("MSP_AGENT_DIR", ""), "directory served at /dl/ (MSP_AGENT_DIR)")
 	retention := fs.Int("retention-days", envInt("MSP_RETENTION_DAYS", def.RetentionDays), "heartbeat retention in days (MSP_RETENTION_DAYS)")
+	logRetention := fs.Int("log-retention-days", envInt("MSP_LOG_RETENTION_DAYS", def.LogRetentionDays), "forwarded-log retention in days (MSP_LOG_RETENTION_DAYS)")
 	presets := fs.String("presets", envStr("MSP_PRESETS", ""), "JSON command preset library, empty = builtin set (MSP_PRESETS)")
 	rustdeskHost := fs.String("rustdesk-host", envStr("MSP_RUSTDESK_HOST", ""), "self-hosted RustDesk ID/relay server, bare hostname or IP (MSP_RUSTDESK_HOST)")
 	rustdeskKey := fs.String("rustdesk-key", envStr("MSP_RUSTDESK_KEY", ""), "the RustDesk server's public key, content of id_ed25519.pub (MSP_RUSTDESK_KEY)")
@@ -185,6 +186,10 @@ func cmdServe(args []string, stderr io.Writer, log *slog.Logger) int {
 	}
 	if *retention < 1 {
 		fmt.Fprintln(stderr, "msp-server serve: --retention-days must be >= 1")
+		return exitUsage
+	}
+	if *logRetention < 1 {
+		fmt.Fprintln(stderr, "msp-server serve: --log-retention-days must be >= 1")
 		return exitUsage
 	}
 	if *maxFileMB < 1 {
@@ -224,6 +229,7 @@ func cmdServe(args []string, stderr io.Writer, log *slog.Logger) int {
 	cfg.TrustProxy = *trustProxy
 	cfg.AgentDir = *agentDir
 	cfg.RetentionDays = *retention
+	cfg.LogRetentionDays = *logRetention
 	cfg.PresetsPath = *presets
 	cfg.RustdeskHost = *rustdeskHost
 	cfg.RustdeskKey = *rustdeskKey
